@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Xml;
@@ -157,7 +158,6 @@ public class DonJEnemySpawnerTests
         Assert.AreEqual(10000, GetStaticFieldValue<int>("EnemyRaidVehicleRescueCooldownMs"));
         Assert.AreEqual(1800, GetStaticFieldValue<int>("EnemyRaidPostCombatVehicleCleanupGraceMs"));
         Assert.AreEqual(45000, GetStaticFieldValue<int>("EnemyRaidVisibleVehicleCleanupMaxMs"));
-        Assert.AreEqual(1800, GetStaticFieldValue<int>("EnemyRaidPlayerDeathRestoreDelayMs"));
         Assert.AreEqual(72.0f, GetStaticFieldValue<float>("EnemyRaidSpawnMinDistance"), 0.001f);
         Assert.AreEqual(130.0f, GetStaticFieldValue<float>("EnemyRaidSpawnMaxDistance"), 0.001f);
         Assert.AreEqual(82.0f, GetStaticFieldValue<float>("EnemyRaidRelocationMinDistance"), 0.001f);
@@ -170,7 +170,6 @@ public class DonJEnemySpawnerTests
         Assert.AreEqual(230.0f, GetStaticFieldValue<float>("EnemyRaidTooFarVehicleDistance"), 0.001f);
         Assert.AreEqual(135.0f, GetStaticFieldValue<float>("EnemyRaidPostCombatVehicleCleanupDistance"), 0.001f);
         Assert.AreEqual(260.0f, GetStaticFieldValue<float>("EnemyRaidPostCombatVehicleForceCleanupDistance"), 0.001f);
-        Assert.AreEqual(260.0f, GetStaticFieldValue<float>("EnemyRaidRebuildAfterDeathDistance"), 0.001f);
         Assert.AreEqual(GetStaticFieldValue<int>("ProfessionalDrivingStyle"), GetStaticFieldValue<int>("EnemyRaidDrivingStyle"));
         Assert.AreEqual(unchecked((int)0xC6EE6B4C), GetStaticFieldValue<int>("EnemyRaidFullAutoFiringPattern"));
 
@@ -795,6 +794,21 @@ public class DonJEnemySpawnerTests
     }
 
     [TestMethod]
+    public void SourceFile_RegularNpcCombatLetsGameManageWeaponDistance()
+    {
+        string source = File.ReadAllText(GetSourceFilePath());
+        string combatBlock = ExtractSourceSection(
+            source,
+            "private void ActivateCombatAgainstTarget(SpawnedNpc npc, Ped target, bool stationary)",
+            "private void StartOrContinuePatrol(SpawnedNpc npc, bool forceNewTarget)");
+
+        StringAssert.Contains(combatBlock, "Hash.TASK_COMBAT_PED");
+        Assert.IsFalse(combatBlock.Contains("Hash.TASK_GO_TO_ENTITY"), "Le combat standard ne doit plus forcer une approche avant tir selon l'arme.");
+        Assert.IsFalse(source.Contains("ShouldApproachBeforeShooting("), "Le garde-fou d'approche par arme doit rester supprime.");
+        Assert.IsFalse(source.Contains("DesiredApproachDistanceForWeapon("), "Les distances custom pistolet/SMG ne doivent plus remplacer l'IA GTA.");
+    }
+
+    [TestMethod]
     public void SourceFile_CartelHandleCleanupRemovesCombatTrackersForNpcHandles()
     {
         string source = File.ReadAllText(GetSourceFilePath());
@@ -966,7 +980,8 @@ public class DonJEnemySpawnerTests
         StringAssert.Contains(contactBlock, "ToggleCartelCall();");
         StringAssert.Contains(contactBlock, "bool rPressed = Game.IsKeyPressed(Keys.R);");
         StringAssert.Contains(contactBlock, "CallEnemyRaid();");
-        StringAssert.Contains(contactBlock, "bool lPressed = Game.IsKeyPressed(Keys.L);");
+        StringAssert.Contains(contactBlock, "bool lPressedNow = Game.IsKeyPressed(Keys.L);");
+        StringAssert.Contains(contactBlock, "bool lPressed = lPressedNow;");
         StringAssert.Contains(contactBlock, "ToggleHighSecurityEscortCall();");
         StringAssert.Contains(overlayBlock, "DrawText(\"Contacts téléphone\"");
         StringAssert.Contains(overlayBlock, "DrawText(CartelContactName");
@@ -1081,11 +1096,11 @@ public class DonJEnemySpawnerTests
         StringAssert.Contains(combatBlock, "StartHighSecurityEscortOnFootCombat(guard.Ped, threat);");
         StringAssert.Contains(combatBlock, "Hash.TASK_DRIVE_BY");
         StringAssert.Contains(combatBlock, "Hash.TASK_SHOOT_AT_ENTITY");
-        StringAssert.Contains(combatBlock, "_highSecurityEscortDestinationActive && IsPlayerInHighSecurityEscortLimousine(player)");
+        StringAssert.Contains(combatBlock, "EnsureHighSecurityEscortCombatEscapeRoute(player, limousine)");
         StringAssert.Contains(combatBlock, "CommandHighSecurityEscortVehicleForCombat(vehicle, threat, player);");
-        StringAssert.Contains(cabinBlock, "IsHighSecurityEscortGuardCombatFootLocked(npc.Ped)");
+        Assert.IsFalse(cabinBlock.Contains("IsHighSecurityEscortGuardCombatFootLocked(npc.Ped)"), "Les hommes de la limousine ne doivent plus rester dehors a cause d'un lock combat.");
         StringAssert.Contains(cabinBlock, "ConfigureHighSecurityEscortDriver(npc.Ped, combatActive);");
-        StringAssert.Contains(returnBlock, "IsHighSecurityEscortGuardCombatFootLocked(npc.Ped)");
+        StringAssert.Contains(returnBlock, "!force && IsHighSecurityEscortGuardCombatFootLocked(npc.Ped)");
         StringAssert.Contains(returnBlock, "CommandHighSecurityEscortGuardEnterAssignedVehicle(");
     }
 
@@ -1109,34 +1124,307 @@ public class DonJEnemySpawnerTests
             escortSource,
             "private void ForceDeleteHighSecurityEscortEntitiesAndRecords(bool deleteEntities)",
             "private void RemoveHighSecurityEscortPlacedVehicleRecord(int handle, bool deleteEntity)");
+        string roadClearanceBlock = ExtractSourceSection(
+            escortSource,
+            "private float ScoreHighSecurityEscortRoadClearance(Vector3 position, Vector3 direction)",
+            "private static float HeadingFromDirection(Vector3 direction)");
 
         StringAssert.Contains(convoyBlock, "ShouldSkipHighSecurityEscortRepeatedVehicleOrder(");
         StringAssert.Contains(convoyBlock, "RecordHighSecurityEscortVehicleOrderTarget(limousine, target);");
+        StringAssert.Contains(convoyBlock, "ResolveHighSecurityEscortDriveTargetOnRoad(limousine, target, combatMode);");
+        StringAssert.Contains(convoyBlock, "IsHighSecurityEscortVehicleOrderCooldownActive(limousine)");
         StringAssert.Contains(convoyBlock, "CalculateHighSecurityEscortTaxiSpeed(limousine, target, combatMode)");
         StringAssert.Contains(convoyBlock, "float backDistance = GetHighSecurityEscortFormationBackDistance(role, combatMode);");
-        StringAssert.Contains(convoyBlock, "return targetVehicle.Position - forward * backDistance;");
+        StringAssert.Contains(convoyBlock, "IsHighSecurityEscortVehicleOrderCooldownActive(vehicle)");
+        StringAssert.Contains(convoyBlock, "ResolveHighSecurityEscortCachedFormationTarget(");
+        StringAssert.Contains(convoyBlock, "_highSecurityEscortCachedFormationTargets.TryGetValue(handle, out cached)");
+        StringAssert.Contains(convoyBlock, "HighSecurityEscortFormationTargetCacheMs");
+        StringAssert.Contains(convoyBlock, "HighSecurityEscortFormationTargetCacheReuseDistance");
+        StringAssert.Contains(convoyBlock, "ShouldUseHighSecurityEscortDirectFormationCorrection(");
+        StringAssert.Contains(convoyBlock, "CalculateHighSecurityEscortFormationDriveSpeed(");
+        StringAssert.Contains(convoyBlock, "directCorrection");
+        StringAssert.Contains(convoyBlock, "Hash.TASK_VEHICLE_ESCORT");
+        StringAssert.Contains(convoyBlock, "combatMode ? 18.0f : 24.0f");
+        StringAssert.Contains(convoyBlock, "HighSecurityEscortConvoySoftCatchupGap");
+        StringAssert.Contains(convoyBlock, "HighSecurityEscortConvoyHardCatchupGap");
         StringAssert.Contains(convoyBlock, "IsHighSecurityEscortRushModeActive(combatMode)");
         StringAssert.Contains(convoyBlock, "GetHighSecurityEscortFormationSpacing(role, combatMode)");
         StringAssert.Contains(convoyBlock, "GetHighSecurityEscortDrivingStyle(combatMode)");
         StringAssert.Contains(convoyBlock, "IsHighSecurityEscortVehicleInSoftRecovery(vehicle)");
+        StringAssert.Contains(escortSource, "HighSecurityEscortMajorRoadSearchAttempts = 14");
+        StringAssert.Contains(escortSource, "HighSecurityEscortMajorRoadNodeProbeCount = 2");
+        StringAssert.Contains(escortSource, "HighSecurityEscortPickupRoadCacheMs = 6200");
+        StringAssert.Contains(escortSource, "HighSecurityEscortPickupRoadMaxCandidateChecks = 28");
+        StringAssert.Contains(escortSource, "TryResolveHighSecurityEscortRoadSlot(");
+        StringAssert.Contains(escortSource, "ScoreHighSecurityEscortRoadClearance(");
+        StringAssert.Contains(escortSource, "ScoreHighSecurityEscortNodeProbe(");
+        StringAssert.Contains(escortSource, "EnsureHighSecurityEscortPickupRoadCache(");
+        StringAssert.Contains(escortSource, "CacheHighSecurityEscortArrivalTargets(");
+        StringAssert.Contains(escortSource, "TryFindHighSecurityEscortPickupRoadLine(");
+        StringAssert.Contains(escortSource, "TryEstimateHighSecurityEscortRoadDirectionFast(");
+        StringAssert.Contains(escortSource, "_highSecurityEscortPickupRoadCacheUntil = Game.GameTime + HighSecurityEscortPickupRoadCacheMs;");
+        StringAssert.Contains(escortSource, "_highSecurityEscortCachedArrivalTargets = new Vector3[5];");
+        Assert.IsFalse(roadClearanceBlock.Contains("World.Raycast"), "Le scoring route rapide ne doit plus faire de raycast pendant l'arrivee.");
+        Assert.IsFalse(escortSource.Contains("HasHighSecurityEscortStaticObstacle("), "La methode obstacle statique inutilisee doit rester supprimee.");
         Assert.IsFalse(convoyBlock.Contains("right * side"), "Les Baller doivent rester en file taxi et ne plus forcer une formation gauche/droite.");
         Assert.IsFalse(convoyBlock.Contains("targetVehicle.Position + forward * 18.0f"), "Les Baller ne doivent plus viser une position devant la limousine.");
         StringAssert.Contains(standbyBlock, "ContinueHighSecurityVehicleNearPlayer(vehicle, player, HighSecurityEscortArrivalDriveSpeed, 5.0f, false);");
         StringAssert.Contains(standbyBlock, "MaybeAnnounceHighSecurityEscortArrival(player);");
         StringAssert.Contains(rescueBlock, "TrySoftUnstuckHighSecurityEscortVehicle(vehicle, seedIndex)");
-        StringAssert.Contains(rescueBlock, "Hash.TASK_VEHICLE_TEMP_ACTION");
+        StringAssert.Contains(rescueBlock, "TryRoadRejoinHighSecurityEscortVehicle(vehicle, seedIndex)");
+        StringAssert.Contains(rescueBlock, "TryRecoverLostHighSecurityEscortVehicleBehindLimousine(");
+        StringAssert.Contains(rescueBlock, "NativeTaskVehicleTempAction");
         StringAssert.Contains(rescueBlock, "HasHighSecurityEscortObstacleAhead(vehicle, HighSecurityEscortObstacleProbeDistance)");
         StringAssert.Contains(rescueBlock, "_highSecurityEscortLastVehicleOrderTarget[handle] = Vector3.Zero;");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortLastVehicleOrderTarget.Clear();");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortGuardCombatFootLockUntil.Clear();");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortVehicleStuckSinceAt.Clear();");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortLastVehicleSoftUnstuckAt.Clear();");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortLastVehicleRoadRejoinAt.Clear();");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortVehicleRecoveryUntil.Clear();");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortCachedFormationTargets.Clear();");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortCachedFormationTargetUntil.Clear();");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortPickupRoadCacheUntil = 0;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortPickupRoadFailedUntil = 0;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortCachedPickupRoadPoint = Vector3.Zero;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortCachedPickupDirection = Vector3.Zero;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortCachedPickupPlayerPosition = Vector3.Zero;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortCachedArrivalTargets = null;");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortNextCombatOrderAt.Clear();");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortNextGuardPassiveMaintenanceAt.Clear();");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortNextGuardMobilityOrderAt.Clear();");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortPickupParked = false;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortRoutePaused = false;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortStopKeyLatch = false;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortEmergencyFleeDestination = Vector3.Zero;");
+        StringAssert.Contains(cleanupBlock, "_highSecurityEscortEmergencyFleeUntil = 0;");
         StringAssert.Contains(cleanupBlock, "ClearCachedHighSecurityEscortThreat();");
         StringAssert.Contains(cleanupBlock, "_highSecurityEscortLastVehicleOrderTarget.Remove(handle);");
+    }
+
+    [TestMethod]
+    public void SourceFiles_DoNotContainMojibakeCharacters()
+    {
+        string mainSource = File.ReadAllText(GetSourceFilePath());
+        string escortSource = File.ReadAllText(GetHighSecurityEscortSourceFilePath());
+
+        Assert.IsFalse(mainSource.Contains("Ã"), "Le fichier principal contient du texte UTF-8 corrompu.");
+        Assert.IsFalse(escortSource.Contains("Ã"), "Le fichier escorte contient du texte UTF-8 corrompu.");
+    }
+
+    [TestMethod]
+    public void SourceFile_HighSecurityEscortVehiclesAreRuntimeOnlyAndNotSaved()
+    {
+        string mainSource = File.ReadAllText(GetSourceFilePath());
+        string escortSource = File.ReadAllText(GetHighSecurityEscortSourceFilePath());
+
+        StringAssert.Contains(mainSource, "public bool PersistentInSave = true;");
+        StringAssert.Contains(mainSource, "bool persistentInSave = true");
+        StringAssert.Contains(mainSource, "PersistentInSave = persistentInSave");
+        StringAssert.Contains(mainSource, "if (!placed.PersistentInSave)");
+
+        StringAssert.Contains(
+            escortSource,
+            "RegisterPlacedVehicle(limousine, limoIdentity, limoSlot.Position, limoSlot.Heading, false, false, false);");
+
+        StringAssert.Contains(
+            escortSource,
+            "RegisterPlacedVehicle(baller, ballerIdentity, slot.Position, slot.Heading, false, false, false);");
+    }
+
+    [TestMethod]
+    public void SourceFile_HighSecurityEscortRequiresLimousineDriverBeforeActivation()
+    {
+        string escortSource = File.ReadAllText(GetHighSecurityEscortSourceFilePath());
+
+        string spawnBlock = ExtractSourceSection(
+            escortSource,
+            "private void SpawnHighSecurityEscortConvoy()",
+            "private Vehicle CreateHighSecurityEscortVehicle");
+
+        StringAssert.Contains(escortSource, "private bool HasLiveHighSecurityEscortDriver(Vehicle vehicle)");
+        StringAssert.Contains(spawnBlock, "SpawnHighSecurityEscortGuardIntoVehicle(limousine, -1, createdGuards)");
+        StringAssert.Contains(spawnBlock, "!HasLiveHighSecurityEscortDriver(limousine)");
+        StringAssert.Contains(spawnBlock, "_highSecurityEscortActive = true");
+
+        int driverCheckIndex = spawnBlock.IndexOf("!HasLiveHighSecurityEscortDriver(limousine)", StringComparison.Ordinal);
+        int activeIndex = spawnBlock.IndexOf("_highSecurityEscortActive = true", StringComparison.Ordinal);
+
+        Assert.IsTrue(
+            driverCheckIndex >= 0 && activeIndex > driverCheckIndex,
+            "Le chauffeur limousine doit être validé avant l'activation de l'escorte.");
+    }
+
+    [TestMethod]
+    public void SourceFile_HighSecurityEscortConsumesLKeyUntilRelease()
+    {
+        string mainSource = File.ReadAllText(GetSourceFilePath());
+        string escortSource = File.ReadAllText(GetHighSecurityEscortSourceFilePath());
+
+        string phoneBlock = ExtractSourceSection(
+            mainSource,
+            "private void UpdateCartelPhoneContact(Ped player)",
+            "private bool IsPlayerPhoneOpen(Ped player)");
+
+        string routeBlock = ExtractSourceSection(
+            escortSource,
+            "private void HandleHighSecurityEscortRouteValidationInput(Ped player)",
+            "private void HandleHighSecurityEscortRushInput(Ped player)");
+
+        StringAssert.Contains(escortSource, "private bool _highSecurityEscortLCommandConsumedUntilRelease;");
+        StringAssert.Contains(phoneBlock, "_highSecurityEscortLCommandConsumedUntilRelease = false;");
+        StringAssert.Contains(phoneBlock, "!_highSecurityEscortLCommandConsumedUntilRelease");
+        StringAssert.Contains(phoneBlock, "_highSecurityEscortLCommandConsumedUntilRelease = true;");
+        StringAssert.Contains(routeBlock, "_highSecurityEscortLCommandConsumedUntilRelease");
+        StringAssert.Contains(routeBlock, "_highSecurityEscortLCommandConsumedUntilRelease = true;");
+    }
+
+    [TestMethod]
+    public void SourceFile_HighSecurityEscortFreeSeatHelperCanRejectDriverSeat()
+    {
+        string escortSource = File.ReadAllText(GetHighSecurityEscortSourceFilePath());
+
+        StringAssert.Contains(
+            escortSource,
+            "private int FindFreeHighSecurityEscortSeatForGuard(Vehicle vehicle, bool allowDriverSeat)");
+
+        StringAssert.Contains(
+            escortSource,
+            "if (allowDriverSeat && IsSeatFreeSafe(vehicle, -1))");
+
+        StringAssert.Contains(
+            escortSource,
+            "FindFreeHighSecurityEscortSeatForGuard(limousine, false)");
+
+        StringAssert.Contains(
+            escortSource,
+            "bool guardWasDriver = npc.BodyguardIsDriver || npc.BodyguardAssignedSeat == -1;");
+    }
+
+    [TestMethod]
+    public void SourceFile_HighSecurityEscortDismissesWhenLimousineIsUnavailable()
+    {
+        string escortSource = File.ReadAllText(GetHighSecurityEscortSourceFilePath());
+
+        StringAssert.Contains(escortSource, "private bool _highSecurityEscortLimousineLostAnnounced;");
+        StringAssert.Contains(escortSource, "private bool EnsureHighSecurityEscortLimousineAvailable()");
+        StringAssert.Contains(escortSource, "private void HandleHighSecurityEscortLimousineUnavailable()");
+        StringAssert.Contains(escortSource, "DismissHighSecurityEscort(false);");
+        StringAssert.Contains(escortSource, "Escorte haute sécurité : limousine perdue ou détruite, repli du convoi.");
+    }
+
+    [TestMethod]
+    public void SourceFile_HighSecurityEscortParkedPickupPauseAndCombatEscapeStayBounded()
+    {
+        string escortSource = File.ReadAllText(GetHighSecurityEscortSourceFilePath());
+        string stateBlock = ExtractSourceSection(
+            escortSource,
+            "private void UpdateHighSecurityEscortState(Ped player)",
+            "private void AssistPlayerEnterHighSecurityLimousine(Ped player)");
+        string stopInputBlock = ExtractSourceSection(
+            escortSource,
+            "private void HandleHighSecurityEscortImmediateStopInput(Ped player)",
+            "private void ResetHighSecurityEscortVehicleOrderCache()");
+        string assistBlock = ExtractSourceSection(
+            escortSource,
+            "private void AssistPlayerEnterHighSecurityLimousine(Ped player)",
+            "private void DisableHighSecurityEscortDefaultVehicleEntryControl()");
+        string standbyBlock = ExtractSourceSection(
+            escortSource,
+            "private void UpdateHighSecurityEscortStandby(Ped player)",
+            "private void UpdateHighSecurityEscortPlayerVehicleFollow(Ped player)");
+        string footBlock = ExtractSourceSection(
+            escortSource,
+            "private void UpdateHighSecurityEscortFootFollow(Ped player)",
+            "private void UpdateHighSecurityEscortParkedPickupFootSupport(Ped player, Vehicle limousine)");
+        string parkedFootBlock = ExtractSourceSection(
+            escortSource,
+            "private void UpdateHighSecurityEscortParkedPickupFootSupport(Ped player, Vehicle limousine)",
+            "private bool ShouldHighSecurityEscortGuardReturnToVehicleWhilePlayerOnFoot(SpawnedNpc npc, Vehicle assignedVehicle, Ped player)");
+        string routeBlock = ExtractSourceSection(
+            escortSource,
+            "private void UpdateHighSecurityEscortRoute(Ped player)",
+            "private void OrderHighSecurityConvoyToDestination(bool force)");
+        string escapeBlock = ExtractSourceSection(
+            escortSource,
+            "private bool EnsureHighSecurityEscortCombatEscapeRoute(Ped player, Vehicle limousine)",
+            "private void EngageHighSecurityEscortThreat(Ped threat, Ped player)");
+        string passengerExitBlock = ExtractSourceSection(
+            escortSource,
+            "private bool ShouldHighSecurityEscortPassengerExitToFight(Ped passenger, Vehicle vehicle, Ped threat, Ped player)",
+            "private bool ShouldHighSecurityEscortGuardLeaveVehicleForPlayerOnFoot(Ped guard, Vehicle vehicle, Ped player, bool combatMode)");
+        string leaveBlock = ExtractSourceSection(
+            escortSource,
+            "private void CommandHighSecurityEscortGuardLeaveVehicle(SpawnedNpc npc, Vehicle vehicle, bool force)",
+            "private bool IsHighSecurityEscortVehicleOrderCooldownActive(Vehicle vehicle)");
+        string vehicleCombatBlock = ExtractSourceSection(
+            escortSource,
+            "private void CommandHighSecurityEscortVehicleForCombat(Vehicle vehicle, Ped threat, Ped player)",
+            "private bool PrepareHighSecurityEscortConvoyDeparture(Ped player, bool forceReturn)");
+        string arrivalBlock = ExtractSourceSection(
+            escortSource,
+            "private void MaybeAnnounceHighSecurityEscortArrival(Ped player)",
+            "private void ReturnHighSecurityEscortGuardsToVehicles(bool force)");
+        string stopParkedBlock = ExtractSourceSection(
+            escortSource,
+            "private void StopHighSecurityEscortParkedLimousine(Vehicle limousine)",
+            "private void StopHighSecurityEscortConvoyAtDestination()");
+        string rescueBlock = ExtractSourceSection(
+            escortSource,
+            "private void RescueHighSecurityEscortVehicleIfNeeded(Vehicle vehicle, Ped player, int seedIndex)",
+            "private bool TryRecoverLostHighSecurityEscortVehicleBehindLimousine(Vehicle vehicle, Vehicle limousine, Ped player, int role, bool force)");
+        string roadRejoinBlock = ExtractSourceSection(
+            escortSource,
+            "private bool TryRoadRejoinHighSecurityEscortVehicle(Vehicle vehicle, int seedIndex)",
+            "private bool TryFindHighSecurityEscortRoadRejoinTarget(Vehicle vehicle, int seedIndex, out Vector3 target)");
+        string softUnstuckBlock = ExtractSourceSection(
+            escortSource,
+            "private bool TrySoftUnstuckHighSecurityEscortVehicle(Vehicle vehicle, int seedIndex)",
+            "private bool IsHighSecurityEscortVehicleInSoftRecovery(Vehicle vehicle)");
+
+        StringAssert.Contains(stateBlock, "HandleHighSecurityEscortImmediateStopInput(player);");
+        StringAssert.Contains(stopInputBlock, "Game.IsKeyPressed(Keys.E)");
+        StringAssert.Contains(stopInputBlock, "_highSecurityEscortRoutePaused = !_highSecurityEscortRoutePaused;");
+        StringAssert.Contains(stopInputBlock, "StopHighSecurityEscortConvoyImmediately(true);");
+        StringAssert.Contains(stopInputBlock, "ReturnHighSecurityEscortGuardsToVehicles(true);");
+        StringAssert.Contains(assistBlock, "if (_highSecurityEscortPickupParked)");
+        StringAssert.Contains(assistBlock, "StopHighSecurityEscortParkedLimousine(limousine);");
+        StringAssert.Contains(standbyBlock, "_highSecurityEscortPickupParked");
+        StringAssert.Contains(standbyBlock, "StopHighSecurityEscortParkedLimousine(limousine);");
+        StringAssert.Contains(footBlock, "UpdateHighSecurityEscortParkedPickupFootSupport(player, parkedLimousine);");
+        StringAssert.Contains(parkedFootBlock, "ReturnHighSecurityEscortGuardsToVehicles(true);");
+        StringAssert.Contains(parkedFootBlock, "FollowHighSecurityEscortGuardOnFoot(npc, player, false);");
+        StringAssert.Contains(routeBlock, "_highSecurityEscortRoutePaused && !IsHighSecurityEscortCombatActive()");
+        StringAssert.Contains(routeBlock, "PrepareHighSecurityEscortConvoyDeparture(player, false)");
+        StringAssert.Contains(routeBlock, "_highSecurityEscortPickupParked = true;");
+        StringAssert.Contains(escapeBlock, "TryCalculateHighSecurityEscortEmergencyFleeDestination(limousine, player, out escapeDestination)");
+        StringAssert.Contains(escapeBlock, "HighSecurityEscortEmergencyFleeMaxCandidateChecks");
+        StringAssert.Contains(escapeBlock, "ScoreHighSecurityEscortRoadClearance(roadPoint, direction)");
+        Assert.IsFalse(escapeBlock.Contains("World.Raycast"), "La fuite d'urgence ne doit pas ajouter de raycast lourd.");
+        StringAssert.Contains(passengerExitBlock, "if (isLimousine)");
+        StringAssert.Contains(passengerExitBlock, "return false;");
+        StringAssert.Contains(leaveBlock, "if (isLimousine)");
+        StringAssert.Contains(leaveBlock, "return;");
+        StringAssert.Contains(vehicleCombatBlock, "_highSecurityEscortPickupParked");
+        StringAssert.Contains(vehicleCombatBlock, "StopHighSecurityEscortParkedLimousine(vehicle);");
+        StringAssert.Contains(arrivalBlock, "if (!_highSecurityEscortPickupParked)");
+        StringAssert.Contains(arrivalBlock, "_highSecurityEscortPickupParked = true;");
+        StringAssert.Contains(arrivalBlock, "if (limousine.Speed > 2.6f)");
+        StringAssert.Contains(arrivalBlock, "StopHighSecurityEscortParkedLimousine(limousine);");
+        Assert.IsTrue(
+            arrivalBlock.IndexOf("_highSecurityEscortPickupParked = true;", StringComparison.Ordinal) <
+            arrivalBlock.IndexOf("if (limousine.Speed > 2.6f)", StringComparison.Ordinal),
+            "La limousine doit passer en pickup gare avant d'attendre sa vitesse nulle.");
+        StringAssert.Contains(stopParkedBlock, "HighSecurityEscortParkedPickupStopHoldMs");
+        StringAssert.Contains(stopParkedBlock, "ResetHighSecurityEscortParkedLimousineRecoveryTracking(limousine);");
+        StringAssert.Contains(stopParkedBlock, "_highSecurityEscortLastVehicleMoveAt[handle] = Game.GameTime;");
+        StringAssert.Contains(rescueBlock, "ShouldKeepHighSecurityEscortPickupLimousineParked(vehicle)");
+        Assert.IsTrue(
+            rescueBlock.IndexOf("ShouldKeepHighSecurityEscortPickupLimousineParked(vehicle)", StringComparison.Ordinal) <
+            rescueBlock.IndexOf("TrySoftUnstuckHighSecurityEscortVehicle(vehicle, seedIndex)", StringComparison.Ordinal),
+            "La limousine pickup garee doit sortir du deblocage avant les ordres de marche arriere.");
+        StringAssert.Contains(roadRejoinBlock, "ShouldKeepHighSecurityEscortPickupLimousineParked(vehicle)");
+        StringAssert.Contains(softUnstuckBlock, "ShouldKeepHighSecurityEscortPickupLimousineParked(vehicle)");
     }
 
     [TestMethod]
@@ -1235,7 +1523,7 @@ public class DonJEnemySpawnerTests
     }
 
     [TestMethod]
-    public void SourceFile_EnemyRaidCleansAbandonedVehiclesAndRestoresAfterPlayerDeath()
+    public void SourceFile_EnemyRaidCleansAbandonedVehiclesAndDeletesEverythingAfterPlayerDeath()
     {
         string source = File.ReadAllText(GetSourceFilePath());
         string updateStateBlock = ExtractSourceSection(
@@ -1249,7 +1537,7 @@ public class DonJEnemySpawnerTests
         string deathBlock = ExtractSourceSection(
             source,
             "private void HandleEnemyRaidPlayerDeath(Ped player)",
-            "private void MaintainEnemyRaidEntitiesDuringPlayerDeath()");
+            "private void BeginEnemyRaidPostCombatCleanup()");
         string postCombatBlock = ExtractSourceSection(
             source,
             "private void BeginEnemyRaidPostCombatCleanup()",
@@ -1257,11 +1545,16 @@ public class DonJEnemySpawnerTests
 
         StringAssert.Contains(updateStateBlock, "UpdateEnemyRaidAbandonedVehicles(player);");
         StringAssert.Contains(updateStateBlock, "HandleEnemyRaidPlayerDeath(player);");
-        StringAssert.Contains(updateStateBlock, "HandleEnemyRaidPlayerAliveAfterDeath(player);");
+        Assert.IsFalse(updateStateBlock.Contains("HandleEnemyRaidPlayerAliveAfterDeath(player);"));
         StringAssert.Contains(cleanupBlock, "CleanupEnemyRaidHandleSets(bool allowPostCombatCleanup)");
         StringAssert.Contains(cleanupBlock, "BeginEnemyRaidPostCombatCleanup();");
-        StringAssert.Contains(deathBlock, "_enemyRaidRestoreMemberCountAfterDeath = liveMembers;");
-        StringAssert.Contains(deathBlock, "SpawnEnemyRaidWave(restoreCount, restoreCount, true);");
+        StringAssert.Contains(deathBlock, "ForceDeleteAllEnemyRaidEntitiesAndRecords(true);");
+        StringAssert.Contains(deathBlock, "Ballas : attaque annulée après ta mort.");
+        Assert.IsFalse(source.Contains("EnemyRaidPlayerDeathRestoreDelayMs"));
+        Assert.IsFalse(source.Contains("EnemyRaidRebuildAfterDeathDistance"));
+        Assert.IsFalse(source.Contains("HandleEnemyRaidPlayerAliveAfterDeath"));
+        Assert.IsFalse(source.Contains("MaintainEnemyRaidEntitiesDuringPlayerDeath"));
+        Assert.IsFalse(source.Contains("SpawnEnemyRaidWave(restoreCount"));
         StringAssert.Contains(postCombatBlock, "QueueEnemyRaidVehicleForCleanup(vehicleHandles[i]);");
         StringAssert.Contains(postCombatBlock, "ShouldDeleteEnemyRaidAbandonedVehicle(vehicle, player, handle)");
         StringAssert.Contains(postCombatBlock, "_enemyRaidVehicleCleanupHandles.Add(handle);");
@@ -1473,6 +1766,13 @@ public class DonJEnemySpawnerTests
         Assert.IsFalse((bool)InvokeStatic("HasObjectInteraction", decorative));
         Assert.AreEqual("Ramasser Billets 10 000$ - liasse plate (+10 000$)", (string)InvokeStatic("ObjectInteractionPromptText", cash));
         Assert.AreEqual("munitions +90", (string)InvokeStatic("ObjectInteractionDisplayName", ammo));
+
+        IList options = (IList)InvokeStatic("BuildAllObjectOptions");
+        object cashTrolley = options.Cast<object>().First(option => GetFieldValue<string>(option, "DisplayName") == "Chariot cash");
+        object chair = options.Cast<object>().First(option => GetFieldValue<string>(option, "DisplayName") == "Chaise simple");
+
+        Assert.AreEqual("Chariot cash | +200 000$", (string)InvokeStatic("ObjectOptionMenuDisplayName", cashTrolley));
+        Assert.AreEqual("Chaise simple", (string)InvokeStatic("ObjectOptionMenuDisplayName", chair));
     }
 
     [TestMethod]
@@ -2032,13 +2332,17 @@ public class DonJEnemySpawnerTests
         string source = File.ReadAllText(GetSourceFilePath());
 
         StringAssert.Contains(source, "DrawText(TrainerSubtitle, x + 31, y + 42");
-        StringAssert.Contains(source, "DrawMainSummaryPanel(x + width + 16, y, 298, 310);");
+        StringAssert.Contains(source, "DrawMainSummaryPanel(x + width + MainMenuSummaryGap, y, MainMenuSummaryWidth, MainMenuSummaryHeight);");
         StringAssert.Contains(source, "private void DrawPanelFrame(int x, int y, int width, int height, Color accentColor)");
         StringAssert.Contains(source, "private void DrawBadge(int x, int y, int width, string text, Color background, Color accentColor)");
         StringAssert.Contains(source, "private void DrawHeaderStat(int x, int y, int width, string label, string value, Color accentColor)");
         StringAssert.Contains(source, "private void DrawSelectedMainMenuCard(int x, int y, int width, int height, MainMenuEntry entry)");
+        StringAssert.Contains(source, "private void DrawMainSummaryContextLines(int x, int width, int lineY, Color accent)");
         StringAssert.Contains(source, "private void DrawSummaryMetric(int x, int y, int width, string label, string value, Color accentColor)");
         StringAssert.Contains(source, "private Color GetMainMenuAccent(int index)");
+        StringAssert.Contains(source, "private const int MainMenuPanelX = 34;");
+        StringAssert.Contains(source, "private const int MainMenuValueColumnX = 344;");
+        StringAssert.Contains(source, "FitText(_statusText, StatusTextMaxLength)");
     }
 
     [TestMethod]
@@ -2053,6 +2357,9 @@ public class DonJEnemySpawnerTests
         StringAssert.Contains(source, "private void DrawMainMenuScrollbar(int x, int y, int width, int height, int entryCount, int visibleRows)");
         StringAssert.Contains(source, "case Keys.PageUp:");
         StringAssert.Contains(source, "case Keys.PageDown:");
+        StringAssert.Contains(source, "case Keys.Tab:");
+        StringAssert.Contains(source, "MoveMainMenuSectionFocus(entries, e.Shift ? -1 : 1);");
+        StringAssert.Contains(source, "private void MoveMainMenuSectionFocus(List<MainMenuEntry> entries, int direction)");
 
         int placementTypeIndex = source.IndexOf("MainMenuAction.PlacementType, \"Type de placement\"", StringComparison.Ordinal);
         int precisePlacementIndex = source.IndexOf("MainMenuAction.PrecisePlacement, \"Placement camera precis\"", StringComparison.Ordinal);
@@ -2081,6 +2388,59 @@ public class DonJEnemySpawnerTests
     }
 
     [TestMethod]
+    public void SourceFile_MainMenuUsesContextualSummaryBadgesAndNoRedundantSelectionRebuild()
+    {
+        string source = File.ReadAllText(GetSourceFilePath());
+        string drawMenuBlock = ExtractSourceSection(
+            source,
+            "private void DrawMainMenu()",
+            "private void DrawWeaponEditorMenu()");
+        string summaryBlock = ExtractSourceSection(
+            source,
+            "private void DrawMainSummaryContextLines(int x, int width, int lineY, Color accent)",
+            "private void DrawSummaryLine(int x, int width, int y, string label, string value)");
+        string keyBlock = ExtractSourceSection(
+            source,
+            "private void HandleMainMenuKey(KeyEventArgs e)",
+            "private void MoveMainMenuSectionFocus");
+
+        StringAssert.Contains(drawMenuBlock, "DrawBadge(");
+        StringAssert.Contains(drawMenuBlock, "\"TAB sections\"");
+        StringAssert.Contains(drawMenuBlock, "_selectedAutoRespawn ? \"Respawn ON\" : \"Respawn OFF\"");
+        StringAssert.Contains(drawMenuBlock, "MainMenuEntry selectedEntry = entries.Count > 0");
+        Assert.IsFalse(drawMenuBlock.Contains("GetSelectedMainMenuEntry();"), "Le rendu ne doit pas reconstruire les entrees juste pour connaitre la selection.");
+
+        StringAssert.Contains(summaryBlock, "case PlacementEntityType.Vehicle:");
+        StringAssert.Contains(summaryBlock, "case PlacementEntityType.Object:");
+        StringAssert.Contains(summaryBlock, "case PlacementEntityType.Entrance:");
+        StringAssert.Contains(summaryBlock, "ObjectInteractionDisplayName(objectPreview)");
+        StringAssert.Contains(summaryBlock, "PV / Armure");
+
+        StringAssert.Contains(keyBlock, "ChangeMainMenuValue(-1, entries);");
+        StringAssert.Contains(keyBlock, "ChangeMainMenuValue(1, entries);");
+        StringAssert.Contains(keyBlock, "ActivateMainMenuItem(entries);");
+        StringAssert.Contains(source, "private static ObjectIdentity CreateObjectIdentityPreview(ObjectOption option)");
+    }
+
+    [TestMethod]
+    public void SourceFile_MainMenuHintsCoverCriticalCategoriesAndActions()
+    {
+        string source = File.ReadAllText(GetSourceFilePath());
+        string hintBlock = ExtractSourceSection(
+            source,
+            "private string MainMenuActionHint(MainMenuEntry entry)",
+            "private static bool IsMainMenuValueEditable(MainMenuAction action)");
+
+        StringAssert.Contains(hintBlock, "case MainMenuAction.NpcCategory:");
+        StringAssert.Contains(hintBlock, "case MainMenuAction.NpcWeaponCategory:");
+        StringAssert.Contains(hintBlock, "case MainMenuAction.VehicleCategory:");
+        StringAssert.Contains(hintBlock, "case MainMenuAction.ObjectCategory:");
+        StringAssert.Contains(hintBlock, "case MainMenuAction.InteriorCategory:");
+        StringAssert.Contains(hintBlock, "Les butins affichent leur valeur utile.");
+        StringAssert.Contains(hintBlock, "Entree ouvre/ferme la section. Droite ouvre, Gauche ferme.");
+    }
+
+    [TestMethod]
     public void SourceFile_AutoRespawnPersistsAndRequiresPlayerToLeaveArea()
     {
         string source = File.ReadAllText(GetSourceFilePath());
@@ -2088,11 +2448,15 @@ public class DonJEnemySpawnerTests
         StringAssert.Contains(source, "DrawMainMenuRow(x, width, rowY + rowHeight * 15, 15, \"Reapparition auto\", BoolText(_selectedAutoRespawn));");
         StringAssert.Contains(source, "writer.WriteAttributeString(\"autoRespawn\",");
         StringAssert.Contains(source, "ReadBoolAttribute(node, \"autoRespawn\", false)");
+        StringAssert.Contains(source, "MainMenuAction.VehicleAutoRespawn");
+        StringAssert.Contains(source, "MainMenuAction.ObjectAutoRespawn");
         StringAssert.Contains(source, "CanAutoRespawnAt(player");
         StringAssert.Contains(source, "distance < AutoRespawnLeaveDistance");
         StringAssert.Contains(source, "TryProcessNpcAutoRespawn");
         StringAssert.Contains(source, "TryProcessPlacedVehicleAutoRespawn");
         StringAssert.Contains(source, "TryProcessPlacedObjectAutoRespawn");
+        StringAssert.Contains(source, "MarkPlacedObjectForAutoRespawn(placed);");
+        StringAssert.Contains(source, "DeleteEntitySafe(placed.Prop);");
     }
 
     [TestMethod]

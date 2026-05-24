@@ -437,3 +437,58 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menee: J'ai retire cette garde du bloc de suivi a pied et je l'ai placee dans `CommandHighSecurityEscortGuardLeaveVehicle`, qui possede bien le parametre `Vehicle vehicle`.
 - Verification: `run-safety-checks.ps1` a reussi, puis `dotnet build GTA5modDEV.sln -c Release` a reussi sans avertissement et `dotnet test GTA5modDEV.sln -c Release` a reussi avec `149` tests verts.
 - Resolution: Resolue. Incident de compilation transitoire corrige pendant l'intervention.
+
+## 2026-05-12 21:24:02 +02:00 - Echec de compilation pendant validation du verrou pickup limousine
+- Statut: Ferme
+- Contexte: Premiere execution de `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1 -UseStubApi` apres verrouillage de la limousine en attente pickup.
+- Symptome: La verification `build-release` a echoue avec `CS0117` parce que `Hash.TASK_VEHICLE_TEMP_ACTION` n'existe pas dans l'API v2/stub cible.
+- Sources verifiees:
+  - `console run-safety-checks.ps1 -UseStubApi`
+  - `C:\Users\nodig\GTA5modDEV\TestResults\safety-20260512-212245\logs\build-release.log`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260512-212254-safety-failure\crash-list-entry.md`
+  - `C:\Users\nodig\GTA5modDEV\src\DonJEnemySpawner\DonJEnemySpawner.HighSecurityEscort.cs`
+  - `C:\Users\nodig\GTA5modDEV\tests\DonJEnemySpawner.Tests\DonJEnemySpawnerTests.cs`
+- Extraits utiles:
+  - `build-release.log`: `error CS0117: 'Hash' ne contient pas de definition pour 'TASK_VEHICLE_TEMP_ACTION'`.
+  - `DonJEnemySpawner.HighSecurityEscort.cs`: deux appels d'action temporaire vehicule utilisaient l'enum `Hash` au lieu d'une constante native compatible v2.
+  - `bug-reports\20260512-212254-safety-failure`: le collecteur a copie les logs GTA/loader, sans element runtime exploitable pour cet incident de compilation hors jeu.
+- Analyse / hypothese: L'echec venait d'une native GTA non exposee dans l'enum `Hash` de l'API ciblee, pas du verrou pickup lui-meme.
+- Action menee: J'ai ajoute `NativeTaskVehicleTempAction = 0xC429DCEEB339E129UL` et remplace les appels par `Function.Call((Hash)NativeTaskVehicleTempAction, ...)`, puis ajuste le test source associe.
+- Verification: `run-safety-checks.ps1 -UseStubApi` a reussi, puis `dotnet build GTA5modDEV.sln -c Release` et `dotnet test GTA5modDEV.sln -c Release` ont reussi avec `151` tests verts.
+- Resolution: Resolue. Incident de compilation transitoire corrige pendant l'intervention.
+
+## 2026-05-14 12:58:38 +02:00 - Echec de compilation transitoire pendant ajout PersistentInSave
+- Statut: Ferme
+- Contexte: Premiere execution de `dotnet build GTA5modDEV.sln -c Release` apres ajout du filtre de sauvegarde des vehicules runtime de l'escorte haute securite.
+- Symptome: La build a echoue avec `CS0117` et `CS1061` car le champ `PersistentInSave` avait ete ajoute dans le mauvais type interne.
+- Sources verifiees:
+  - `console dotnet build GTA5modDEV.sln -c Release`
+  - `C:\Users\nodig\GTA5modDEV\src\DonJEnemySpawner\DonJEnemySpawner.cs`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260514-125848-build-persistentinsave`
+- Extraits utiles:
+  - `console dotnet build`: `DonJEnemySpawner.cs(3276,13): error CS0117: 'DonJEnemySpawner.PlacedVehicle' ne contient pas de definition pour 'PersistentInSave'`.
+  - `console dotnet build`: `DonJEnemySpawner.cs(8438,33): error CS1061: 'DonJEnemySpawner.PlacedVehicle' ne contient pas de definition pour 'PersistentInSave'`.
+- Analyse / hypothese: Le patch avait insere le champ dans `SpawnedNpc`, qui partage les champs `AutoRespawn`, `RespawnPending`, `RespawnEligibleAt` et `NextRespawnCheckAt` avec `PlacedVehicle`.
+- Action menee: J'ai retire le champ du type `SpawnedNpc` et je l'ai ajoute dans la classe interne `PlacedVehicle`, puis j'ai relance la validation.
+- Verification: `dotnet build GTA5modDEV.sln -c Release`, `dotnet test GTA5modDEV.sln -c Release` et `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1` ont tous reussi avec `157` tests verts.
+- Resolution: Resolue. Incident de compilation transitoire corrige pendant l'intervention.
+
+## 2026-05-23 23:13:30 +02:00 - Echec transitoire de tests pendant refonte UI du menu F10
+- Statut: Ferme
+- Contexte: Validation de la refonte UI du menu F10 apres ajout de la navigation par sections, du resume contextuel et des tests headless associes.
+- Symptome: La premiere suite `run-safety-checks.ps1 -UseStubApi` a echoue sur `HeadlessMainMenuSimulation_LeftRightOpenAndCloseSection` avec `AmbiguousMatchException`. Le premier `dotnet test GTA5modDEV.sln -c Release` standard a ensuite echoue sur le meme test car `ChangeMainMenuValue` appelait `IsShiftHeld()` avant de savoir si la ligne selectionnee avait besoin du pas rapide.
+- Sources verifiees:
+  - `console powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1 -UseStubApi`
+  - `console dotnet test GTA5modDEV.sln -c Release`
+  - `C:\Users\nodig\GTA5modDEV\TestResults\safety-20260523-231011\logs\test-release.log`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260523-231041-safety-failure`
+  - `C:\Users\nodig\GTA5modDEV\src\DonJEnemySpawner\DonJEnemySpawner.cs`
+  - `C:\Users\nodig\GTA5modDEV\tests\DonJEnemySpawner.Tests\SafetySimulationTests.cs`
+- Extraits utiles:
+  - `test-release.log`: `System.Reflection.AmbiguousMatchException: Correspondance ambiguë trouvée` sur `InvokeInstance`.
+  - `dotnet test`: `System.IO.FileNotFoundException: Impossible de charger le fichier ou l'assembly 'NIBScriptHookVDotNet, Version=3.9.0.0'` via `GTA.Game.IsKeyPressed(Keys key)`.
+  - `DonJEnemySpawner.cs`: le calcul du pas rapide a ete deplace dans `GetMainMenuFastStep()` et n'est plus appele pour ouvrir/fermer une section.
+- Analyse / hypothese: Le premier echec venait du helper de reflection des tests qui ne distinguait pas les overloads prives. Le second venait d'un appel trop precoce a l'API GTA dans un chemin headless, pas d'une regression runtime du menu.
+- Action menee: J'ai fait choisir au helper de test la surcharge par nombre d'arguments, puis j'ai rendu le calcul `Shift` paresseux dans `ChangeMainMenuValue` uniquement pour les reglages qui utilisent un pas rapide.
+- Verification: `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1 -UseStubApi`, `dotnet build GTA5modDEV.sln -c Release` et `dotnet test GTA5modDEV.sln -c Release` ont reussi avec `161` tests verts.
+- Resolution: Resolue. Incident de test headless corrige pendant l'intervention.

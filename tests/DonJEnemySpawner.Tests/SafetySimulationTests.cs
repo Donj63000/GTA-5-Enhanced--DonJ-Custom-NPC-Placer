@@ -55,9 +55,11 @@ public class SafetySimulationTests
                 "SectionVehicle",
                 "VehicleCategory",
                 "VehicleModel",
+                "VehicleAutoRespawn",
                 "SectionObject",
                 "ObjectCategory",
                 "ObjectModel",
+                "ObjectAutoRespawn",
                 "SectionInterior",
                 "InteriorCategory",
                 "InteriorModel",
@@ -81,6 +83,8 @@ public class SafetySimulationTests
         AssertEntry(byAction["NpcHealth"], "Sante NPC", "300", "Normal", 1, true);
         AssertEntry(byAction["NpcArmor"], "Armure NPC", "100", "Normal", 1, true);
         AssertEntry(byAction["NpcAutoRespawn"], "Reapparition auto", "Non", "Normal", 1, true);
+        AssertEntry(byAction["VehicleAutoRespawn"], "Reapparition auto", "Non", "Normal", 1, true);
+        AssertEntry(byAction["ObjectAutoRespawn"], "Reapparition auto", "Non", "Normal", 1, true);
         AssertEntry(byAction["CleanInteriorPortals"], "Nettoyer entrees/sorties", "Supprimer les reperes interieurs", "Danger", 1, true);
     }
 
@@ -109,6 +113,46 @@ public class SafetySimulationTests
         CollectionAssert.DoesNotContain(actions, "InteriorModel");
         CollectionAssert.DoesNotContain(actions, "Save");
         CollectionAssert.DoesNotContain(actions, "CleanNpcs");
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_TabSectionFocusSkipsDetailRows()
+    {
+        object script = CreateInitializedHeadlessScript();
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+
+        Assert.AreEqual(0, GetFieldValue<int>(script, "_mainMenuIndex"));
+
+        InvokeInstance(script, "MoveMainMenuSectionFocus", entries, 1);
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        AssertSelectedAction(script, entries, "SectionNpc");
+
+        InvokeInstance(script, "MoveMainMenuSectionFocus", entries, 1);
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        AssertSelectedAction(script, entries, "SectionVehicle");
+
+        InvokeInstance(script, "MoveMainMenuSectionFocus", entries, -1);
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        AssertSelectedAction(script, entries, "SectionNpc");
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_LeftRightOpenAndCloseSection()
+    {
+        object script = CreateInitializedHeadlessScript();
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, "SectionVehicle"));
+        InvokeInstance(script, "ChangeMainMenuValue", 1);
+
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        CollectionAssert.Contains(ActionNames(entries), "VehicleModel");
+
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, "SectionVehicle"));
+        InvokeInstance(script, "ChangeMainMenuValue", -1);
+
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        CollectionAssert.DoesNotContain(ActionNames(entries), "VehicleModel");
     }
 
     [TestMethod]
@@ -261,6 +305,36 @@ public class SafetySimulationTests
         Assert.AreEqual(enabled, GetFieldValue<bool>(entry, "Enabled"));
     }
 
+    private static void AssertSelectedAction(object script, IList entries, string expectedAction)
+    {
+        int selectedIndex = GetFieldValue<int>(script, "_mainMenuIndex");
+        object selected = entries[selectedIndex];
+
+        Assert.AreEqual(expectedAction, GetFieldValue<object>(selected, "Action").ToString());
+    }
+
+    private static int FindActionIndex(IList entries, string actionName)
+    {
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (string.Equals(GetFieldValue<object>(entries[i], "Action").ToString(), actionName, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        Assert.Fail("Action menu introuvable: " + actionName);
+        return -1;
+    }
+
+    private static string[] ActionNames(IList entries)
+    {
+        return entries
+            .Cast<object>()
+            .Select(entry => GetFieldValue<object>(entry, "Action").ToString())
+            .ToArray();
+    }
+
     private static object InvokeStatic(string methodName, params object[] args)
     {
         MethodInfo method = ScriptType.GetMethod(methodName, PrivateStatic);
@@ -270,8 +344,14 @@ public class SafetySimulationTests
 
     private static object InvokeInstance(object target, string methodName, params object[] args)
     {
-        MethodInfo method = ScriptType.GetMethod(methodName, PrivateInstance);
-        Assert.IsNotNull(method, $"La methode privee d'instance '{methodName}' est introuvable.");
+        MethodInfo[] matches = ScriptType
+            .GetMethods(PrivateInstance)
+            .Where(method => method.Name == methodName && method.GetParameters().Length == args.Length)
+            .ToArray();
+
+        Assert.AreEqual(1, matches.Length, $"La methode privee d'instance '{methodName}' doit avoir une seule surcharge avec {args.Length} argument(s).");
+        MethodInfo method = matches[0];
+
         return method.Invoke(target, args);
     }
 

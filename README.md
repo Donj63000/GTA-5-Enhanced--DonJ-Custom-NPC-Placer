@@ -774,6 +774,7 @@ The main menu opens with several sections:
 | `NumPad 4` / `NumPad 6` | Change a value |
 | `Enter` | Confirm / open an action |
 | `NumPad 5` | Confirm / open an action |
+| `Tab` / `Shift + Tab` | Jump to the next / previous menu section |
 | `PageUp` / `PageDown` | Scroll quickly |
 | `Home` / `End` | Go to the start / end |
 | `Esc` / `Backspace` / `NumPad 0` | Close or go back |

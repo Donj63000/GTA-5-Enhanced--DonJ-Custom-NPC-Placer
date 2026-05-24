@@ -78,6 +78,17 @@ private const int MainMenuVisibleRowLimit = 24;
 // MainMenuVisibleRowLimit reste a 24 pour les contrats/tests historiques,
 // mais le rendu et le scroll utilisent cette limite plus confortable.
 private const int MainMenuCompactVisibleRowLimit = 16;
+private const int MainMenuPanelX = 34;
+private const int MainMenuPanelY = 24;
+private const int MainMenuPanelWidth = 704;
+private const int MainMenuTitleHeight = 90;
+private const int MainMenuRowHeight = 28;
+private const int MainMenuFooterHeight = 96;
+private const int MainMenuSummaryWidth = 298;
+private const int MainMenuSummaryHeight = 310;
+private const int MainMenuSummaryGap = 16;
+private const int MainMenuValueColumnX = 344;
+private const int StatusTextMaxLength = 112;
 private const int WeaponEditorItemCount = 12;
 
     private const int RelationshipCompanion = 0;
@@ -381,10 +392,12 @@ private enum MainMenuAction
     SectionVehicle,
     VehicleCategory,
     VehicleModel,
+    VehicleAutoRespawn,
 
     SectionObject,
     ObjectCategory,
     ObjectModel,
+    ObjectAutoRespawn,
 
     SectionInterior,
     InteriorCategory,
@@ -734,6 +747,7 @@ private enum EnemyBehavior
         public bool RespawnPending;
         public int RespawnEligibleAt;
         public int NextRespawnCheckAt;
+
     }
 
     private sealed class PlacedVehicle
@@ -749,6 +763,13 @@ private enum EnemyBehavior
         public bool RespawnPending;
         public int RespawnEligibleAt;
         public int NextRespawnCheckAt;
+
+        /*
+         * true par défaut : les véhicules placés manuellement restent sauvegardables.
+         * false : véhicule runtime temporaire, utilisé par un service/événement,
+         * jamais écrit dans le XML même s'il est vivant au moment de la sauvegarde.
+         */
+        public bool PersistentInSave = true;
     }
 
     private sealed class PlacedObject
@@ -957,26 +978,31 @@ private void HandleMainMenuKey(KeyEventArgs e)
             e.Handled = true;
             break;
 
+        case Keys.Tab:
+            MoveMainMenuSectionFocus(entries, e.Shift ? -1 : 1);
+            e.Handled = true;
+            break;
+
         case Keys.Left:
         case Keys.NumPad4:
-            ChangeMainMenuValue(-1);
+            ChangeMainMenuValue(-1, entries);
             e.Handled = true;
             break;
 
         case Keys.Right:
         case Keys.NumPad6:
-            ChangeMainMenuValue(1);
+            ChangeMainMenuValue(1, entries);
             e.Handled = true;
             break;
 
         case Keys.Enter:
         case Keys.NumPad5:
-            ActivateMainMenuItem();
+            ActivateMainMenuItem(entries);
             e.Handled = true;
             break;
 
         case Keys.T:
-            if (GetSelectedMainMenuAction() == MainMenuAction.NpcModel && CurrentModelOption().IsCustom)
+            if (GetSelectedMainMenuAction(entries) == MainMenuAction.NpcModel && CurrentModelOption().IsCustom)
             {
                 _customModelInputRequested = true;
                 e.Handled = true;
@@ -989,6 +1015,61 @@ private void HandleMainMenuKey(KeyEventArgs e)
             _menuVisible = false;
             e.Handled = true;
             break;
+    }
+}
+
+private void MoveMainMenuSectionFocus(List<MainMenuEntry> entries, int direction)
+{
+    if (entries == null || entries.Count == 0)
+    {
+        return;
+    }
+
+    int currentIndex = Clamp(_mainMenuIndex, 0, entries.Count - 1);
+
+    if (direction >= 0)
+    {
+        for (int i = currentIndex + 1; i < entries.Count; i++)
+        {
+            if (entries[i].Kind == MainMenuRowKind.SectionHeader)
+            {
+                _mainMenuIndex = i;
+                EnsureMainMenuSelectionVisible(entries.Count);
+                return;
+            }
+        }
+
+        for (int i = 0; i <= currentIndex; i++)
+        {
+            if (entries[i].Kind == MainMenuRowKind.SectionHeader)
+            {
+                _mainMenuIndex = i;
+                EnsureMainMenuSelectionVisible(entries.Count);
+                return;
+            }
+        }
+    }
+    else
+    {
+        for (int i = currentIndex - 1; i >= 0; i--)
+        {
+            if (entries[i].Kind == MainMenuRowKind.SectionHeader)
+            {
+                _mainMenuIndex = i;
+                EnsureMainMenuSelectionVisible(entries.Count);
+                return;
+            }
+        }
+
+        for (int i = entries.Count - 1; i >= currentIndex; i--)
+        {
+            if (entries[i].Kind == MainMenuRowKind.SectionHeader)
+            {
+                _mainMenuIndex = i;
+                EnsureMainMenuSelectionVisible(entries.Count);
+                return;
+            }
+        }
     }
 }
 
@@ -1037,8 +1118,14 @@ private void HandleMainMenuKey(KeyEventArgs e)
 
 private void ChangeMainMenuValue(int direction)
 {
-    int fast = IsShiftHeld() ? 10 : 1;
-    MainMenuEntry entry = GetSelectedMainMenuEntry();
+    List<MainMenuEntry> entries = BuildMainMenuEntries();
+    NormalizeMainMenuSelection(entries);
+    ChangeMainMenuValue(direction, entries);
+}
+
+private void ChangeMainMenuValue(int direction, List<MainMenuEntry> entries)
+{
+    MainMenuEntry entry = GetSelectedMainMenuEntry(entries);
 
     switch (entry.Action)
     {
@@ -1055,7 +1142,8 @@ private void ChangeMainMenuValue(int direction)
             break;
 
         case MainMenuAction.PlacementDistance:
-            _selectedDistance = Clamp(_selectedDistance + direction * DistanceStep * fast, MinDistance, MaxDistance);
+            int distanceFast = GetMainMenuFastStep();
+            _selectedDistance = Clamp(_selectedDistance + direction * DistanceStep * distanceFast, MinDistance, MaxDistance);
             _selectedDistance = RoundToStep(_selectedDistance, DistanceStep);
             break;
 
@@ -1073,7 +1161,7 @@ private void ChangeMainMenuValue(int direction)
             break;
 
         case MainMenuAction.NpcModel:
-            ChangeModel(direction * fast);
+            ChangeModel(direction * GetMainMenuFastStep());
             break;
 
         case MainMenuAction.NpcWeaponCategory:
@@ -1081,7 +1169,7 @@ private void ChangeMainMenuValue(int direction)
             break;
 
         case MainMenuAction.NpcWeapon:
-            ChangeWeapon(direction * fast);
+            ChangeWeapon(direction * GetMainMenuFastStep());
             break;
 
         case MainMenuAction.NpcWeaponEditor:
@@ -1101,11 +1189,14 @@ private void ChangeMainMenuValue(int direction)
             break;
 
         case MainMenuAction.NpcPatrolRadius:
-            _selectedPatrolRadius = Clamp(_selectedPatrolRadius + direction * PatrolRadiusStep * fast, MinPatrolRadius, MaxPatrolRadius);
+            int patrolFast = GetMainMenuFastStep();
+            _selectedPatrolRadius = Clamp(_selectedPatrolRadius + direction * PatrolRadiusStep * patrolFast, MinPatrolRadius, MaxPatrolRadius);
             _selectedPatrolRadius = RoundToStep(_selectedPatrolRadius, PatrolRadiusStep);
             break;
 
         case MainMenuAction.NpcAutoRespawn:
+        case MainMenuAction.VehicleAutoRespawn:
+        case MainMenuAction.ObjectAutoRespawn:
             _selectedAutoRespawn = !_selectedAutoRespawn;
             break;
 
@@ -1114,7 +1205,7 @@ private void ChangeMainMenuValue(int direction)
             break;
 
         case MainMenuAction.VehicleModel:
-            ChangeVehicle(direction * fast);
+            ChangeVehicle(direction * GetMainMenuFastStep());
             break;
 
         case MainMenuAction.ObjectCategory:
@@ -1122,7 +1213,7 @@ private void ChangeMainMenuValue(int direction)
             break;
 
         case MainMenuAction.ObjectModel:
-            ChangeObject(direction * fast);
+            ChangeObject(direction * GetMainMenuFastStep());
             break;
 
         case MainMenuAction.InteriorCategory:
@@ -1130,7 +1221,7 @@ private void ChangeMainMenuValue(int direction)
             break;
 
         case MainMenuAction.InteriorModel:
-            ChangeInterior(direction * fast);
+            ChangeInterior(direction * GetMainMenuFastStep());
             break;
 
         case MainMenuAction.ExitActiveInfo:
@@ -1142,9 +1233,21 @@ private void ChangeMainMenuValue(int direction)
     NormalizeMainMenuSelection(BuildMainMenuEntries());
 }
 
+private int GetMainMenuFastStep()
+{
+    return IsShiftHeld() ? 10 : 1;
+}
+
 private void ActivateMainMenuItem()
 {
-    MainMenuEntry entry = GetSelectedMainMenuEntry();
+    List<MainMenuEntry> entries = BuildMainMenuEntries();
+    NormalizeMainMenuSelection(entries);
+    ActivateMainMenuItem(entries);
+}
+
+private void ActivateMainMenuItem(List<MainMenuEntry> entries)
+{
+    MainMenuEntry entry = GetSelectedMainMenuEntry(entries);
 
     switch (entry.Action)
     {
@@ -1182,6 +1285,12 @@ private void ActivateMainMenuItem()
         case MainMenuAction.NpcWeaponEditor:
             _menuPage = MenuPage.WeaponEditor;
             _weaponEditorIndex = 1;
+            break;
+
+        case MainMenuAction.NpcAutoRespawn:
+        case MainMenuAction.VehicleAutoRespawn:
+        case MainMenuAction.ObjectAutoRespawn:
+            _selectedAutoRespawn = !_selectedAutoRespawn;
             break;
 
         case MainMenuAction.ExitActiveInfo:
@@ -1263,6 +1372,7 @@ private List<MainMenuEntry> BuildMainMenuEntries()
     {
         AddMainMenuRow(entries, MainMenuAction.VehicleCategory, "Categorie vehicule", CurrentVehicleCategory().Name, MainMenuRowKind.Normal, 1, true);
         AddMainMenuRow(entries, MainMenuAction.VehicleModel, "Vehicule", CurrentVehicleDisplayName(), MainMenuRowKind.Normal, 1, true);
+        AddMainMenuRow(entries, MainMenuAction.VehicleAutoRespawn, "Reapparition auto", BoolText(_selectedAutoRespawn), MainMenuRowKind.Normal, 1, true);
     }
 
     AddMainMenuSection(
@@ -1277,6 +1387,7 @@ private List<MainMenuEntry> BuildMainMenuEntries()
     {
         AddMainMenuRow(entries, MainMenuAction.ObjectCategory, "Categorie objet", CurrentObjectCategory().Name, MainMenuRowKind.Normal, 1, true);
         AddMainMenuRow(entries, MainMenuAction.ObjectModel, "Objet", CurrentObjectDisplayName(), MainMenuRowKind.Normal, 1, true);
+        AddMainMenuRow(entries, MainMenuAction.ObjectAutoRespawn, "Reapparition auto", BoolText(_selectedAutoRespawn), MainMenuRowKind.Normal, 1, true);
     }
 
     AddMainMenuSection(
@@ -1348,7 +1459,11 @@ private MainMenuEntry GetSelectedMainMenuEntry()
 {
     List<MainMenuEntry> entries = BuildMainMenuEntries();
     NormalizeMainMenuSelection(entries);
+    return GetSelectedMainMenuEntry(entries);
+}
 
+private MainMenuEntry GetSelectedMainMenuEntry(List<MainMenuEntry> entries)
+{
     if (entries.Count == 0)
     {
         return new MainMenuEntry(MainMenuAction.PlacementType, string.Empty, string.Empty, MainMenuRowKind.Normal, 0, false);
@@ -1360,6 +1475,11 @@ private MainMenuEntry GetSelectedMainMenuEntry()
 private MainMenuAction GetSelectedMainMenuAction()
 {
     return GetSelectedMainMenuEntry().Action;
+}
+
+private MainMenuAction GetSelectedMainMenuAction(List<MainMenuEntry> entries)
+{
+    return GetSelectedMainMenuEntry(entries).Action;
 }
 
 private void NormalizeMainMenuSelection(List<MainMenuEntry> entries)
@@ -1520,12 +1640,12 @@ private void DrawMainMenu()
     int visibleRows = GetMainMenuCompactVisibleRowCount(entries.Count);
 
     // Base 1280x720 SHVDN: panneau compact, lisible, mais moins envahissant.
-    int x = 34;
-    int y = 24;
-    int width = 704;
-    int titleHeight = 96;
-    int rowHeight = 28;
-    int footerHeight = 96;
+    int x = MainMenuPanelX;
+    int y = MainMenuPanelY;
+    int width = MainMenuPanelWidth;
+    int titleHeight = MainMenuTitleHeight;
+    int rowHeight = MainMenuRowHeight;
+    int footerHeight = MainMenuFooterHeight;
     int rowAreaHeight = visibleRows * rowHeight;
     int totalHeight = titleHeight + rowAreaHeight + footerHeight;
 
@@ -1548,37 +1668,60 @@ private void DrawMainMenu()
     DrawText(TrainerSubtitle, x + 31, y + 42, 0.252f, Color.FromArgb(202, 204, 211), false, false);
 
     DrawHeaderStat(
-        x + width - 342,
-        y + 17,
-        124,
+        x + width - 332,
+        y + 15,
+        122,
         "TYPE",
         PlacementTypeDisplayName(_selectedPlacementType).ToUpperInvariant(),
         accent);
 
     DrawHeaderStat(
-        x + width - 210,
-        y + 17,
+        x + width - 204,
+        y + 15,
         104,
         "LIGNES",
         (_mainMenuIndex + 1).ToString(CultureInfo.InvariantCulture) + "/" + entries.Count.ToString(CultureInfo.InvariantCulture),
         Color.FromArgb(210, 210, 218));
 
     DrawHeaderStat(
-        x + width - 98,
-        y + 17,
+        x + width - 94,
+        y + 15,
         72,
         "MENU",
         MenuToggleKeyLabel,
         accent);
 
-    DrawText(
-        "Entree valider  |  Fleches naviguer  |  Gauche/Droite modifier  |  PageUp/PageDown defiler",
+    DrawBadge(
         x + 31,
-        y + 70,
-        0.225f,
-        Color.FromArgb(168, 170, 178),
-        false,
-        false);
+        y + 64,
+        122,
+        "TAB sections",
+        Color.FromArgb(104, 20, 22, 29),
+        accent);
+
+    DrawBadge(
+        x + 161,
+        y + 64,
+        134,
+        "Entree action",
+        Color.FromArgb(104, 20, 22, 29),
+        Color.FromArgb(210, 210, 218));
+
+    DrawBadge(
+        x + 303,
+        y + 64,
+        126,
+        "G/D modifier",
+        Color.FromArgb(104, 20, 22, 29),
+        Color.FromArgb(210, 210, 218));
+
+    DrawBadge(
+        x + 437,
+        y + 64,
+        124,
+        _selectedAutoRespawn ? "Respawn ON" : "Respawn OFF",
+        _selectedAutoRespawn ? Color.FromArgb(116, 18, 72, 46) : Color.FromArgb(104, 20, 22, 29),
+        _selectedAutoRespawn ? Color.FromArgb(230, 80, 190, 120) : Color.FromArgb(150, 151, 158));
 
     int rowY = y + titleHeight;
 
@@ -1600,13 +1743,15 @@ private void DrawMainMenu()
     }
 
     int footerY = y + titleHeight + rowAreaHeight;
-    MainMenuEntry selectedEntry = GetSelectedMainMenuEntry();
+    MainMenuEntry selectedEntry = entries.Count > 0
+        ? entries[_mainMenuIndex]
+        : new MainMenuEntry(MainMenuAction.PlacementType, string.Empty, string.Empty, MainMenuRowKind.Normal, 0, false);
 
     DrawRect(x, footerY, width, footerHeight, Color.FromArgb(232, 8, 9, 13));
     DrawRect(x, footerY, width, 1, Color.FromArgb(80, 255, 255, 255));
     DrawSelectedMainMenuCard(x, footerY, width, footerHeight, selectedEntry);
 
-    DrawMainSummaryPanel(x + width + 16, y, 298, 310);
+    DrawMainSummaryPanel(x + width + MainMenuSummaryGap, y, MainMenuSummaryWidth, MainMenuSummaryHeight);
 
     /*
      * Contrats source historiques conserves volontairement pour les tests anti-regression
@@ -1698,9 +1843,13 @@ private void DrawMainMenuEntryRow(int x, int width, int y, int rowHeight, MainMe
     int rowH = rowHeight - 4;
     int indent = Math.Max(0, entry.Level) * 18;
     int labelX = x + 30 + indent;
-    int valueX = x + 344;
+    int valueX = x + MainMenuValueColumnX;
     int valueRight = x + width - 38;
     int valueMaxLength = Math.Max(10, (valueRight - valueX) / 7);
+    if (entry.Kind == MainMenuRowKind.SectionHeader && entry.Active)
+    {
+        valueMaxLength = Math.Max(8, valueMaxLength - 8);
+    }
     int textOffset = 7;
     float textScale = entry.Kind == MainMenuRowKind.SectionHeader ? 0.270f : 0.252f;
 
@@ -1717,6 +1866,13 @@ private void DrawMainMenuEntryRow(int x, int width, int y, int rowHeight, MainMe
 
     DrawRect(innerX, rowY, innerW, rowH, background);
 
+    if (selected)
+    {
+        DrawRect(innerX, rowY, innerW, 1, Color.FromArgb(72, 255, 255, 255));
+        DrawRect(innerX, rowY + rowH - 1, innerW, 1, Color.FromArgb(148, 0, 0, 0));
+        DrawRect(innerX + innerW - 4, rowY, 4, rowH, Color.FromArgb(208, accent.R, accent.G, accent.B));
+    }
+
     if (entry.Kind == MainMenuRowKind.SectionHeader)
     {
         DrawRect(innerX, rowY, innerW, 1, Color.FromArgb(48, 255, 255, 255));
@@ -1731,6 +1887,12 @@ private void DrawMainMenuEntryRow(int x, int width, int y, int rowHeight, MainMe
         string arrow = entry.Expanded ? "v" : ">";
         DrawText(arrow + "  " + entry.Label, labelX, y + textOffset, textScale, labelColor, false, true);
         DrawText(FitText(entry.Value, valueMaxLength), valueX, y + textOffset, textScale, valueColor, false, false);
+
+        if (entry.Active)
+        {
+            DrawText("ACTIF", x + width - 76, y + textOffset, 0.214f, Color.FromArgb(226, accent.R, accent.G, accent.B), false, true);
+        }
+
         return;
     }
 
@@ -1856,11 +2018,13 @@ private Color GetMainMenuEntryAccent(MainMenuEntry entry)
         case MainMenuAction.SectionVehicle:
         case MainMenuAction.VehicleCategory:
         case MainMenuAction.VehicleModel:
+        case MainMenuAction.VehicleAutoRespawn:
             return Color.FromArgb(230, 70, 145, 220);
 
         case MainMenuAction.SectionObject:
         case MainMenuAction.ObjectCategory:
         case MainMenuAction.ObjectModel:
+        case MainMenuAction.ObjectAutoRespawn:
             return Color.FromArgb(230, 210, 158, 46);
 
         case MainMenuAction.SectionInterior:
@@ -2101,10 +2265,19 @@ private string MainMenuActionHint(MainMenuEntry entry)
         case MainMenuAction.PlacementDistance:
             return "Gauche/Droite ajuste la distance. Shift accelere le changement.";
 
+        case MainMenuAction.NpcCategory:
+            return "Filtre rapidement les peds par famille avant de choisir le modele.";
+
         case MainMenuAction.NpcModel:
             return CurrentModelOption().IsCustom
                 ? "Modele custom actif : appuie sur T pour saisir le nom exact."
                 : "Choisis le ped a placer dans la categorie NPC active.";
+
+        case MainMenuAction.NpcWeaponCategory:
+            return "Change la famille d'armes pour reduire la liste suivante.";
+
+        case MainMenuAction.NpcWeapon:
+            return "Choisis l'arme donnee au prochain NPC place.";
 
         case MainMenuAction.NpcWeaponEditor:
             return "Entree ouvre l'atelier; Gauche/Droite change le preset rapide.";
@@ -2118,7 +2291,27 @@ private string MainMenuActionHint(MainMenuEntry entry)
             return "Selectionne le comportement IA applique au prochain NPC place.";
 
         case MainMenuAction.NpcAutoRespawn:
+        case MainMenuAction.VehicleAutoRespawn:
+        case MainMenuAction.ObjectAutoRespawn:
             return "Active la reapparition automatique quand le joueur quitte la zone.";
+
+        case MainMenuAction.VehicleCategory:
+            return "Filtre les vehicules par type pour aller plus vite dans la liste.";
+
+        case MainMenuAction.VehicleModel:
+            return "Choisis le vehicule qui sera place ou sauvegarde dans la scene.";
+
+        case MainMenuAction.ObjectCategory:
+            return "Filtre les props par usage : securite, butin, soin, mobilier ou decor.";
+
+        case MainMenuAction.ObjectModel:
+            return "Choisis l'objet a placer. Les butins affichent leur valeur utile.";
+
+        case MainMenuAction.InteriorCategory:
+            return "Filtre le catalogue d'interieurs avant de poser une entree.";
+
+        case MainMenuAction.InteriorModel:
+            return "Choisis la destination de l'entree interieure a placer.";
 
         case MainMenuAction.Save:
             return "Sauvegarde la scene courante dans le fichier XML actif.";
@@ -2170,8 +2363,10 @@ private static bool IsMainMenuValueEditable(MainMenuAction action)
         case MainMenuAction.NpcAutoRespawn:
         case MainMenuAction.VehicleCategory:
         case MainMenuAction.VehicleModel:
+        case MainMenuAction.VehicleAutoRespawn:
         case MainMenuAction.ObjectCategory:
         case MainMenuAction.ObjectModel:
+        case MainMenuAction.ObjectAutoRespawn:
         case MainMenuAction.InteriorCategory:
         case MainMenuAction.InteriorModel:
             return true;
@@ -2192,17 +2387,10 @@ private void DrawMainSummaryPanel(int x, int y, int width, int height)
     DrawRect(x, y, width, 4, Color.FromArgb(230, accent.R, accent.G, accent.B));
     DrawRect(x, y + 47, width, 1, Color.FromArgb(120, accent.R, accent.G, accent.B));
 
-    DrawText("Resume actif", x + 16, y + 13, 0.315f, Color.White, false, true);
+    DrawText("Resume " + PlacementTypeDisplayName(_selectedPlacementType), x + 16, y + 13, 0.315f, Color.White, false, true);
 
     int lineY = y + 62;
-
-    DrawSummaryLine(x, width, lineY + 0, "Type", PlacementTypeDisplayName(_selectedPlacementType), accent);
-    DrawSummaryLine(x, width, lineY + 25, "NPC", CurrentModelDisplayName(), Color.FromArgb(230, 190, 58, 64));
-    DrawSummaryLine(x, width, lineY + 50, "Arme", CurrentWeaponDisplayName(), Color.FromArgb(230, 190, 58, 64));
-    DrawSummaryLine(x, width, lineY + 75, "Vehicule", CurrentVehicleDisplayName(), Color.FromArgb(230, 70, 145, 220));
-    DrawSummaryLine(x, width, lineY + 100, "Objet", CurrentObjectDisplayName(), Color.FromArgb(230, 210, 158, 46));
-    DrawSummaryLine(x, width, lineY + 125, "Interieur", CurrentInteriorOption().DisplayName, Color.FromArgb(230, 150, 95, 220));
-    DrawSummaryLine(x, width, lineY + 150, "IA", NpcBehaviorDisplayName(_selectedBehavior), Color.FromArgb(230, 80, 190, 120));
+    DrawMainSummaryContextLines(x, width, lineY, accent);
 
     int metricY = y + height - 78;
     int metricW = (width - 48) / 4;
@@ -2224,6 +2412,49 @@ private void DrawMainSummaryPanel(int x, int y, int width, int height)
         Color.FromArgb(204, 206, 214),
         false,
         false);
+}
+
+private void DrawMainSummaryContextLines(int x, int width, int lineY, Color accent)
+{
+    DrawSummaryLine(x, width, lineY + 0, "Type", PlacementTypeDisplayName(_selectedPlacementType), accent);
+
+    switch (_selectedPlacementType)
+    {
+        case PlacementEntityType.Vehicle:
+            DrawSummaryLine(x, width, lineY + 25, "Vehicule", CurrentVehicleDisplayName(), Color.FromArgb(230, 70, 145, 220));
+            DrawSummaryLine(x, width, lineY + 50, "Categorie", CurrentVehicleCategory().Name, Color.FromArgb(230, 70, 145, 220));
+            DrawSummaryLine(x, width, lineY + 75, "Distance", _selectedDistance.ToString(CultureInfo.InvariantCulture) + " m", accent);
+            DrawSummaryLine(x, width, lineY + 100, "Respawn", BoolText(_selectedAutoRespawn), Color.FromArgb(230, 80, 190, 120));
+            DrawSummaryLine(x, width, lineY + 125, "Action", "Camera ou direct", Color.FromArgb(230, 60, 220, 150));
+            break;
+
+        case PlacementEntityType.Object:
+            ObjectIdentity objectPreview = CreateObjectIdentityPreview(CurrentObjectOption());
+            DrawSummaryLine(x, width, lineY + 25, "Objet", objectPreview.DisplayName, Color.FromArgb(230, 210, 158, 46));
+            DrawSummaryLine(x, width, lineY + 50, "Categorie", CurrentObjectCategory().Name, Color.FromArgb(230, 210, 158, 46));
+            DrawSummaryLine(x, width, lineY + 75, "Interaction", ObjectInteractionDisplayName(objectPreview), Color.FromArgb(230, 80, 190, 120));
+            DrawSummaryLine(x, width, lineY + 100, "Distance", _selectedDistance.ToString(CultureInfo.InvariantCulture) + " m", accent);
+            DrawSummaryLine(x, width, lineY + 125, "Respawn", BoolText(_selectedAutoRespawn), Color.FromArgb(230, 80, 190, 120));
+            break;
+
+        case PlacementEntityType.Entrance:
+        case PlacementEntityType.Exit:
+            DrawSummaryLine(x, width, lineY + 25, "Interieur", CurrentInteriorOption().DisplayName, Color.FromArgb(230, 150, 95, 220));
+            DrawSummaryLine(x, width, lineY + 50, "Categorie", CurrentInteriorCategory().Name, Color.FromArgb(230, 150, 95, 220));
+            DrawSummaryLine(x, width, lineY + 75, "Portail", _selectedPlacementType == PlacementEntityType.Exit ? "Sortie" : "Entree", accent);
+            DrawSummaryLine(x, width, lineY + 100, "Sortie", ActiveInteriorSessionDisplayName(), Color.FromArgb(230, 80, 190, 120));
+            DrawSummaryLine(x, width, lineY + 125, "Retour", ExitDestinationDisplayName(), Color.FromArgb(230, 80, 190, 120));
+            break;
+
+        case PlacementEntityType.Npc:
+        default:
+            DrawSummaryLine(x, width, lineY + 25, "NPC", CurrentModelDisplayName(), Color.FromArgb(230, 190, 58, 64));
+            DrawSummaryLine(x, width, lineY + 50, "Categorie", CurrentModelCategory().Name, Color.FromArgb(230, 190, 58, 64));
+            DrawSummaryLine(x, width, lineY + 75, "Arme", CurrentWeaponDisplayName(), Color.FromArgb(230, 190, 58, 64));
+            DrawSummaryLine(x, width, lineY + 100, "IA", NpcBehaviorDisplayName(_selectedBehavior), Color.FromArgb(230, 80, 190, 120));
+            DrawSummaryLine(x, width, lineY + 125, "PV / Armure", _selectedHealth.ToString(CultureInfo.InvariantCulture) + " / " + _selectedArmor.ToString(CultureInfo.InvariantCulture), accent);
+            break;
+    }
 }
 
 private void DrawSummaryLine(int x, int width, int y, string label, string value)
@@ -2554,7 +2785,50 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private string CurrentObjectDisplayName()
     {
-        return CurrentObjectOption().DisplayName;
+        return ObjectOptionMenuDisplayName(CurrentObjectOption());
+    }
+
+    private static string ObjectOptionMenuDisplayName(ObjectOption option)
+    {
+        ObjectIdentity identity = CreateObjectIdentityPreview(option);
+
+        if (identity.InteractionKind == ObjectInteractionKind.Cash && identity.CashValue > 0)
+        {
+            return identity.DisplayName + " | +" + FormatMoney(identity.CashValue);
+        }
+
+        return identity.DisplayName;
+    }
+
+    private static ObjectIdentity CreateObjectIdentityPreview(ObjectOption option)
+    {
+        if (option == null)
+        {
+            return new ObjectIdentity
+            {
+                ModelName = string.Empty,
+                DisplayName = "Aucun objet",
+                InteractionKind = ObjectInteractionKind.None
+            };
+        }
+
+        string displayName = string.IsNullOrWhiteSpace(option.DisplayName)
+            ? (string.IsNullOrWhiteSpace(option.ModelName) ? "Objet" : option.ModelName)
+            : option.DisplayName;
+
+        ObjectIdentity identity = new ObjectIdentity
+        {
+            ModelName = option.ModelName,
+            DisplayName = displayName,
+            InteractionKind = option.InteractionKind,
+            CashValue = option.CashValue,
+            HealAmount = option.HealAmount,
+            ArmorAmount = option.ArmorAmount,
+            AmmoAmount = option.AmmoAmount
+        };
+
+        ApplyDefaultObjectInteractionIfNeeded(identity);
+        return identity;
     }
 
     private void ChangeModelCategory(int direction)
@@ -3188,7 +3462,14 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         return spawned;
     }
 
-    private PlacedVehicle RegisterPlacedVehicle(Vehicle vehicle, VehicleIdentity identity, Vector3 position, float heading, bool showStatus, bool autoRespawn = false)
+    private PlacedVehicle RegisterPlacedVehicle(
+        Vehicle vehicle,
+        VehicleIdentity identity,
+        Vector3 position,
+        float heading,
+        bool showStatus,
+        bool autoRespawn = false,
+        bool persistentInSave = true)
     {
         if (!Entity.Exists(vehicle))
         {
@@ -3208,7 +3489,8 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             AutoRespawn = autoRespawn,
             RespawnPending = false,
             RespawnEligibleAt = 0,
-            NextRespawnCheckAt = 0
+            NextRespawnCheckAt = 0,
+            PersistentInSave = persistentInSave
         };
 
         _placedVehicles.Add(placed);
@@ -5977,71 +6259,12 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         Function.Call(Hash.SET_PED_COMBAT_MOVEMENT, npc.Ped.Handle, stationary ? 0 : 2);
         Function.Call(Hash.SET_PED_COMBAT_RANGE, npc.Ped.Handle, 2);
 
-        if (!stationary && ShouldApproachBeforeShooting(npc, target))
-        {
-            float stopDistance = DesiredApproachDistanceForWeapon(npc.Loadout != null ? npc.Loadout.Weapon : WeaponHash.Unarmed);
-
-            Function.Call(
-                Hash.TASK_GO_TO_ENTITY,
-                npc.Ped.Handle,
-                target.Handle,
-                -1,
-                stopDistance,
-                2.0f,
-                1073741824,
-                0);
-
-            return;
-        }
-
         Function.Call(
             Hash.TASK_COMBAT_PED,
             npc.Ped.Handle,
             target.Handle,
             0,
             16);
-    }
-
-    private bool ShouldApproachBeforeShooting(SpawnedNpc npc, Ped target)
-    {
-        if (npc == null || !Entity.Exists(npc.Ped) || !Entity.Exists(target) || npc.Loadout == null)
-        {
-            return false;
-        }
-
-        float desired = DesiredApproachDistanceForWeapon(npc.Loadout.Weapon);
-
-        if (desired <= 0.0f)
-        {
-            return false;
-        }
-
-        float distance = npc.Ped.Position.DistanceTo(target.Position);
-        return distance > desired + 8.0f;
-    }
-
-    private static float DesiredApproachDistanceForWeapon(WeaponHash weapon)
-    {
-        string name = weapon.ToString();
-
-        if (IsPistolLikeWeaponName(name))
-        {
-            return 24.0f;
-        }
-
-        if (name.IndexOf("Shotgun", StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-            return 20.0f;
-        }
-
-        if (name.IndexOf("SMG", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            name.IndexOf("MachinePistol", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            name.IndexOf("CombatPDW", StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-            return 34.0f;
-        }
-
-        return -1.0f;
     }
 
     private void StartOrContinuePatrol(SpawnedNpc npc, bool forceNewTarget)
@@ -8425,6 +8648,15 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
                         continue;
                     }
 
+                    /*
+                     * Les véhicules runtime comme la limousine appelée avec L ne doivent jamais
+                     * être écrits dans les sauvegardes utilisateur.
+                     */
+                    if (!placed.PersistentInSave)
+                    {
+                        continue;
+                    }
+
                     bool liveVehicle = Entity.Exists(placed.Vehicle);
 
                     if (!liveVehicle && !placed.AutoRespawn)
@@ -10610,6 +10842,14 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             return;
         }
 
+        if (placed.AutoRespawn)
+        {
+            // Je garde l'objet dans la liste pour qu'il puisse reapparaitre apres eloignement.
+            MarkPlacedObjectForAutoRespawn(placed);
+            DeleteEntitySafe(placed.Prop);
+            return;
+        }
+
         DeleteEntitySafe(placed.Prop);
         _placedObjects.Remove(placed);
     }
@@ -11057,7 +11297,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         }
 
         DrawRect(270, 28, 760, 38, Color.FromArgb(170, 0, 0, 0));
-        DrawText(_statusText, 650, 38, 0.32f, Color.White, true, true);
+        DrawText(FitText(_statusText, StatusTextMaxLength), 650, 38, 0.32f, Color.White, true, true);
     }
 
     private void ShowStatus(string text, int milliseconds)
@@ -11622,6 +11862,20 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private void UpdateCartelPhoneContact(Ped player)
     {
+        bool lPressedNow = Game.IsKeyPressed(Keys.L);
+
+        /*
+         * Latch global pour la touche L :
+         * - téléphone ouvert : L appelle/renvoie l'escorte ;
+         * - téléphone fermé + joueur dans limousine : L valide la destination.
+         *
+         * Une action L consommée reste bloquée jusqu'au relâchement complet.
+         */
+        if (!lPressedNow)
+        {
+            _highSecurityEscortLCommandConsumedUntilRelease = false;
+        }
+
         bool phoneOpen = IsPlayerPhoneOpen(player);
 
         if (!phoneOpen)
@@ -11658,16 +11912,24 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             CallEnemyRaid();
         }
 
-        bool lPressed = Game.IsKeyPressed(Keys.L);
+        bool lPressed = lPressedNow;
 
         if (!lPressed)
         {
             _highSecurityEscortPhoneKeyLatch = false;
         }
-        else if (!_highSecurityEscortPhoneKeyLatch)
+        else if (!_highSecurityEscortPhoneKeyLatch && !_highSecurityEscortLCommandConsumedUntilRelease)
         {
             _highSecurityEscortPhoneKeyLatch = true;
+
             ToggleHighSecurityEscortCall();
+
+            /*
+             * Important : on pose ce verrou après ToggleHighSecurityEscortCall(),
+             * car Toggle peut nettoyer/réinitialiser l'état interne de l'escorte.
+             */
+            _highSecurityEscortRouteKeyLatch = true;
+            _highSecurityEscortLCommandConsumedUntilRelease = true;
         }
     }
 
@@ -12615,34 +12877,65 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         }
     }
 
-    private void PutPedIntoVehicleSafe(Ped ped, Vehicle vehicle, int seat)
+    private bool PutPedIntoVehicleSafe(Ped ped, Vehicle vehicle, int seat)
     {
         if (!Entity.Exists(ped) || !Entity.Exists(vehicle))
         {
-            return;
+            return false;
         }
 
         try
         {
             Function.Call(Hash.SET_PED_INTO_VEHICLE, ped.Handle, vehicle.Handle, seat);
+
+            if (IsPedOccupyingVehicleSeatSafe(ped, vehicle, seat))
+            {
+                return true;
+            }
         }
         catch
         {
-            try
-            {
-                Function.Call(
-                    Hash.TASK_ENTER_VEHICLE,
-                    ped.Handle,
-                    vehicle.Handle,
-                    5000,
-                    seat,
-                    2.0f,
-                    1,
-                    0);
-            }
-            catch
-            {
-            }
+            // Fallback ci-dessous : on garde le mod robuste si la native directe échoue.
+        }
+
+        try
+        {
+            Function.Call(
+                Hash.TASK_ENTER_VEHICLE,
+                ped.Handle,
+                vehicle.Handle,
+                5000,
+                seat,
+                2.0f,
+                1,
+                0);
+        }
+        catch
+        {
+        }
+
+        /*
+         * TASK_ENTER_VEHICLE est asynchrone. Pour un spawn critique, on ne considère
+         * pas que le siège est acquis tant que le ped n'est pas réellement dedans.
+         */
+        return IsPedOccupyingVehicleSeatSafe(ped, vehicle, seat);
+    }
+
+    private bool IsPedOccupyingVehicleSeatSafe(Ped ped, Vehicle vehicle, int seat)
+    {
+        if (!Entity.Exists(ped) || !Entity.Exists(vehicle))
+        {
+            return false;
+        }
+
+        try
+        {
+            int occupantHandle = Function.Call<int>(Hash.GET_PED_IN_VEHICLE_SEAT, vehicle.Handle, seat, false);
+            return occupantHandle == ped.Handle;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -15361,14 +15654,6 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
     private const int EnemyRaidPostCombatVehicleCleanupGraceMs = 1800;
     private const int EnemyRaidVisibleVehicleCleanupMaxMs = 45000;
 
-    /*
-     * Mort du joueur :
-     * GTA peut supprimer des peds pendant la séquence mort/respawn.
-     * On mémorise donc le nombre d'ennemis encore vivants avant la mort,
-     * puis on reconstruit la vague près du joueur après le respawn si nécessaire.
-     */
-    private const int EnemyRaidPlayerDeathRestoreDelayMs = 1800;
-
     private const float EnemyRaidSpawnMinDistance = 72.0f;
     private const float EnemyRaidSpawnMaxDistance = 130.0f;
     private const float EnemyRaidRelocationMinDistance = 82.0f;
@@ -15383,7 +15668,6 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private const float EnemyRaidPostCombatVehicleCleanupDistance = 135.0f;
     private const float EnemyRaidPostCombatVehicleForceCleanupDistance = 260.0f;
-    private const float EnemyRaidRebuildAfterDeathDistance = 260.0f;
 
     private const int EnemyRaidDrivingStyle = ProfessionalDrivingStyle;
     private const int EnemyRaidFullAutoFiringPattern = unchecked((int)0xC6EE6B4C);
@@ -15391,12 +15675,6 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
     private bool _enemyRaidActive;
     private int _nextEnemyRaidCallAllowedAt;
     private int _nextEnemyRaidThinkAt;
-
-    private bool _enemyRaidPlayerDeathInProgress;
-    private bool _enemyRaidRestorePendingAfterPlayerDeath;
-    private int _enemyRaidRestoreMemberCountAfterDeath;
-    private int _enemyRaidRestoreAllowedAt;
-    private int _enemyRaidLastKnownLiveMemberCount;
 
     /*
      * _enemyRaidNpcHandles = ennemis actuellement vivants/actifs.
@@ -15479,15 +15757,10 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             return;
         }
 
-        SpawnEnemyRaidWave(allowedMembers, requestedMembers, false);
+        SpawnEnemyRaidWave(allowedMembers, requestedMembers);
     }
 
     private void SpawnEnemyRaidWave(int memberCount, int originalRequestedCount)
-    {
-        SpawnEnemyRaidWave(memberCount, originalRequestedCount, false);
-    }
-
-    private void SpawnEnemyRaidWave(int memberCount, int originalRequestedCount, bool restoredAfterPlayerDeath)
     {
         Ped player = Game.Player.Character;
 
@@ -15613,21 +15886,9 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
         _enemyRaidActive = true;
         _nextEnemyRaidThinkAt = 0;
-        _enemyRaidPlayerDeathInProgress = false;
-        _enemyRaidRestorePendingAfterPlayerDeath = false;
-        _enemyRaidRestoreMemberCountAfterDeath = 0;
-        _enemyRaidLastKnownLiveMemberCount = CountLiveEnemyRaidMembersWithoutCleanup();
 
         OrderEnemyRaidVehiclesToPlayer(true);
         ForceRefreshAllEnemyRaidNpcBlips();
-
-        if (restoredAfterPlayerDeath)
-        {
-            ShowStatus(
-                "Ballas : " + createdMembers.ToString(CultureInfo.InvariantCulture) + " survivant(s) reprennent l'attaque après le respawn.",
-                5500);
-            return;
-        }
 
         string cappedText = safeMemberCount < originalRequestedCount
             ? " (limite active atteinte)"
@@ -15702,7 +15963,6 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             return;
         }
 
-        HandleEnemyRaidPlayerAliveAfterDeath(player);
         CleanupEnemyRaidHandleSets(true);
         UpdateEnemyRaidAbandonedVehicles(player);
 
@@ -15825,11 +16085,6 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private void CleanupEnemyRaidHandleSets(bool allowPostCombatCleanup)
     {
-        if (_enemyRaidPlayerDeathInProgress)
-        {
-            return;
-        }
-
         List<int> deadNpcHandles = new List<int>();
 
         foreach (int handle in _enemyRaidNpcHandles)
@@ -15869,11 +16124,6 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         }
 
         _enemyRaidActive = _enemyRaidNpcHandles.Count > 0;
-
-        if (_enemyRaidActive)
-        {
-            _enemyRaidLastKnownLiveMemberCount = _enemyRaidNpcHandles.Count;
-        }
 
         if (!_enemyRaidActive && allowPostCombatCleanup)
         {
@@ -16579,138 +16829,18 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private void HandleEnemyRaidPlayerDeath(Ped player)
     {
-        if (!_enemyRaidActive && _enemyRaidNpcHandles.Count == 0 && _enemyRaidLastKnownLiveMemberCount <= 0)
+        if (!_enemyRaidActive &&
+            _enemyRaidNpcHandles.Count == 0 &&
+            _enemyRaidKnownNpcHandles.Count == 0 &&
+            _enemyRaidVehicleHandles.Count == 0 &&
+            _enemyRaidVehicleCleanupHandles.Count == 0)
         {
             return;
         }
 
-        int liveMembers = CountLiveEnemyRaidMembersWithoutCleanup();
-
-        if (liveMembers <= 0)
-        {
-            liveMembers = _enemyRaidLastKnownLiveMemberCount;
-        }
-
-        liveMembers = Math.Max(0, Math.Min(liveMembers, EnemyRaidMaxActiveMembers));
-
-        if (!_enemyRaidPlayerDeathInProgress)
-        {
-            _enemyRaidPlayerDeathInProgress = true;
-            _enemyRaidRestorePendingAfterPlayerDeath = liveMembers > 0;
-            _enemyRaidRestoreMemberCountAfterDeath = liveMembers;
-            _enemyRaidRestoreAllowedAt = Game.GameTime + EnemyRaidPlayerDeathRestoreDelayMs;
-        }
-        else if (liveMembers > _enemyRaidRestoreMemberCountAfterDeath)
-        {
-            _enemyRaidRestoreMemberCountAfterDeath = liveMembers;
-            _enemyRaidRestorePendingAfterPlayerDeath = true;
-        }
-
-        MaintainEnemyRaidEntitiesDuringPlayerDeath();
-    }
-
-    private void HandleEnemyRaidPlayerAliveAfterDeath(Ped player)
-    {
-        if (!_enemyRaidPlayerDeathInProgress && !_enemyRaidRestorePendingAfterPlayerDeath)
-        {
-            return;
-        }
-
-        if (Game.GameTime < _enemyRaidRestoreAllowedAt)
-        {
-            MaintainEnemyRaidEntitiesDuringPlayerDeath();
-            return;
-        }
-
-        int restoreCount = Math.Max(0, Math.Min(_enemyRaidRestoreMemberCountAfterDeath, EnemyRaidMaxActiveMembers));
-        bool shouldRestore = _enemyRaidRestorePendingAfterPlayerDeath && restoreCount > 0;
-
-        _enemyRaidPlayerDeathInProgress = false;
-        _enemyRaidRestorePendingAfterPlayerDeath = false;
-        _enemyRaidRestoreMemberCountAfterDeath = 0;
-        _enemyRaidRestoreAllowedAt = 0;
-
-        if (!shouldRestore)
-        {
-            CleanupEnemyRaidHandleSets(true);
-            return;
-        }
-
-        int liveNow = CountLiveEnemyRaidMembersWithoutCleanup();
-        bool rebuildNearPlayer = liveNow == 0 || ShouldRebuildEnemyRaidAfterPlayerDeath(player);
-
-        if (rebuildNearPlayer)
-        {
-            ForceDeleteAllEnemyRaidEntitiesAndRecords(true);
-            SpawnEnemyRaidWave(restoreCount, restoreCount, true);
-            return;
-        }
-
-        _enemyRaidActive = true;
-        _enemyRaidLastKnownLiveMemberCount = CountLiveEnemyRaidMembersWithoutCleanup();
-        ForceRefreshAllEnemyRaidNpcBlips();
-        OrderEnemyRaidVehiclesToPlayer(true);
-        ShowStatus("Ballas : les survivants reprennent l'attaque.", 4000);
-    }
-
-    private bool ShouldRebuildEnemyRaidAfterPlayerDeath(Ped player)
-    {
-        if (!Entity.Exists(player))
-        {
-            return false;
-        }
-
-        float closestDistance = float.MaxValue;
-        List<int> handles = new List<int>(_enemyRaidNpcHandles);
-
-        for (int i = 0; i < handles.Count; i++)
-        {
-            SpawnedNpc npc = FindEnemyRaidNpcRecordByHandle(handles[i]);
-
-            if (npc == null || !Entity.Exists(npc.Ped) || npc.Ped.IsDead)
-            {
-                continue;
-            }
-
-            float distance = npc.Ped.Position.DistanceTo(player.Position);
-
-            if (distance < closestDistance)
-            {
-                closestDistance = distance;
-            }
-        }
-
-        return closestDistance == float.MaxValue || closestDistance > EnemyRaidRebuildAfterDeathDistance;
-    }
-
-    private void MaintainEnemyRaidEntitiesDuringPlayerDeath()
-    {
-        List<int> npcHandles = new List<int>(_enemyRaidKnownNpcHandles);
-
-        for (int i = 0; i < npcHandles.Count; i++)
-        {
-            SpawnedNpc npc = FindEnemyRaidNpcRecordByHandle(npcHandles[i]);
-
-            if (npc == null || !Entity.Exists(npc.Ped) || npc.Ped.IsDead)
-            {
-                continue;
-            }
-
-            MaintainEnemyRaidPedState(npc.Ped);
-            ForceRefreshEnemyRaidNpcBlip(npc, false);
-        }
-
-        List<int> vehicleHandles = new List<int>(_enemyRaidVehicleHandles);
-
-        for (int i = 0; i < vehicleHandles.Count; i++)
-        {
-            Vehicle vehicle = FindVehicleByHandle(vehicleHandles[i]);
-
-            if (Entity.Exists(vehicle))
-            {
-                ConfigureEnemyRaidVehicleSoftState(vehicle);
-            }
-        }
+        // Je supprime toute la vague quand je meurs pour eviter que les Ballas restent en ville.
+        ForceDeleteAllEnemyRaidEntitiesAndRecords(true);
+        ShowStatus("Ballas : attaque annulée après ta mort.", 3500);
     }
 
     private void BeginEnemyRaidPostCombatCleanup()
@@ -16736,7 +16866,6 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         }
 
         _enemyRaidActive = false;
-        _enemyRaidLastKnownLiveMemberCount = 0;
         _nextEnemyRaidThinkAt = 0;
     }
 
@@ -16880,7 +17009,6 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         }
 
         _enemyRaidActive = false;
-        _enemyRaidLastKnownLiveMemberCount = 0;
         _nextEnemyRaidThinkAt = 0;
     }
 
