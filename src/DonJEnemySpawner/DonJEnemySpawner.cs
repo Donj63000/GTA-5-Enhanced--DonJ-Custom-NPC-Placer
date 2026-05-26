@@ -413,7 +413,9 @@ private enum MainMenuAction
     CleanNpcs,
     CleanVehicles,
     CleanObjects,
-    CleanInteriorPortals
+    CleanInteriorPortals,
+
+    TerminatorMode
 }
 
 private enum MainMenuRowKind
@@ -792,6 +794,7 @@ private enum EnemyBehavior
         {
             RefreshPlayerRelationshipIfNeeded();
             UpdateCartelContactAndConvoy();
+            UpdateTerminatorMode();
             _autoRespawnsThisTick = 0;
 
             if (_customModelInputRequested)
@@ -816,6 +819,8 @@ private enum EnemyBehavior
             {
                 UpdatePlacementMode();
             }
+
+            DrawTerminatorModeHud();
 
             if (_menuVisible)
             {
@@ -878,6 +883,12 @@ private enum EnemyBehavior
                 return;
             }
 
+            if (TryHandleTerminatorVisionKey(e.KeyCode))
+            {
+                e.Handled = true;
+                return;
+            }
+
             if (!_menuVisible)
             {
                 return;
@@ -903,6 +914,7 @@ private enum EnemyBehavior
     {
         LogInfo("Arret", TrainerTitle + " arrete.");
         StopPlacementMode(false);
+        DisableTerminatorMode(false);
         ForceDeleteHighSecurityEscortEntitiesAndRecords(true);
 
         for (int i = 0; i < _spawnedNpcs.Count; i++)
@@ -1228,6 +1240,10 @@ private void ChangeMainMenuValue(int direction, List<MainMenuEntry> entries)
         case MainMenuAction.ExitDestinationInfo:
             ShowStatus("Les sorties utilisent automatiquement la derniere entree active.", 2500);
             break;
+
+        case MainMenuAction.TerminatorMode:
+            ToggleTerminatorMode();
+            break;
     }
 
     NormalizeMainMenuSelection(BuildMainMenuEntries());
@@ -1321,6 +1337,10 @@ private void ActivateMainMenuItem(List<MainMenuEntry> entries)
         case MainMenuAction.CleanInteriorPortals:
             CleanAllInteriorPortals();
             break;
+
+        case MainMenuAction.TerminatorMode:
+            ToggleTerminatorMode();
+            break;
     }
 
     // Contrat historique conserve pour les tests source de l'ancien menu:
@@ -1331,7 +1351,7 @@ private void ActivateMainMenuItem(List<MainMenuEntry> entries)
 
 private List<MainMenuEntry> BuildMainMenuEntries()
 {
-    List<MainMenuEntry> entries = new List<MainMenuEntry>(40);
+    List<MainMenuEntry> entries = new List<MainMenuEntry>(44);
 
     AddMainMenuRow(entries, MainMenuAction.PlacementType, "Type de placement", PlacementTypeDisplayName(_selectedPlacementType), MainMenuRowKind.Primary, 0, true);
     AddMainMenuRow(entries, MainMenuAction.PrecisePlacement, "Placement camera precis", "Ouvrir le placement fin", MainMenuRowKind.PrimaryAction, 0, true);
@@ -1435,6 +1455,15 @@ private List<MainMenuEntry> BuildMainMenuEntries()
         AddMainMenuRow(entries, MainMenuAction.CleanObjects, "Nettoyer objets", "Supprimer les objets places", MainMenuRowKind.Danger, 1, true);
         AddMainMenuRow(entries, MainMenuAction.CleanInteriorPortals, "Nettoyer entrees/sorties", "Supprimer les reperes interieurs", MainMenuRowKind.Danger, 1, true);
     }
+
+    AddMainMenuRow(
+        entries,
+        MainMenuAction.TerminatorMode,
+        "Mode Terminator",
+        _terminatorModeEnabled ? "ACTIVE - vision rouge T-800" : "DESACTIVE",
+        _terminatorModeEnabled ? MainMenuRowKind.Primary : MainMenuRowKind.Normal,
+        0,
+        true);
 
     return entries;
 }
@@ -2046,6 +2075,11 @@ private Color GetMainMenuEntryAccent(MainMenuEntry entry)
         case MainMenuAction.CleanInteriorPortals:
             return Color.FromArgb(230, 210, 80, 80);
 
+        case MainMenuAction.TerminatorMode:
+            return _terminatorModeEnabled
+                ? Color.FromArgb(245, 255, 42, 42)
+                : Color.FromArgb(220, 140, 42, 42);
+
         default:
             return Color.FromArgb(230, 185, 32, 40);
     }
@@ -2325,6 +2359,9 @@ private string MainMenuActionHint(MainMenuEntry entry)
         case MainMenuAction.CleanInteriorPortals:
             return "Nettoyage immediat. Utilise cette action seulement si tu es sur.";
 
+        case MainMenuAction.TerminatorMode:
+            return "Active/desactive le mode T-800. Tu peux revenir en 3e personne; la vision rouge marche seulement en 1ere personne.";
+
         case MainMenuAction.ExitActiveInfo:
         case MainMenuAction.ExitDestinationInfo:
             return "Place une entree, entre dedans, puis pose une sortie dans l'interieur.";
@@ -2369,6 +2406,7 @@ private static bool IsMainMenuValueEditable(MainMenuAction action)
         case MainMenuAction.ObjectAutoRespawn:
         case MainMenuAction.InteriorCategory:
         case MainMenuAction.InteriorModel:
+        case MainMenuAction.TerminatorMode:
             return true;
 
         default:

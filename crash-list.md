@@ -492,3 +492,134 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menee: J'ai fait choisir au helper de test la surcharge par nombre d'arguments, puis j'ai rendu le calcul `Shift` paresseux dans `ChangeMainMenuValue` uniquement pour les reglages qui utilisent un pas rapide.
 - Verification: `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1 -UseStubApi`, `dotnet build GTA5modDEV.sln -c Release` et `dotnet test GTA5modDEV.sln -c Release` ont reussi avec `161` tests verts.
 - Resolution: Resolue. Incident de test headless corrige pendant l'intervention.
+
+## 2026-05-24 15:51:58 +02:00 - Echec de compilation transitoire pendant ajout du mode Terminator
+- Statut: Ferme
+- Contexte: Premiere execution de `dotnet build GTA5modDEV.sln -c Release` apres ajout de `DonJEnemySpawner.TerminatorMode.cs` et des hooks menu/tick/HUD.
+- Symptome: La build a echoue avec trois incompatibilites API v2: lecture de `Ped.IsEnemy`, appel `Entity.ClearLastWeaponDamage()` absent, et lecture de `Ped.Speed` absente.
+- Sources verifiees:
+  - `console dotnet build GTA5modDEV.sln -c Release`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.TerminatorMode.cs`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.cs`
+  - `tests\DonJEnemySpawner.Tests\DonJEnemySpawnerTests.cs`
+  - `tests\DonJEnemySpawner.Tests\SafetySimulationTests.cs`
+- Extraits utiles:
+  - `DonJEnemySpawner.TerminatorMode.cs(507,26): error CS0154: Impossible d'utiliser la propriete ou l'indexeur 'Ped.IsEnemy' dans ce contexte, car il lui manque l'accesseur get`.
+  - `DonJEnemySpawner.TerminatorMode.cs(850,20): error CS1061: 'Entity' ne contient pas de definition pour 'ClearLastWeaponDamage'`.
+  - `DonJEnemySpawner.TerminatorMode.cs(958,28): error CS1061: 'Ped' ne contient pas de definition pour 'Speed'`.
+- Analyse / hypothese: Le code fourni ciblait des membres non lisibles ou absents dans l'API ScriptHookVDotNet v2 disponible localement, alors que le projet doit rester compatible avec NIB/SHVDN2.
+- Action menee: J'ai remplace la lecture `Ped.IsEnemy` par `HasHostileRelationshipToProtectedPed(ped, player)`, garde le nettoyage des degats via `CLEAR_ENTITY_LAST_DAMAGE_ENTITY`, et remplace `Ped.Speed` par la native `GET_ENTITY_SPEED`.
+- Verification: `dotnet build GTA5modDEV.sln -c Release`, `dotnet test GTA5modDEV.sln -c Release` et `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1` ont reussi avec `163` tests verts.
+- Resolution: Resolue. Incident de compilation transitoire corrige pendant l'intervention.
+
+## 2026-05-24 17:05:45 +02:00 - Vie bloquee a 2000 HP en mode Terminator
+- Statut: Ferme
+- Contexte: Test en jeu du mode Terminator apres ajout du filtre T-800 et de la resistance joueur.
+- Symptome: En mode Terminator, la vie restait bloquee a `2000` et le joueur devenait immortel au lieu d'etre tres resistant mais tuable sous bombardement.
+- Sources verifiees:
+  - `tools\collect-bug-logs.ps1 -Title "bug-terminator-health-locked" -SinceHours 6`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260524-170325-bug-terminator-health-locked`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260524-170325-bug-terminator-health-locked\summary.md`
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\NIBScriptHookVDotNet.log`
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\ScriptHookV.log`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.TerminatorMode.cs`
+  - `tests\DonJEnemySpawner.Tests\DonJEnemySpawnerTests.cs`
+- Extraits utiles:
+  - `DonJEnemySpawner.TerminatorMode.cs`: le bloc `if (SafeGetPedHealth(player) < TerminatorMinHealth) { SafeSetPedHealth(player, TerminatorMinHealth); }` s'executait dans `ApplyTerminatorModeToPlayer` a chaque tick.
+  - `summary.md`: 10 logs GTA/loader copies; aucun extrait runtime ne pointe vers un crash, le symptome vient de la logique source de regeneration.
+- Analyse / hypothese: La sante etait traitee comme un minimum permanent au lieu d'un boost initial avec regeneration lente. En plus, l'armure etait remplie instantanement des qu'elle passait sous le seuil, ce qui renforcait l'effet immortel.
+- Action menee: J'ai limite le soin a 2000 HP a l'activation, ajoute un suivi de degats, une regeneration lente de vie apres delai, et une regeneration d'armure par paliers au lieu d'un remplissage instantane a chaque tick. J'ai ajoute des tests source pour interdire le retour du verrou `HP = 2000`.
+- Verification: `dotnet build GTA5modDEV.sln -c Release`, `dotnet test GTA5modDEV.sln -c Release` et `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1` ont reussi avec `163` tests verts.
+- Resolution: Resolue cote code. A valider en jeu sous tirs lourds/explosifs pour ajuster les valeurs de regeneration si necessaire.
+
+## 2026-05-24 17:17:59 +02:00 - Barres sombres haut/bas dans le HUD Terminator
+- Statut: Ferme
+- Contexte: Test visuel en jeu du HUD Terminator en premiere personne.
+- Symptome: Deux bandes sombres plein ecran apparaissaient en haut et en bas de l'image, ce qui assombrissait la vue et genait la lisibilite.
+- Sources verifiees:
+  - Capture utilisateur du HUD en jeu.
+  - `tools\collect-bug-logs.ps1 -Title "bug-terminator-hud-dark-bars" -SinceHours 3`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260524-171619-bug-terminator-hud-dark-bars`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260524-171619-bug-terminator-hud-dark-bars\summary.md`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.TerminatorMode.cs`
+  - `tests\DonJEnemySpawner.Tests\DonJEnemySpawnerTests.cs`
+- Extraits utiles:
+  - `DonJEnemySpawner.TerminatorMode.cs`: `DrawRect(0, 0, TerminatorHudWidth, 60, Color.FromArgb(118, 12, 0, 0));`.
+  - `DonJEnemySpawner.TerminatorMode.cs`: `DrawRect(0, TerminatorHudHeight - 58, TerminatorHudWidth, 58, Color.FromArgb(112, 12, 0, 0));`.
+  - `summary.md`: 10 logs GTA/loader copies; aucun crash runtime associe, bug visuel cause par le rendu HUD.
+- Analyse / hypothese: Les deux rectangles HUD avaient ete ajoutes pour cadrer l'affichage, mais ils formaient des barres noires trop presentes et masquaient inutilement la vue.
+- Action menee: J'ai supprime les deux rectangles plein ecran haut/bas et ajoute un test source pour empecher leur retour.
+- Verification: `dotnet build GTA5modDEV.sln -c Release`, `dotnet test GTA5modDEV.sln -c Release` et `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1` ont reussi avec `163` tests verts.
+- Resolution: Resolue cote code. A valider en jeu sur la meme scene pour confirmer que seules les donnees HUD utiles restent visibles.
+
+## 2026-05-24 16:41:02 +02:00 - Echec de compilation transitoire pendant refonte impact/HUD Terminator
+- Statut: Ferme
+- Contexte: Premiere execution de `dotnet build GTA5modDEV.sln -c Release` apres remplacement complet de `DonJEnemySpawner.TerminatorMode.cs` pour corriger l'effet telekinesie et refondre la vision T-800.
+- Symptome: La build a echoue avec `CS0102` parce que le nouveau fichier redeclarait `NativeGetSelectedPedWeapon`, deja defini dans la classe partial principale.
+- Sources verifiees:
+  - `console dotnet build GTA5modDEV.sln -c Release`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.TerminatorMode.cs`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.cs`
+  - `tests\DonJEnemySpawner.Tests\DonJEnemySpawnerTests.cs`
+- Extraits utiles:
+  - `DonJEnemySpawner.TerminatorMode.cs(60,25): error CS0102: Le type 'DonJEnemySpawner' contient deja une definition pour 'NativeGetSelectedPedWeapon'`.
+  - `DonJEnemySpawner.cs`: `private const ulong NativeGetSelectedPedWeapon = 0x0A6DB4965674D243UL;`.
+- Analyse / hypothese: Le fichier partial partage le meme type C# que le fichier principal; la constante native fournie etait donc en conflit avec la constante existante.
+- Action menee: J'ai retire la redeclaration dans le partial Terminator et conserve l'utilisation de la constante native existante du fichier principal.
+- Verification: `dotnet build GTA5modDEV.sln -c Release`, `dotnet test GTA5modDEV.sln -c Release` et `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1` ont reussi avec `163` tests verts.
+- Resolution: Resolue. Incident de compilation transitoire corrige pendant l'intervention.
+
+## 2026-05-24 17:24:52 +02:00 - Vision Terminator trop sombre la nuit
+- Statut: Ferme
+- Contexte: Test en jeu du mode Terminator en zones sombres ou de nuit.
+- Symptome: La vision rouge restait trop dependante de l'eclairage ambiant; dans l'obscurite, le joueur pouvait encore etre gene par le manque de lumiere.
+- Sources verifiees:
+  - `tools\collect-bug-logs.ps1 -Title "bug-terminator-night-vision-dark" -SinceHours 3`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260524-172128-bug-terminator-night-vision-dark`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260524-172128-bug-terminator-night-vision-dark\summary.md`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.TerminatorMode.cs`
+  - `tests\DonJEnemySpawner.Tests\DonJEnemySpawnerTests.cs`
+- Extraits utiles:
+  - `DonJEnemySpawner.TerminatorMode.cs`: `TryCallNative(NativeSetTimecycleModifier, "REDMIST_blend");` appliquait le rendu rouge, mais sans assistance native de basse lumiere.
+  - `summary.md`: 10 logs GTA/loader copies; aucun crash runtime associe, le probleme est un ajustement visuel de gameplay.
+- Analyse / hypothese: Le timecycle rouge donne l'identite visuelle T-800, mais ne garantit pas une meilleure lisibilite en scene sombre. La native `SET_NIGHTVISION` est plus adaptee pour compenser l'obscurite, a condition de la limiter a la vue Terminator en premiere personne.
+- Action menee: J'ai ajoute l'activation de `SET_NIGHTVISION` avec le filtre Terminator, sa coupure en sortie de premiere personne ou a la desactivation du mode, et j'ai reduit l'opacite du filtre rouge pour garder une image plus lisible.
+- Verification: `dotnet build GTA5modDEV.sln -c Release`, `dotnet test GTA5modDEV.sln -c Release` et `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1` ont reussi avec `163` tests verts.
+- Resolution: Resolue cote code. A valider en jeu de nuit pour confirmer que le rendu reste rouge et lisible sans etre trop clair.
+
+## 2026-05-24 17:34:53 +02:00 - Tir au contact declenche la propulsion Terminator
+- Statut: Ferme
+- Contexte: Test en jeu du mode Terminator contre un vehicule ou un PNJ lorsque le joueur est colle ou presque a la cible.
+- Symptome: En tirant sur une cible a tres courte distance, le script pouvait la propulser comme si un coup de poing avait ete porte.
+- Sources verifiees:
+  - `tools\collect-bug-logs.ps1 -Title "bug-terminator-close-shot-propels-target" -SinceHours 3`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260524-173117-bug-terminator-close-shot-propels-target`
+  - `C:\Users\nodig\GTA5modDEV\bug-reports\20260524-173117-bug-terminator-close-shot-propels-target\summary.md`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.TerminatorMode.cs`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.cs`
+  - `tests\DonJEnemySpawner.Tests\DonJEnemySpawnerTests.cs`
+- Extraits utiles:
+  - `DonJEnemySpawner.TerminatorMode.cs`: `HasFreshTerminatorMeleeImpact` utilisait `HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY` pour confirmer l'impact, ce qui peut aussi etre vrai apres un tir du joueur.
+  - `DonJEnemySpawner.TerminatorMode.cs`: la proximite et `AreEntitiesTouching(player, target)` rendaient le cas visible quand le joueur etait colle a la cible.
+  - `summary.md`: 10 logs GTA/loader copies; aucun crash runtime associe, le probleme vient de la logique source de classification des degats.
+- Analyse / hypothese: La confirmation "endommagé par le joueur" etait correcte pour eviter la telekinesie, mais pas suffisante pour distinguer une balle tiree au contact d'un vrai coup de melee.
+- Action menee: J'ai ajoute une fenetre de blocage apres tir du joueur, un nettoyage des flags de degats proches pendant cette fenetre, et un garde-fou qui n'accepte l'etat melee generique que si l'arme selectionnee est compatible melee. Les commandes de melee directes restent acceptees pour garder le comportement voulu quand le joueur frappe vraiment.
+- Verification: `dotnet build GTA5modDEV.sln -c Release`, `dotnet test GTA5modDEV.sln -c Release` et `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1` ont reussi avec `163` tests verts.
+- Resolution: Resolue cote code. A valider en jeu en tirant au contact puis en donnant un vrai coup pour verifier les deux chemins.
+
+## 2026-05-24 17:34:53 +02:00 - Echecs transitoires pendant correction tir/impact Terminator
+- Statut: Ferme
+- Contexte: Verification locale apres ajout du blocage des tirs proches dans `DonJEnemySpawner.TerminatorMode.cs`.
+- Symptome: Une premiere build a echoue avec `CS0221`, puis une execution de tests a echoue sur une assertion source trop stricte.
+- Sources verifiees:
+  - `console dotnet build GTA5modDEV.sln -c Release`
+  - `console dotnet test GTA5modDEV.sln -c Release`
+  - `src\DonJEnemySpawner\DonJEnemySpawner.TerminatorMode.cs`
+  - `tests\DonJEnemySpawner.Tests\DonJEnemySpawnerTests.cs`
+- Extraits utiles:
+  - `DonJEnemySpawner.TerminatorMode.cs(768,46): error CS0221: Impossible de convertir la valeur de constante '2725352035' en 'int'`.
+  - `SourceFiles_TerminatorModeIsIsolatedAndHookedIntoMenuTickHudAndShutdown`: `Un tir recent doit bloquer la fenetre de propulsion avant toute detection de melee`.
+- Analyse / hypothese: `WeaponHash.Unarmed` depasse la plage constante signee de `int` et doit etre compare avec `unchecked`. Le test utilisait le bloc `UpdateTerminatorMode` au lieu du bloc `UpdateTerminatorPunchPower`.
+- Action menee: J'ai corrige la comparaison avec `unchecked((int)WeaponHash.Unarmed)` et ajuste l'assertion de test pour chercher l'ordre dans le source Terminator complet.
+- Verification: Les relances de `dotnet build GTA5modDEV.sln -c Release`, `dotnet test GTA5modDEV.sln -c Release` et `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1` ont reussi avec `163` tests verts.
+- Resolution: Resolue. Incidents transitoires corriges pendant l'intervention.

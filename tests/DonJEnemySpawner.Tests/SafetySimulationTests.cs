@@ -72,7 +72,8 @@ public class SafetySimulationTests
                 "CleanNpcs",
                 "CleanVehicles",
                 "CleanObjects",
-                "CleanInteriorPortals"
+                "CleanInteriorPortals",
+                "TerminatorMode"
             },
             byAction.Keys.ToArray());
 
@@ -86,6 +87,8 @@ public class SafetySimulationTests
         AssertEntry(byAction["VehicleAutoRespawn"], "Reapparition auto", "Non", "Normal", 1, true);
         AssertEntry(byAction["ObjectAutoRespawn"], "Reapparition auto", "Non", "Normal", 1, true);
         AssertEntry(byAction["CleanInteriorPortals"], "Nettoyer entrees/sorties", "Supprimer les reperes interieurs", "Danger", 1, true);
+        AssertEntry(byAction["TerminatorMode"], "Mode Terminator", "DESACTIVE", "Normal", 0, true);
+        Assert.AreEqual("TerminatorMode", GetFieldValue<object>(entries[entries.Count - 1], "Action").ToString());
     }
 
     [TestMethod]
@@ -107,12 +110,30 @@ public class SafetySimulationTests
         CollectionAssert.Contains(actions, "SectionInterior");
         CollectionAssert.Contains(actions, "SectionSave");
         CollectionAssert.Contains(actions, "SectionCleanup");
+        CollectionAssert.Contains(actions, "TerminatorMode");
 
         CollectionAssert.DoesNotContain(actions, "VehicleModel");
         CollectionAssert.DoesNotContain(actions, "ObjectModel");
         CollectionAssert.DoesNotContain(actions, "InteriorModel");
         CollectionAssert.DoesNotContain(actions, "Save");
         CollectionAssert.DoesNotContain(actions, "CleanNpcs");
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_TerminatorModeReflectsActiveState()
+    {
+        object script = CreateInitializedHeadlessScript();
+
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        object terminator = entries[FindActionIndex(entries, "TerminatorMode")];
+        AssertEntry(terminator, "Mode Terminator", "DESACTIVE", "Normal", 0, true);
+
+        SetFieldValue(script, "_terminatorModeEnabled", true);
+
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        terminator = entries[FindActionIndex(entries, "TerminatorMode")];
+        AssertEntry(terminator, "Mode Terminator", "ACTIVE - vision rouge T-800", "Primary", 0, true);
+        Assert.AreEqual("TerminatorMode", GetFieldValue<object>(entries[entries.Count - 1], "Action").ToString());
     }
 
     [TestMethod]

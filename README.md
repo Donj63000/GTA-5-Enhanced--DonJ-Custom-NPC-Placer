@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Solo scene creation tool for GTA V Enhanced</strong><br>
-  <sub>NPCs, guards, patrols, respawn, Cartel, Ballas, high-security escort, vehicles, objects, interiors, and XML saves.</sub>
+  <sub>NPCs, guards, patrols, respawn, Cartel, Ballas, high-security escort, Terminator mode, vehicles, objects, interiors, and XML saves.</sub>
 </p>
 
 <p align="center">
@@ -13,6 +13,7 @@
 
 - [Main Features](#main-features)
 - [Respawn / Automatic Respawn](#respawn--automatic-respawn)
+- [Terminator Mode](#terminator-mode)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Quick Example](#quick-example)
@@ -58,7 +59,7 @@
     <td width="58%">
       <strong>Overview</strong>
       <br><br>
-      <strong>DonJ Custom NPC Placer</strong> lets you quickly create custom scenes in Los Santos: <strong>armed NPCs</strong>, <strong>guards</strong>, <strong>patrols</strong>, <strong>allies</strong>, <strong>vehicles</strong>, <strong>objects</strong>, <strong>props</strong>, <strong>collectible cash</strong>, <strong>interior entrances/exits</strong>, <strong>Cartel reinforcement calls</strong>, <strong>hostile Ballas calls</strong>, <strong>high-security armored convoy escort</strong>, and <strong>reusable XML saves</strong>.
+      <strong>DonJ Custom NPC Placer</strong> lets you quickly create custom scenes in Los Santos: <strong>armed NPCs</strong>, <strong>guards</strong>, <strong>patrols</strong>, <strong>allies</strong>, <strong>vehicles</strong>, <strong>objects</strong>, <strong>props</strong>, <strong>collectible cash</strong>, <strong>interior entrances/exits</strong>, <strong>Cartel reinforcement calls</strong>, <strong>hostile Ballas calls</strong>, <strong>high-security armored convoy escort</strong>, <strong>Terminator T-800 gameplay mode</strong>, and <strong>reusable XML saves</strong>.
       <br><br>
       The mod is designed as a clean, practical, and immersive placement tool for players who want to build their own bases, checkpoints, action scenes, secured zones, homemade missions, or roleplay setups in story mode.
     </td>
@@ -69,6 +70,7 @@
         <li><strong>Precise placement</strong> with free camera and transparent preview.</li>
         <li><strong>Configurable NPCs</strong> with weapons, health, armor, behaviors, and respawn.</li>
         <li><strong>Phone contacts</strong>: Cartel with <code>C</code>, Ballas with <code>R</code>, high-security escort with <code>L</code>.</li>
+        <li><strong>Terminator mode</strong>: T-800 first-person HUD, red/night/thermal vision, resistance, and heavy melee impacts.</li>
         <li><strong>Collectible cash</strong> with several amounts for rewarding zones and missions.</li>
         <li><strong>Persistent scenes</strong> with automatic respawn and XML saves.</li>
       </ul>
@@ -90,7 +92,7 @@ The mod runs directly **inside GTA V Enhanced**, with no separate application to
 | **2. You open the menu** | In game, `F10` opens the DonJ menu. You choose what you want to place: NPC, vehicle, object, interior entrance/exit, or save options. |
 | **3. You configure the scene** | You set the model, weapon, health, armor, behavior, patrol, respawn, vehicle, or object to place. |
 | **4. You place it in the world** | Direct placement quickly places the item in front of the player. Camera placement lets you aim precisely, rotate the entity, and validate when it is clean. |
-| **5. The mod manages the scene** | After placement, the mod maintains NPCs, their behaviors, blips, relationships, threats, patrols, bodyguards, the Cartel, the Ballas, the high-security escort, and respawn. |
+| **5. The mod manages the scene** | After placement, the mod maintains NPCs, their behaviors, blips, relationships, threats, patrols, bodyguards, the Cartel, the Ballas, the high-security escort, Terminator mode, and respawn. |
 | **6. You save / reload** | Setups can be saved as XML and reloaded later to restore NPCs, vehicles, objects, portals, weapons, behaviors, and respawn options. |
 
 In short: **you build the scene with the menu**, then the mod keeps the placed elements alive in game.
@@ -117,6 +119,11 @@ In short: **you build the scene with the menu**, then the mod keeps the placed e
     <td width="33%"><strong>Collectible loot</strong><br>Cash stacks, bags, briefcases, crates, and cash trolleys with different values.</td>
     <td width="33%"><strong>Mission rewards</strong><br>Cash objects to place in a safehouse, vault, office, or searchable zone.</td>
     <td width="33%"><strong>Gameplay value</strong><br>The player can collect cash with <code>E</code>, then the object disappears from the scene.</td>
+  </tr>
+  <tr>
+    <td width="33%"><strong>Terminator mode</strong><br>T-800 resistance, armor, and restored state when disabled.</td>
+    <td width="33%"><strong>Optical HUD</strong><br>First-person red overlay, night vision, thermal vision, reticle, and target profile.</td>
+    <td width="33%"><strong>Heavy melee</strong><br>Close-range punches can throw NPCs and shove vehicles without turning gunfire into fake impacts.</td>
   </tr>
 </table>
 
@@ -324,6 +331,38 @@ During an ambush, guards react like a real escort:
 - hostile relationships are applied only to valid threats to avoid breaking ambient groups.
 
 If you press `L` again from the phone while an escort is active, the mod orders a withdrawal. The vehicles leave the area, guards are cleaned up properly when they are far enough away or out of view, and you can call a new escort after the short anti-spam delay.
+
+---
+
+### Terminator Mode
+
+The mod includes a **Terminator mode** that can be enabled from the `F10` menu with the `Mode Terminator` row.
+
+When enabled, the player receives a T-800 style combat profile:
+
+- first-person camera is selected once when the mode starts;
+- health is raised to `2000` on activation if it is below that value;
+- armor is raised to `200`;
+- critical hits and ragdoll reactions are reduced;
+- health and armor regenerate only after a delay when the player has stopped taking damage;
+- disabling the mode restores the player's previous health, armor, camera, and vision state.
+
+The mode is designed to make the player very resistant, not permanently invincible. Heavy damage can still bring health down before regeneration has time to recover.
+
+The Terminator HUD appears only when the mode is active **and the camera is in first person**. If you switch back to third person, the special vision is cleared; returning to first person re-applies it.
+
+Vision modes:
+
+| Key | Effect |
+|---|---|
+| `B` | Cycle Terminator vision while the mode is active |
+| Red vision | Default T-800 red optical feed |
+| Night vision | Green low-light vision for dark areas |
+| Thermal vision | See-through thermal vision |
+
+While aiming in first person, the HUD can display a focused target profile with type, faction, health, armor, weapon, model, and distance. The mode also adds heavy close-range melee impacts: confirmed punches can throw nearby NPCs or shove vehicles. Recent gunfire is ignored by this impact system so a close shot does not accidentally trigger a melee launch.
+
+To leave the mode, open the `F10` menu again and select `Mode Terminator`. The mod clears the vision filters and restores the stored player state.
 
 ---
 
@@ -759,7 +798,8 @@ The main menu opens with several sections:
 - Object;
 - Interior;
 - Save;
-- Cleanup.
+- Cleanup;
+- Mode Terminator.
 
 ---
 
@@ -779,6 +819,7 @@ The main menu opens with several sections:
 | `Home` / `End` | Go to the start / end |
 | `Esc` / `Backspace` / `NumPad 0` | Close or go back |
 | `T` | Enter a custom model when the selected NPC model is `Custom` |
+| `B` | Cycle Terminator vision when Terminator mode is active |
 
 ---
 

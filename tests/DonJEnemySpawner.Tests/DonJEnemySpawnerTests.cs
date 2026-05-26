@@ -93,6 +93,34 @@ public class DonJEnemySpawnerTests
         Assert.AreEqual(3000.0f, GetStaticFieldValue<float>("CombatRefreshDistance"), 0.001f);
         Assert.AreEqual(105.0f, GetStaticFieldValue<float>("RuntimeNeutralAssistRadius"), 0.001f);
         Assert.AreEqual(165.0f, GetStaticFieldValue<float>("RuntimeAllyDefenseRadius"), 0.001f);
+        Assert.AreEqual(2000, GetStaticFieldValue<int>("TerminatorMinHealth"));
+        Assert.AreEqual(200, GetStaticFieldValue<int>("TerminatorArmor"));
+        Assert.AreEqual(155, GetStaticFieldValue<int>("TerminatorArmorRefreshThreshold"));
+        Assert.AreEqual(4, GetStaticFieldValue<int>("TerminatorFirstPersonViewMode"));
+        Assert.AreEqual(90, GetStaticFieldValue<int>("TerminatorFocusRefreshIntervalMs"));
+        Assert.AreEqual(260, GetStaticFieldValue<int>("TerminatorFocusMemoryMs"));
+        Assert.AreEqual(650, GetStaticFieldValue<int>("TerminatorPushCooldownMs"));
+        Assert.AreEqual(650, GetStaticFieldValue<int>("TerminatorVisionFilterRefreshMs"));
+        Assert.AreEqual(420, GetStaticFieldValue<int>("TerminatorDamageFlagCleanupIntervalMs"));
+        Assert.AreEqual(360, GetStaticFieldValue<int>("TerminatorWeaponFireImpactBlockMs"));
+        Assert.AreEqual(4800, GetStaticFieldValue<int>("TerminatorHealthRegenDelayAfterDamageMs"));
+        Assert.AreEqual(1150, GetStaticFieldValue<int>("TerminatorHealthRegenIntervalMs"));
+        Assert.AreEqual(18, GetStaticFieldValue<int>("TerminatorHealthRegenAmount"));
+        Assert.AreEqual(1850, GetStaticFieldValue<int>("TerminatorArmorRegenDelayAfterDamageMs"));
+        Assert.AreEqual(760, GetStaticFieldValue<int>("TerminatorArmorRegenIntervalMs"));
+        Assert.AreEqual(14, GetStaticFieldValue<int>("TerminatorArmorRegenAmount"));
+        Assert.AreEqual(-1, GetStaticFieldValue<int>("TerminatorVisionModeNone"));
+        Assert.AreEqual(0, GetStaticFieldValue<int>("TerminatorVisionModeRed"));
+        Assert.AreEqual(1, GetStaticFieldValue<int>("TerminatorVisionModeNight"));
+        Assert.AreEqual(2, GetStaticFieldValue<int>("TerminatorVisionModeThermal"));
+        Assert.AreEqual(3, GetStaticFieldValue<int>("TerminatorVisionModeCount"));
+        Assert.AreEqual(90.0f, GetStaticFieldValue<float>("TerminatorFocusRadius"), 0.001f);
+        Assert.AreEqual(2.15f, GetStaticFieldValue<float>("TerminatorPedImpactRadius"), 0.001f);
+        Assert.AreEqual(2.95f, GetStaticFieldValue<float>("TerminatorVehicleImpactRadius"), 0.001f);
+        Assert.AreEqual(12.8f, GetStaticFieldValue<float>("TerminatorPedThrowSpeed"), 0.001f);
+        Assert.AreEqual(4.85f, GetStaticFieldValue<float>("TerminatorVehiclePushSpeed"), 0.001f);
+        Assert.AreEqual(0x18F621F7A5B1F85DUL, GetStaticFieldValue<ulong>("NativeSetNightvision"));
+        Assert.AreEqual(0x7E08924259E08CE0UL, GetStaticFieldValue<ulong>("NativeSetSeethrough"));
     }
 
     [TestMethod]
@@ -2441,6 +2469,142 @@ public class DonJEnemySpawnerTests
     }
 
     [TestMethod]
+    public void SourceFiles_TerminatorModeIsIsolatedAndHookedIntoMenuTickHudAndShutdown()
+    {
+        string source = File.ReadAllText(GetSourceFilePath());
+        string terminatorSource = File.ReadAllText(GetTerminatorModeSourceFilePath());
+        string tickBlock = ExtractSourceSection(
+            source,
+            "private void OnTick(object sender, EventArgs e)",
+            "private void OnKeyDown(object sender, KeyEventArgs e)");
+        string abortBlock = ExtractSourceSection(
+            source,
+            "private void OnAborted(object sender, EventArgs e)",
+            "private void HandleMainMenuKey(KeyEventArgs e)");
+        string buildMenuBlock = ExtractSourceSection(
+            source,
+            "private List<MainMenuEntry> BuildMainMenuEntries()",
+            "private void AddMainMenuSection");
+        string updateTerminatorBlock = ExtractSourceSection(
+            terminatorSource,
+            "private void UpdateTerminatorMode()",
+            "private void DrawTerminatorModeHud()");
+        string drawTerminatorBlock = ExtractSourceSection(
+            terminatorSource,
+            "private void DrawTerminatorModeHud()",
+            "private void ApplyTerminatorModeToPlayer(Ped player, bool firstApply)");
+        string redVisionBlock = ExtractSourceSection(
+            terminatorSource,
+            "private void DrawTerminatorRedVisionOverlay(Ped player)",
+            "private void DrawTerminatorSideRulers()");
+        string maintainFilterBlock = ExtractSourceSection(
+            terminatorSource,
+            "private void MaintainTerminatorVisionFilter(Ped player)",
+            "private void ClearTerminatorVisionFilter()");
+        string applyFilterBlock = ExtractSourceSection(
+            terminatorSource,
+            "private void ApplyTerminatorVisionFilter(bool force)",
+            "private void MaintainTerminatorVisionFilter(Ped player)");
+        string enableTerminatorBlock = ExtractSourceSection(
+            terminatorSource,
+            "private void EnableTerminatorMode()",
+            "private void DisableTerminatorMode(bool showStatus)");
+
+        StringAssert.Contains(source, "MainMenuAction.TerminatorMode");
+        StringAssert.Contains(source, "TryHandleTerminatorVisionKey(e.KeyCode)");
+        StringAssert.Contains(tickBlock, "UpdateTerminatorMode();");
+        StringAssert.Contains(tickBlock, "DrawTerminatorModeHud();");
+        StringAssert.Contains(abortBlock, "DisableTerminatorMode(false);");
+        StringAssert.Contains(buildMenuBlock, "\"Mode Terminator\"");
+        StringAssert.Contains(buildMenuBlock, "_terminatorModeEnabled ? \"ACTIVE - vision rouge T-800\" : \"DESACTIVE\"");
+
+        StringAssert.Contains(terminatorSource, "private void ToggleTerminatorMode()");
+        StringAssert.Contains(terminatorSource, "private void EnableTerminatorMode()");
+        StringAssert.Contains(terminatorSource, "private void DisableTerminatorMode(bool showStatus)");
+        StringAssert.Contains(terminatorSource, "private void ForceTerminatorFirstPersonCamera()");
+        StringAssert.Contains(terminatorSource, "private void RestoreTerminatorCameraViewModes()");
+        StringAssert.Contains(terminatorSource, "private bool IsTerminatorFirstPersonCameraActive(Ped player)");
+        StringAssert.Contains(terminatorSource, "private void ApplyTerminatorVisionFilter(bool force)");
+        StringAssert.Contains(terminatorSource, "private void ClearTerminatorVisionFilter()");
+        StringAssert.Contains(terminatorSource, "private bool _terminatorLowLightVisionApplied;");
+        StringAssert.Contains(terminatorSource, "private bool _terminatorThermalVisionApplied;");
+        StringAssert.Contains(terminatorSource, "private bool TryHandleTerminatorVisionKey(Keys keyCode)");
+        StringAssert.Contains(terminatorSource, "keyCode != Keys.B");
+        Assert.IsFalse(terminatorSource.Contains("keyCode != Keys.N"), "La touche N ne doit plus etre utilisee par le cycle de vision Terminator.");
+        StringAssert.Contains(terminatorSource, "B change la vision.");
+        Assert.IsFalse(terminatorSource.Contains("N change la vision."), "Le texte d'aide ne doit plus annoncer N pour changer la vision.");
+        StringAssert.Contains(terminatorSource, "private void CycleTerminatorVisionMode()");
+        StringAssert.Contains(terminatorSource, "private void DrawTerminatorRedVisionOverlay(Ped player)");
+        StringAssert.Contains(terminatorSource, "private void DrawTerminatorFocusedTargetPanel(Ped player)");
+        StringAssert.Contains(terminatorSource, "private void UpdateTerminatorPunchPower(Ped player)");
+        StringAssert.Contains(terminatorSource, "private void UpdateTerminatorResistanceRegeneration(Ped player, int currentHealth, int currentArmor)");
+        StringAssert.Contains(terminatorSource, "private int _terminatorLastWeaponFireAt = -1000000;");
+        StringAssert.Contains(terminatorSource, "if (firstApply && currentHealth < TerminatorMinHealth)");
+        Assert.IsFalse(
+            terminatorSource.Contains("if (SafeGetPedHealth(player) < TerminatorMinHealth)"),
+            "Le mode Terminator ne doit plus bloquer la vie a 2000 HP a chaque tick.");
+        Assert.IsFalse(
+            terminatorSource.Contains("if (firstApply || currentArmor < TerminatorArmorRefreshThreshold)"),
+            "L'armure Terminator ne doit plus etre remplie instantanement a chaque tick.");
+        StringAssert.Contains(terminatorSource, "now - _terminatorLastDamageAt >= TerminatorHealthRegenDelayAfterDamageMs");
+        StringAssert.Contains(terminatorSource, "currentHealth = Math.Min(TerminatorMinHealth, currentHealth + TerminatorHealthRegenAmount);");
+        StringAssert.Contains(terminatorSource, "currentArmor = Math.Min(TerminatorArmor, currentArmor + TerminatorArmorRegenAmount);");
+        StringAssert.Contains(terminatorSource, "private bool HasFreshTerminatorMeleeImpact");
+        StringAssert.Contains(terminatorSource, "if (IsTerminatorWeaponFireRecentlyActive(player, now))");
+        StringAssert.Contains(terminatorSource, "private bool IsTerminatorWeaponFireRecentlyActive(Ped player, int now)");
+        StringAssert.Contains(terminatorSource, "private static bool IsTerminatorSelectedWeaponMeleeCompatible(Ped player)");
+        StringAssert.Contains(terminatorSource, "if (!HasEntityBeenDamagedByEntitySafe(target, player))");
+        Assert.IsFalse(
+            terminatorSource.Contains("DrawTerminatorTargetMarkers"),
+            "Le HUD Terminator ne doit plus afficher des cadres autour de toutes les cibles.");
+        Assert.IsFalse(
+            terminatorSource.Contains("TerminatorScanRadius"),
+            "Le mode Terminator ne doit plus scanner/afficher toutes les cibles en permanence.");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetTimecycleModifier, \"REDMIST_blend\");");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetTimecycleModifierStrength, 0.42f);");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetNightvision, true);");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetNightvision, false);");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetSeethrough, true);");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetSeethrough, false);");
+        StringAssert.Contains(applyFilterBlock, "case TerminatorVisionModeNight:");
+        StringAssert.Contains(applyFilterBlock, "case TerminatorVisionModeThermal:");
+        StringAssert.Contains(applyFilterBlock, "case TerminatorVisionModeRed:");
+        StringAssert.Contains(enableTerminatorBlock, "_terminatorVisionMode = TerminatorVisionModeRed;");
+        Assert.IsFalse(
+            enableTerminatorBlock.Contains("TryCallNative(NativeSetNightvision, true);"),
+            "La vision nocturne ne doit pas etre activee automatiquement a l'activation du mode Terminator.");
+        StringAssert.Contains(terminatorSource, "UpdateTerminatorFocusedTarget(player);");
+        StringAssert.Contains(terminatorSource, "SafeGetFreeAimingEntityHandle()");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetPedSuffersCriticalHits, player.Handle, false);");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetFollowPedCamViewMode, TerminatorFirstPersonViewMode);");
+        StringAssert.Contains(terminatorSource, "TryCallNative(NativeSetFollowVehicleCamViewMode, TerminatorFirstPersonViewMode);");
+        StringAssert.Contains(updateTerminatorBlock, "MaintainTerminatorVisionFilter(player);");
+        StringAssert.Contains(updateTerminatorBlock, "if (IsTerminatorFirstPersonCameraActive(player))");
+        Assert.IsFalse(updateTerminatorBlock.Contains("ForceTerminatorFirstPersonCamera();"), "Le mode Terminator ne doit pas verrouiller la vue 1ere personne a chaque tick.");
+        StringAssert.Contains(drawTerminatorBlock, "if (!IsTerminatorFirstPersonCameraActive(player))");
+        Assert.IsFalse(
+            redVisionBlock.Contains("DrawRect(0, 0, TerminatorHudWidth, 60"),
+            "Le HUD Terminator ne doit pas assombrir toute la bande haute.");
+        Assert.IsFalse(
+            redVisionBlock.Contains("DrawRect(0, TerminatorHudHeight - 58, TerminatorHudWidth, 58"),
+            "Le HUD Terminator ne doit pas assombrir toute la bande basse.");
+        StringAssert.Contains(redVisionBlock, "GetTerminatorVisionOverlayColor(impactPulse)");
+        StringAssert.Contains(maintainFilterBlock, "ApplyTerminatorVisionFilter(false);");
+        StringAssert.Contains(maintainFilterBlock, "ClearTerminatorVisionFilter();");
+
+        int damageCheckIndex = terminatorSource.IndexOf("if (!HasEntityBeenDamagedByEntitySafe(target, player))", StringComparison.Ordinal);
+        int coneCheckIndex = terminatorSource.IndexOf("return IsEntityInsideTerminatorPunchCone(player, target, TerminatorImpactConeDot);", StringComparison.Ordinal);
+        int fireBlockIndex = terminatorSource.IndexOf("if (IsTerminatorWeaponFireRecentlyActive(player, now))", StringComparison.Ordinal);
+        int meleeActiveIndex = terminatorSource.IndexOf("bool meleeActive = IsTerminatorMeleeActionActive(player);", StringComparison.Ordinal);
+        int weaponCompatibleIndex = terminatorSource.IndexOf("if (!IsTerminatorSelectedWeaponMeleeCompatible(player))", StringComparison.Ordinal);
+        int performingMeleeIndex = terminatorSource.IndexOf("if (IsTerminatorPedPerformingMeleeActionSafe(player))", StringComparison.Ordinal);
+
+        Assert.IsTrue(damageCheckIndex >= 0 && coneCheckIndex > damageCheckIndex, "Le cone ne doit servir qu'apres confirmation d'un impact GTA reel.");
+        Assert.IsTrue(fireBlockIndex >= 0 && meleeActiveIndex > fireBlockIndex, "Un tir recent doit bloquer la fenetre de propulsion avant toute detection de melee.");
+        Assert.IsTrue(weaponCompatibleIndex >= 0 && performingMeleeIndex > weaponCompatibleIndex, "L'etat melee generique ne doit compter que pour une arme compatible melee.");
+    }
+
+    [TestMethod]
     public void SourceFile_AutoRespawnPersistsAndRequiresPlayerToLeaveArea()
     {
         string source = File.ReadAllText(GetSourceFilePath());
@@ -2999,6 +3163,11 @@ public class DonJEnemySpawnerTests
     private static string GetHighSecurityEscortSourceFilePath()
     {
         return Path.Combine(GetRepositoryRoot(), "src", "DonJEnemySpawner", "DonJEnemySpawner.HighSecurityEscort.cs");
+    }
+
+    private static string GetTerminatorModeSourceFilePath()
+    {
+        return Path.Combine(GetRepositoryRoot(), "src", "DonJEnemySpawner", "DonJEnemySpawner.TerminatorMode.cs");
     }
 
     private static string GetInteriorsSourceFilePath()
