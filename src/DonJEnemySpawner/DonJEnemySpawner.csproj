@@ -5,6 +5,7 @@
     <AssemblyName>DonJCustomNpcPlacer</AssemblyName>
     <UseWindowsForms>true</UseWindowsForms>
     <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>disable</Nullable>
 
     <!-- Je sors directement la DLL dans bin\Release. -->

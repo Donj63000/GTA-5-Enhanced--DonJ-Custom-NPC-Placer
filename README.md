@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Solo scene creation tool for GTA V Enhanced</strong><br>
-  <sub>NPCs, guards, patrols, respawn, Cartel, Ballas, high-security escort, Terminator mode, vehicles, objects, interiors, and XML saves.</sub>
+  <sub>NPCs, guards, patrols, respawn, Cartel, Ballas, high-security escort, Terminator mode, Advanced Justice, vehicles, objects, interiors, and XML saves.</sub>
 </p>
 
 <p align="center">
@@ -14,6 +14,7 @@
 - [Main Features](#main-features)
 - [Respawn / Automatic Respawn](#respawn--automatic-respawn)
 - [Terminator Mode](#terminator-mode)
+- [Advanced Justice](#advanced-justice)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Quick Example](#quick-example)
@@ -59,7 +60,7 @@
     <td width="58%">
       <strong>Overview</strong>
       <br><br>
-      <strong>DonJ Custom NPC Placer</strong> lets you quickly create custom scenes in Los Santos: <strong>armed NPCs</strong>, <strong>guards</strong>, <strong>patrols</strong>, <strong>allies</strong>, <strong>vehicles</strong>, <strong>objects</strong>, <strong>props</strong>, <strong>collectible cash</strong>, <strong>interior entrances/exits</strong>, <strong>Cartel reinforcement calls</strong>, <strong>hostile Ballas calls</strong>, <strong>high-security armored convoy escort</strong>, <strong>Terminator T-800 gameplay mode</strong>, and <strong>reusable XML saves</strong>.
+      <strong>DonJ Custom NPC Placer</strong> lets you quickly create custom scenes in Los Santos: <strong>armed NPCs</strong>, <strong>guards</strong>, <strong>patrols</strong>, <strong>allies</strong>, <strong>vehicles</strong>, <strong>objects</strong>, <strong>props</strong>, <strong>collectible cash</strong>, <strong>interior entrances/exits</strong>, <strong>Cartel reinforcement calls</strong>, <strong>hostile Ballas calls</strong>, <strong>high-security armored convoy escort</strong>, <strong>Terminator T-800 gameplay mode</strong>, an optional <strong>Advanced Justice</strong> system, and <strong>reusable XML saves</strong>.
       <br><br>
       The mod is designed as a clean, practical, and immersive placement tool for players who want to build their own bases, checkpoints, action scenes, secured zones, homemade missions, or roleplay setups in story mode.
     </td>
@@ -89,7 +90,7 @@ The mod runs directly **inside GTA V Enhanced**, with no separate application to
 | Step | What happens |
 |---|---|
 | **1. The game loads the mod** | When story mode starts, `ScriptHookV` and `NIBScriptHookVDotNet2` load `DonJCustomNpcPlacer.ENdll` from the `Scripts` folder. |
-| **2. You open the menu** | In game, `F10` opens the DonJ menu. You choose what you want to place: NPC, vehicle, object, interior entrance/exit, or save options. |
+| **2. You open the menu** | In game, `F10` opens the custom DonJ Obsidian console. Its category rail lets you choose NPCs, vehicles, objects, interiors, scene management, Advanced Justice, or tools. |
 | **3. You configure the scene** | You set the model, weapon, health, armor, behavior, patrol, respawn, vehicle, or object to place. |
 | **4. You place it in the world** | Direct placement quickly places the item in front of the player. Camera placement lets you aim precisely, rotate the entity, and validate when it is clean. |
 | **5. The mod manages the scene** | After placement, the mod maintains NPCs, their behaviors, blips, relationships, threats, patrols, bodyguards, the Cartel, the Ballas, the high-security escort, Terminator mode, and respawn. |
@@ -366,6 +367,71 @@ To leave the mode, open the `F10` menu again and select `Mode Terminator`. The m
 
 ---
 
+### Advanced Justice
+
+**Advanced Justice** is an optional story-mode legal system. It is disabled by default and remembers each protagonist's choice. The `Justice du héros joué` row in the dedicated `F10` category always enables or disables only the protagonist currently being played and names that protagonist in its value.
+
+Justice keeps three independent character profiles: **Michael**, **Franklin**, and **Trevor** each retain their own enable/disable choice, active case, criminal record, recidivism, debt, and custody state. The `Personnage` row in `F10` cycles between files with Left/Right and explicitly marks the selection as `JOUÉ` or `CONSULTATION`; it does not redirect the activation toggle. `Payer la dette` can debit only when the selected file is the currently played canonical character and now uses the same double-confirmation safety as the other destructive actions. `Réinitialiser ce personnage` names the captured target profile and explicitly covers its record, case, recidivism, debt, and custody data. A detained active hero can be reset only through a durable release-and-restore transaction; an inactive profile or a conflicting amnesty, release, rollback, payment, backup-repair, or profile-switch transaction is never overwritten. If either copy of the reset precommit fails, the intent remains pending and no inventory, custody, or profile effect is applied until both the primary XML and `.bak` carry it.
+
+Its central rule is evidence: an illegal act starts as a provisional incident and is discarded silently unless a credible victim, civilian witness, police observer, or correlated GTA report confirms that specific act. Losing the only witness before the report means no Justice charge. A wanted-level change by itself never invents a crime.
+
+The bounded queues protect the most important facts first: homicide and other serious victim incidents cannot be evicted by minor pending events. Witness collection reserves priority for the victim of a possible homicide, then living police observers, then other living credible witnesses, so a crowd or nearby corpses cannot hide decisive evidence.
+
+Persistent GTA damage flags are edge-triggered through a bounded victim/attacker baseline, so an old hit can never be redated as a new offence. A sustained melee keeps the bounded victim scan open until combat really ends, allowing a delayed knife death to replace the earlier assault even if GTA's recent-hit timer native is temporarily unavailable. Entity identity also includes its native memory address, preventing a recycled handle from reviving a dead witness or an earlier victim. During missions, cinematics, loading, character changes, and custody, only scalar latches are synchronized; world scans resume through one clean priming pass afterward.
+
+Pending incidents are resolved in two phases: the mod first collects and qualifies every result in reusable bounded buffers, then resolves conflicts before mutating the active case or displaying anything. A correlated violent offence therefore replaces the provisional dangerous-shooting entry without modifying the incident list while it is being traversed.
+
+Confirming an ordinary crime never writes, raises, or maintains the player's wanted level. GTA remains the sole authority for stars produced by crimes; Justice only observes those changes as possible evidence and preserves its own case or warrant. The deliberate exception is a confirmed prison escape, which applies a three-star minimum.
+
+Once an incident is confirmed, the offence, warrant, or escape notice uses GTA's native top banner instead of a permanent Justice window. Only the detention belonging to the protagonist actually being played keeps a discreet single-line status at the top-left, such as `BOLINGBROKE · 24:18 · Travail`; switching to either other hero hides that line and exposes the new hero's own independent Justice profile. The complete detail remains available in `F10`. Confirmed charges build an active case and may create a warrant. Prior convictions remain in a separate record and progressively increase sanctions, while the recidivism index slowly decreases after long periods of clean free-roam gameplay.
+
+Every charge retained by the Justice state remains directly consultable from the `Justice avancée` category. Its 13-row page includes the character selector, voluntary payment, and per-character reset alongside the existing case information. `Délits du dossier` opens every retained active-case row, while `Casier judiciaire` expands every retained row stored inside the last 20 convictions, newest conviction first. To keep XML and runtime work bounded, an extreme active case above 512 rows consolidates its oldest compatible facts into an explicit `Infractions consolidées · xN` row: the original per-fact labels and circumstances are no longer claimed to be available, but their represented count and saturated sanction totals remain visible and the header counter still includes them. The Obsidian detail panel shows the selected row, its severity, fine, detention time, proven circumstances when retained, conviction date, and case totals. Arrow keys and their numeric-keypad aliases navigate line by line; `PageUp`, `PageDown`, `Home`, and `End` handle long lists; `Escape`, `Backspace`, or `NumPad0` returns to the Justice page without changing judicial state.
+
+Possible outcomes are:
+
+- a fine with immediate release for the lightest cases;
+- detention at Mission Row for short sentences;
+- detention in Bolingbroke for serious cases, up to 30 gameplay minutes;
+- a persistent warrant if the player escapes the police without being captured.
+
+Fines have no gameplay balance ceiling: confirmed charges continue accumulating their full dollar value. Arithmetic and XML validation use a purely technical saturation limit of **$1,000,000,000,000** (`10^12`) to prevent overflow or corrupt data; this is not a reachable gameplay cap intended to reduce a sentence.
+
+During detention, the inventory is safely snapshotted before confiscation and restored to the same protagonist only after an exact verification of weapons, ammunition, components, tints, clips, and selected weapon. Once confiscation is verified, the player may fight and defend themselves with bare hands against inmates; weapon selection, reload, and the weapon wheel remain blocked. If confiscation cannot be proved, the stricter non-destructive control lock stays active. Discipline reacts only to a new attributed damage event or a proven homicide, never merely to a combat stance. An incomplete restoration remains persisted and recoverable; script shutdown merges back the snapshot without calling `RemoveAll`, so an abort cannot destroy a partially restored loadout. The DLC-weapon enumeration uses one reusable 312-byte unmanaged structure required by `GET_DLC_WEAPON_DATA`; if allocation or native decoding fails, the inventory is left untouched and only weapon controls are locked.
+
+Capture and payment are also tied to the proven canonical slot of the active Michael, Franklin, or Trevor profile. A custom Iron Man or other transformed ped may reuse the last canonical slot observed in the same session, including after an initial capture death or a custody death, but only when the persisted death latch, active profile, and last canonical identity all prove the same hero. If that proven custom respawn still exposes no cash slot, the fine is converted to detention without touching any protagonist's bank balance, and the transfer continues instead of waiting forever. An unknown identity can never adopt another profile merely because one protagonist becomes available after death. In that case the capture waits safely or returns to a warrant, without disarming or charging another protagonist. Cash writes persist one of three explicit outcomes: succeeded, rejected, or unknown. A rejected write converts the fine to detention; only a genuinely ambiguous write uses the bounded at-most-once reconciliation policy. Fine debits, voluntary payments, and escape confiscation use persisted, resumable intents so a crash cannot debit twice or remove weapons before the recovery state exists. Any fine paid voluntarily before capture is subtracted from the conviction balance during the capture precommit; a partial or complete payment can therefore never make the otherwise valid judgment XML fail.
+
+Time pauses during loading, missions, cinematics, death, pause, and the character-change transition itself. Once another protagonist is playable, a stable inactive profile in the `Incarcerated` phase continues serving its sentence in gameplay time without showing its HUD or applying its prison scene, police suppression, inventory, or controls to the current hero. During each uninterrupted active-gameplay interval, every profile keeps its own millisecond remainder; there is no UTC or offline catch-up. If an off-screen sentence reaches zero, release and inventory restoration wait until that exact protagonist is played again. If the detained protagonist dies and GTA respawns them at a hospital, the persisted sentence sends that same profile idempotently back to the correct Mission Row or Bolingbroke cell without adding time or replaying custody operations. Optional activities use a frame-rate-independent clock and can reduce a bounded part of the sentence only while their GTA scenario remains active. Bolingbroke's authorized volume follows a fixed eight-point perimeter around the complete prison enclosure rather than its central yard or one oversized rectangle; its outside corners no longer extend custody beyond the walls. Staying outside that perimeter for three continuous seconds counts as one escape, keeps the remaining debt and sentence, confiscates the stored inventory, and applies a minimum of three wanted stars.
+
+Legal release durably precommits both the release and one wanted-clear attempt in the primary XML and its backup before touching GTA. The attempt is deliberately **at most once**: after the hero regains control, a rejected or ambiguous result is logged but never retried later, because a late retry could erase stars earned by a new crime. Reloading an unacknowledged release therefore finishes only the XML acknowledgement, inventory, and location stages that remain safe to repeat.
+
+After verified confiscation, bare-hand combat remains available. If a prisoner actually damages the player, a non-lethal response against that same handle and entity generation is accepted for eight seconds; an expired response, an unproven attacker, or a homicide remains a disciplinary offense. This keeps self-defense playable without turning detention into a consequence-free combat zone.
+
+Justice state remains a bounded XML v1 file. Its 16 MiB ceiling is sized for all three profiles at the documented limits (20 visible convictions and up to 512 consolidated charge summaries each), including the active-profile compatibility mirror, while still rejecting oversized or abusive files.
+
+The amnesty and escape wanted mutations follow the same primary-plus-backup precommit rule. Once an external attempt may have happened, a reload never repeats it; an interrupted Trevor amnesty therefore cannot clear Franklin's or Michael's GTA wanted level, and an escape attempt cannot unexpectedly restore three stars after GTA has naturally removed them.
+
+The police-ignore and dispatch-suppression tokens used inside custody are treated as global recovery state and are restored even when the loaded Justice profile is disabled. Justice defers its profile handoff or an inactive-profile reset until both GTA natives have been restored and that restoration has been persisted; GTA's own character change is never described as reversible. Tokens found in an inactive profile after a crash are also merged into this recovery, cleared from that profile, and committed after the global restoration succeeds. A reset of the actually detained hero must first restore those natives and the inventory under its own durable reset transaction.
+
+Because F10 does not pause the game, every Justice confirmation captures its target slot on the first input and revalidates it on the second. A canonical character switch is rejected even if it occurs before the next Justice tick. An already proven Iron Man/custom ped remains usable only while the exact same live ped handle and available model still match the captured identity. Changing the consulted file also cannot redirect a prepared reset.
+
+The activation row and its `JOUÉ` marker use the same proven-profile gate as runtime mutations. During a GTA character transition or an uncommitted profile switch they show `IDENTIFICATION / CHANGEMENT EN COURS` and refuse activation, deactivation, or payment. A previously proven Iron Man/custom ped remains usable because its active canonical profile is preserved; a genuinely unknown or different hero is not guessed.
+
+Cash payment remains stricter than the rest of the custom-ped runtime: the canonical GTA slot must be visible at the moment of payment. Under an Iron Man/custom model, F10 displays `indisponible` instead of promising a payment that the transaction will refuse; returning briefly to the canonical hero makes the action available again.
+
+DonJ bodyguards, Cartel teams, and the high-security escort keep defending the player during a police pursuit. A causal token is created only after a real offensive order succeeds, and a proven attack is attributed only when it is directly tied to the current defence, nearby, recent, and witnessed; autonomous or distant actions are ignored. At confirmed capture, only a fresh, nearby police combat target is neutralized with a non-destructive hold task. Justice never calls `CLEAR_PED_TASKS`, so it does not accidentally erase driving or escort work. No ally or convoy entity is dismissed, deleted, or withdrawn: their handles and active service are preserved, while bodyguard, Cartel convoy, and high-security convoy AI are suspended for the duration of detention and resume afterward.
+
+The Justice state is independent from scene saves and stores the three character profiles atomically in:
+
+```text
+DonJEnemySpawnerSaves\_justice_state.xml
+```
+
+Disabling the system with no active case is immediate. With an active case or detention, the Obsidian console requires a second confirmed input. The amnesty intent is durably precommitted before any inventory, custody, wanted, or case side effect, then resumed idempotently after a crash. A failure that may have occurred between the primary and backup writes keeps the amnesty visibly pending and applies no GTA effect; the runtime retries only the redundant persistence barrier. Its one wanted-clear attempt is itself precommitted twice before the native call and is never replayed after an ambiguous interruption. It clears the active case and safely releases the player while preserving conviction history and recidivism.
+
+`tools\repair-justice-state.ps1` is a targeted offline recovery tool for the known blocked Justice v1 state. It backs up and hashes the primary and `.bak` files, preserves the record and recidivism, clears only active case/custody data, keeps Justice enabled, and requests one wanted clear on the next load. It deliberately refuses states with a removed, locked, or pending inventory. It is not a general-purpose XML or semantic repair utility and must not be used as one.
+
+---
+
 ### Weapon Workshop
 
 The mod includes a weapon workshop to customize NPC equipment.
@@ -582,6 +648,15 @@ You must have:
 - **NIBScriptHookVDotNet** for GTA V Enhanced;
 - a **Scripts** folder in the game folder.
 
+The current local installation has been validated with this exact stack:
+
+| Component | Installed version / loader |
+|---|---|
+| GTA V Enhanced Steam | `1.0.1158.13` |
+| ScriptHookV | `3889.0.1158.13` |
+| Enhanced ASI loader | `xinput1_4.dll` (`1.0.0.2`) |
+| NIBScriptHookVDotNet API v2 | `2.11.6` |
+
 The game folder is the folder where this file is located:
 
 ```text
@@ -604,7 +679,7 @@ In the main GTA V Enhanced folder, in the same location as `GTA5_Enhanced.exe`, 
 
 ```text
 ScriptHookV.dll
-dinput8.dll
+xinput1_4.dll
 NIBScriptHookVDotNet.asi
 NIBScriptHookVDotNet2.dll
 ```
@@ -613,8 +688,8 @@ Useful links:
 
 | Required file | Where to download it | Where to put it |
 |---|---|---|
-| `ScriptHookV.dll` and `dinput8.dll` | [Official Script Hook V - Alexander Blade](https://www.dev-c.com/gtav/scripthookv/) | In the main game folder |
-| `NIBScriptHookVDotNet.asi` and `NIBScriptHookVDotNet2.dll` | [NIBMods Menu and .Net plugins - GTA Legacy and Enhanced - JulioNIB](https://www.patreon.com/posts/nibmods-menu-and-22783974) | In the main game folder |
+| `ScriptHookV.dll` `3889.0.1158.13` and Enhanced loader `xinput1_4.dll` | [Official Script Hook V - Alexander Blade](https://www.dev-c.com/gtav/scripthookv/) | In the main game folder |
+| `NIBScriptHookVDotNet.asi` and `NIBScriptHookVDotNet2.dll` `2.11.6` | [NIBMods Menu and .Net plugins - GTA Legacy and Enhanced - JulioNIB](https://www.patreon.com/posts/nibmods-menu-and-22783974) | In the main game folder |
 
 For NIBScriptHookVDotNet, make sure you choose the **GTA Enhanced** version when it is offered.
 
@@ -624,7 +699,7 @@ Once this part is done, your main game folder should look like this:
 Grand Theft Auto V Enhanced
   GTA5_Enhanced.exe
   ScriptHookV.dll
-  dinput8.dll
+  xinput1_4.dll
   NIBScriptHookVDotNet.asi
   NIBScriptHookVDotNet2.dll
   Scripts
@@ -679,7 +754,7 @@ In the main game folder, you must have:
 
 ```text
 Grand Theft Auto V Enhanced\ScriptHookV.dll
-Grand Theft Auto V Enhanced\dinput8.dll
+Grand Theft Auto V Enhanced\xinput1_4.dll
 Grand Theft Auto V Enhanced\NIBScriptHookVDotNet.asi
 Grand Theft Auto V Enhanced\NIBScriptHookVDotNet2.dll
 ```
@@ -737,7 +812,7 @@ Check in this order:
 2. `DonJCustomNpcPlacer.ENdll` is in the `Scripts` folder.
 3. The folder is named exactly `Scripts`.
 4. `ScriptHookV.dll` is in the main game folder.
-5. `dinput8.dll` is in the main game folder.
+5. The Enhanced loader `xinput1_4.dll` is in the main game folder.
 6. `NIBScriptHookVDotNet.asi` is in the main game folder.
 7. `NIBScriptHookVDotNet2.dll` is in the main game folder.
 8. No old mod file is still present in `Scripts`.
@@ -790,16 +865,15 @@ In game, press:
 F10
 ```
 
-The main menu opens with several sections:
+The custom **DonJ Obsidian console** opens without covering the whole game world. Its responsive layout stays inside the GTA safe zone and is split into three areas:
 
-- Placement type;
-- NPC;
-- Vehicle;
-- Object;
-- Interior;
-- Save;
-- Cleanup;
-- Mode Terminator.
+- a left rail with the DonJ monogram and the seven categories;
+- a central panel containing actions and settings;
+- a right panel showing the selected value, contextual help, scene counters, the active save, and notifications.
+
+The seven categories are **NPC**, **Vehicles**, **Objects**, **Interiors**, **Scene**, **Advanced Justice**, and **Tools**. NPC is selected when the console first opens, and each category remembers its last selected row. Placement controls appear at the top of compatible categories; save/load actions are grouped under Scene; Advanced Justice contains the Michael/Franklin/Trevor selector, case and record views, voluntary payment, and protected profile reset; Terminator mode and cleanup actions are grouped under Tools.
+
+The monogram, icons, frames, and decorative elements are drawn directly by the mod. The console does not require an extra PNG, YTD, OIV, RPF, or Scaleform file.
 
 ---
 
@@ -812,14 +886,16 @@ The main menu opens with several sections:
 | `NumPad 8` / `NumPad 2` | Navigate |
 | `Left` / `Right` | Change a value |
 | `NumPad 4` / `NumPad 6` | Change a value |
-| `Enter` | Confirm / open an action |
-| `NumPad 5` | Confirm / open an action |
-| `Tab` / `Shift + Tab` | Jump to the next / previous menu section |
+| `Enter` | Confirm / open an action; confirm an armed cleanup |
+| `NumPad 5` | Confirm / open an action; confirm an armed cleanup |
+| `Tab` / `Shift + Tab` | Jump to the next / previous category |
 | `PageUp` / `PageDown` | Scroll quickly |
 | `Home` / `End` | Go to the start / end |
-| `Esc` / `Backspace` / `NumPad 0` | Close or go back |
+| `Esc` / `Backspace` / `NumPad 0` | Cancel a cleanup confirmation, close, or go back |
 | `T` | Enter a custom model when the selected NPC model is `Custom` |
 | `B` | Cycle Terminator vision when Terminator mode is active |
+
+Menu navigation remains keyboard-only; the redesign does not add mouse or controller input.
 
 ---
 
@@ -928,14 +1004,14 @@ DONJ_ENEMY_SPAWNER_SAVE_DIR
 
 ## In-Game Cleanup
 
-The menu contains a `Cleanup` section.
-
-It lets you separately remove:
+Cleanup actions are available in the **Tools** category. They let you separately remove:
 
 - placed NPCs;
 - placed vehicles;
 - placed objects;
 - interior entrances/exits.
+
+Cleanup is protected against accidental activation. Press `Enter` or `NumPad 5` once to display the styled confirmation, release the key, then press it a second time to execute the selected cleanup. Key repeat cannot validate the confirmation. `Esc`, `Backspace`, `NumPad 0`, or closing the console cancels the pending action without removing anything.
 
 ---
 
@@ -944,10 +1020,11 @@ It lets you separately remove:
 This mod is designed for:
 
 ```text
-GTA V Enhanced
+GTA V Enhanced 1.0.1158.13
 Windows x64
 Story mode / solo
-NIBScriptHookVDotNet API v2
+ScriptHookV 3889.0.1158.13 with xinput1_4.dll
+NIBScriptHookVDotNet API v2 2.11.6
 .NET Framework 4.8
 ```
 
@@ -988,6 +1065,20 @@ Test command:
 ```powershell
 dotnet test GTA5modDEV.sln -c Release
 ```
+
+Justice-specific coverage is split between:
+
+- `JusticeDomainTests.cs`, for deterministic crimes, evidence, sanctions, recidivism, cases, and state transitions;
+- `JusticePlayerProfilePersistenceTests.cs`, for isolated Michael/Franklin/Trevor records, XML v1 and `.bak` profile persistence, stable-custody handoff, inactive sentence clocks, return-to-cell routing, and off-screen release ownership;
+- `JusticeRuntimeContractTests.cs`, for bounded runtime cadence, witness/wanted correlation without ordinary-crime wanted writes, crash-safe fine/discard/payment transactions, custody identity, inventory, activities, native notices/custody-line layout, seven-category navigation, and the amnesty/profile-reset modals;
+- `JusticeRuntimeEdgeContractTests.cs`, for consumed damage fronts, causal homicide proof, self-defense, delayed hit-and-run qualification, witness sharing, queue priority, and handle-generation expiry;
+- `JusticeCustodyHardeningTests.cs`, for the 312-byte DLC-weapon buffer, fail-closed inventory capture, exact durable restoration, cash outcomes, return-to-cell respawn, verified bare-hand defence, Bolingbroke perimeter, police suppression, and shutdown safety;
+- `JusticeEnginePersistenceRegressionTests.cs`, for two-phase incident resolution, canonical character identity, precommitted amnesty, pinned convictions, and wanted-only repair recovery;
+- `JusticeStateRepairTests.cs`, for targeted offline v1 repair, backups, hashes, refusal of unsafe inventory states, and preservation of the record;
+- `JusticeUiIntegrationObservabilityTests.cs`, for the native-notification/mini-line HUD contract, safe-zone and record caches, stable log paths, and shadow-copy collection;
+- `StubRuntimeBehaviorTests.cs`, for the configurable NIB v2 stub backend that records native calls, wanted, damage, tasks, world state, inventory, and money.
+
+The Obsidian safe-zone value is cached for at least 250 ms and protected by a retry circuit breaker. The flattened criminal-record view is rebuilt only when its ledger revision changes. Runtime logs prefer a stable `Scripts` or LocalAppData location before the .NET shadow-copy directory, and the bug collector also searches the newest legacy log under the LocalAppData assembly cache.
 
 ### Safety and Non-Regression Validation
 
@@ -1045,6 +1136,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\collect-bug-logs.ps1
 ```
 
 Reports are created in `bug-reports\YYYYMMDD-HHMMSS-title`. This folder stays local and is ignored by Git to avoid sending personal logs to GitHub.
+
+The runtime logger first tries stable locations under the live `Scripts` folder and LocalAppData. The collector also inspects the .NET LocalAppData assembly shadow-copy cache so that a last legacy `DonJCustomNpcPlacer.log` is not missed after a crash.
 
 Check the following logs:
 

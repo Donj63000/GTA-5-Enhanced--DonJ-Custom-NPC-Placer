@@ -114,6 +114,10 @@ $msbuildProperties = @("/p:GtaScriptsDir=$deployRoot")
 if ($gtaRoot) {
     $msbuildProperties += "/p:GtaRoot=$gtaRoot"
 }
+if ($UseStubApi) {
+    # Je rends le backend simulé visible uniquement aux tests compilés contre le stub.
+    $msbuildProperties += "/p:UseStubApi=true"
+}
 
 Invoke-LoggedCommand `
     -StepName "restore" `

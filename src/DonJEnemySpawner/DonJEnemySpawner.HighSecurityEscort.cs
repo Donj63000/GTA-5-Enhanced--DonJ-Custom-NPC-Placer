@@ -3562,9 +3562,11 @@ public sealed partial class DonJEnemySpawner : Script
 
         if (IsHighSecurityEscortLimousineTurretGuard(passenger) && StartHighSecurityEscortLimousineTurretFire(passenger, threat))
         {
+            RecordJusticeAllyPoliceEngagement(passenger, threat, true);
             return;
         }
 
+        bool offensiveOrderIssued = false;
         try
         {
             Function.Call(
@@ -3579,16 +3581,23 @@ public sealed partial class DonJEnemySpawner : Script
                 90,
                 true,
                 HighSecurityEscortFullAutoFiringPattern);
+            offensiveOrderIssued = true;
         }
         catch
         {
             try
             {
                 Function.Call(Hash.TASK_COMBAT_PED, passenger.Handle, threat.Handle, 0, 16);
+                offensiveOrderIssued = true;
             }
             catch
             {
             }
+        }
+
+        if (offensiveOrderIssued)
+        {
+            RecordJusticeAllyPoliceEngagement(passenger, threat, true);
         }
     }
 
@@ -3649,6 +3658,7 @@ public sealed partial class DonJEnemySpawner : Script
             return;
         }
 
+        bool offensiveOrderIssued = false;
         try
         {
             guard.Weapons.Select(WeaponHash.ServiceCarbine, true);
@@ -3668,6 +3678,7 @@ public sealed partial class DonJEnemySpawner : Script
         try
         {
             Function.Call(Hash.TASK_COMBAT_PED, guard.Handle, threat.Handle, 0, 16);
+            offensiveOrderIssued = true;
 
             if (guard.Position.DistanceTo(threat.Position) <= HighSecurityEscortOnFootShootDistance &&
                 CanPedSeeEntity(guard, threat, HighSecurityEscortOnFootShootDistance))
@@ -3682,6 +3693,11 @@ public sealed partial class DonJEnemySpawner : Script
         }
         catch
         {
+        }
+
+        if (offensiveOrderIssued)
+        {
+            RecordJusticeAllyPoliceEngagement(guard, threat, true);
         }
     }
 
@@ -3741,6 +3757,7 @@ public sealed partial class DonJEnemySpawner : Script
         float stoppingRange = playerOnFoot ? 14.0f : (distanceToTarget > 45.0f ? 14.0f : 22.0f);
         int style = GetHighSecurityEscortDrivingStyle(true);
 
+        bool offensiveOrderIssued = false;
         try
         {
             Function.Call(Hash.SET_VEHICLE_ENGINE_ON, vehicle.Handle, true, true, false);
@@ -3756,9 +3773,15 @@ public sealed partial class DonJEnemySpawner : Script
                 combatDriveSpeed,
                 style,
                 stoppingRange);
+            offensiveOrderIssued = true;
         }
         catch
         {
+        }
+
+        if (offensiveOrderIssued && !playerOnFoot)
+        {
+            RecordJusticeAllyPoliceEngagement(driver, threat, true);
         }
     }
 
@@ -6605,6 +6628,39 @@ public sealed partial class DonJEnemySpawner : Script
     private bool IsHighSecurityEscortCombatActive()
     {
         return _highSecurityEscortCombatModeUntil > 0 && Game.GameTime <= _highSecurityEscortCombatModeUntil;
+    }
+
+    private void PrepareHighSecurityEscortGuardServiceResumeAfterJustice(SpawnedNpc guard)
+    {
+        if (guard == null || !Entity.Exists(guard.Ped) ||
+            !IsHighSecurityEscortPedHandle(guard.Ped.Handle))
+        {
+            return;
+        }
+
+        int now = Game.GameTime;
+        int handle = guard.Ped.Handle;
+        _highSecurityEscortGuardCombatFootLockUntil.Remove(handle);
+        _highSecurityEscortNextCombatOrderAt[handle] = 0;
+        _highSecurityEscortNextPedOrderAt[handle] = 0;
+        _highSecurityEscortNextGuardPassiveMaintenanceAt[handle] = now;
+        _highSecurityEscortNextGuardMobilityOrderAt[handle] = now;
+
+        Vehicle assignedVehicle = FindVehicleByHandle(guard.BodyguardAssignedVehicleHandle);
+        if (Entity.Exists(assignedVehicle))
+        {
+            _highSecurityEscortNextVehicleOrderAt[assignedVehicle.Handle] = 0;
+            _highSecurityEscortLastVehicleOrderTarget[assignedVehicle.Handle] = Vector3.Zero;
+            _highSecurityEscortCachedFormationTargets.Remove(assignedVehicle.Handle);
+            _highSecurityEscortCachedFormationTargetUntil.Remove(assignedVehicle.Handle);
+        }
+
+        // Le transfert a déjà remplacé le combat par un freinage ou une garde
+        // locale. Je prépare ici la reprise normale après détention ou évasion.
+        guard.NextThinkAt = now;
+        guard.NextBodyguardTaskAt = now;
+        guard.Activated = false;
+        guard.IsReturningHome = false;
     }
 
     private void MarkHighSecurityEscortGuardCombatFootLock(Ped ped)

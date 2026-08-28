@@ -1,26 +1,109 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
 using GTA.Native;
 
 namespace GTA
 {
+    public sealed class StubNativeInvocation
+    {
+        public StubNativeInvocation(ulong hash, object[] arguments)
+        {
+            Hash = hash;
+            Arguments = arguments ?? new object[0];
+        }
+
+        public ulong Hash { get; private set; }
+        public object[] Arguments { get; private set; }
+    }
+
+    public static class StubRuntime
+    {
+        private static readonly object SyncRoot = new object();
+        private static readonly List<StubNativeInvocation> RecordedNativeCalls =
+            new List<StubNativeInvocation>();
+
+        public static Func<ulong, object[], object> NativeCallHandler { get; set; }
+        public static Func<Entity, Entity, bool> DamageHandler { get; set; }
+        public static Func<Ped, Ped, bool> CombatHandler { get; set; }
+        public static Func<Ped, Entity> KillerHandler { get; set; }
+        public static Func<Player, Entity> TargetedEntityHandler { get; set; }
+        public static Ped[] NearbyPeds { get; set; } = new Ped[0];
+        public static Vehicle[] NearbyVehicles { get; set; } = new Vehicle[0];
+        public static Vehicle[] AllVehicles { get; set; } = new Vehicle[0];
+
+        public static IList<StubNativeInvocation> NativeCalls
+        {
+            get
+            {
+                lock (SyncRoot)
+                {
+                    return RecordedNativeCalls.ToArray();
+                }
+            }
+        }
+
+        public static void Reset()
+        {
+            lock (SyncRoot)
+            {
+                RecordedNativeCalls.Clear();
+            }
+
+            NativeCallHandler = null;
+            DamageHandler = null;
+            CombatHandler = null;
+            KillerHandler = null;
+            TargetedEntityHandler = null;
+            NearbyPeds = new Ped[0];
+            NearbyVehicles = new Vehicle[0];
+            AllVehicles = new Vehicle[0];
+            Game.GameTime = 0;
+            Game.LastFrameTime = 0.016f;
+            Game.ScreenResolution = new Size(1280, 720);
+            Game.IsLoading = false;
+            Game.IsPaused = false;
+            Game.MissionFlag = false;
+            Game.Player.Character = new Ped();
+            Game.Player.WantedLevel = 0;
+            Game.Player.Money = 0;
+            Game.Player.IsDead = false;
+            Game.Player.CanControlCharacter = true;
+        }
+
+        internal static object InvokeNative(ulong hash, object[] arguments)
+        {
+            object[] safeArguments = arguments ?? new object[0];
+            lock (SyncRoot)
+            {
+                RecordedNativeCalls.Add(new StubNativeInvocation(hash, safeArguments));
+            }
+
+            Func<ulong, object[], object> handler = NativeCallHandler;
+            return handler == null ? null : handler(hash, safeArguments);
+        }
+    }
+
     public class Script
     {
         public int Interval { get; set; }
         public event EventHandler Tick;
         public event KeyEventHandler KeyDown;
+        public event KeyEventHandler KeyUp;
         public event EventHandler Aborted;
 
         protected void RaiseTick() => Tick?.Invoke(this, EventArgs.Empty);
         protected void RaiseKeyDown(KeyEventArgs e) => KeyDown?.Invoke(this, e);
+        protected void RaiseKeyUp(KeyEventArgs e) => KeyUp?.Invoke(this, e);
         protected void RaiseAborted() => Aborted?.Invoke(this, EventArgs.Empty);
         public static void Wait(int ms) { }
     }
 
-    public class Entity
+    public unsafe class Entity
     {
         public int Handle { get; set; } = 1;
+        public int* MemoryAddress { get; set; }
         public Math.Vector3 Position { get; set; }
         public Math.Vector3 Rotation { get; set; }
         public Math.Vector3 ForwardVector { get; set; } = new Math.Vector3(0.0f, 1.0f, 0.0f);
@@ -38,7 +121,11 @@ namespace GTA
         public virtual void MarkAsNoLongerNeeded() { }
         public virtual Blip AddBlip() => new Blip();
         public bool IsTouching(Entity entity) => false;
-        public bool HasBeenDamagedBy(Entity entity) => false;
+        public bool HasBeenDamagedBy(Entity entity)
+        {
+            Func<Entity, Entity, bool> handler = StubRuntime.DamageHandler;
+            return handler != null && handler(this, entity);
+        }
         public void ClearLastWeaponDamage() { }
         public void SetNoCollision(Entity entity, bool toggle) { }
     }
@@ -56,8 +143,18 @@ namespace GTA
         public bool CanRagdoll { get; set; } = true;
         public bool CanSwitchWeapons { get; set; } = true;
         public bool IsEnemy { get; set; }
+        public bool IsHuman { get; set; } = true;
+        public bool IsPlayer { get; set; }
+        public bool IsInCombat { get; set; }
+        public bool IsInMeleeCombat { get; set; }
+        public bool IsShooting { get; set; }
+        public bool IsBeingStunned { get; set; }
+        public bool IsJacking { get; set; }
+        public bool IsBeingJacked { get; set; }
+        public bool IsCuffed { get; set; }
         public Model Model { get; set; }
         public Vehicle CurrentVehicle { get; set; }
+        public Vehicle LastVehicle { get; set; }
         public Vehicle VehicleTryingToEnter { get; set; }
         public VehicleSeat SeatIndex { get; set; } = VehicleSeat.Driver;
         public WeaponCollection Weapons { get; } = new WeaponCollection();
@@ -65,6 +162,18 @@ namespace GTA
 
         public bool IsInVehicle() => CurrentVehicle != null;
         public bool IsInVehicle(Vehicle vehicle) => CurrentVehicle != null && vehicle != null && CurrentVehicle.Handle == vehicle.Handle;
+        public bool IsInCombatAgainst(Ped ped)
+        {
+            Func<Ped, Ped, bool> handler = StubRuntime.CombatHandler;
+            return handler != null && handler(this, ped);
+        }
+        public Ped GetJackTarget() => null;
+        public Ped GetJacker() => null;
+        public Entity GetKiller()
+        {
+            Func<Ped, Entity> handler = StubRuntime.KillerHandler;
+            return handler == null ? null : handler(this);
+        }
         public Relationship GetRelationshipWithPed(Ped ped) => Relationship.Neutral;
     }
 
@@ -141,10 +250,41 @@ namespace GTA
 
     public sealed class WeaponCollection
     {
-        public void RemoveAll() { }
-        public void Give(WeaponHash weapon, int ammo, bool equipNow, bool isAmmoLoaded) { }
-        public void Select(WeaponHash weapon) { }
-        public void Select(WeaponHash weapon, bool equipNow) { }
+        private readonly HashSet<int> _weapons = new HashSet<int>();
+
+        public int RemoveAllCount { get; private set; }
+        public WeaponHash SelectedWeapon { get; private set; } = WeaponHash.Unarmed;
+
+        public void RemoveAll()
+        {
+            RemoveAllCount++;
+            _weapons.Clear();
+            SelectedWeapon = WeaponHash.Unarmed;
+        }
+
+        public void Give(WeaponHash weapon, int ammo, bool equipNow, bool isAmmoLoaded)
+        {
+            _weapons.Add((int)weapon);
+            if (equipNow)
+            {
+                SelectedWeapon = weapon;
+            }
+        }
+
+        public void Select(WeaponHash weapon)
+        {
+            SelectedWeapon = weapon;
+        }
+
+        public void Select(WeaponHash weapon, bool equipNow)
+        {
+            if (equipNow)
+            {
+                SelectedWeapon = weapon;
+            }
+        }
+
+        public bool HasWeapon(WeaponHash weapon) => _weapons.Contains((int)weapon);
     }
 
     public sealed class TaskInvoker
@@ -165,13 +305,28 @@ namespace GTA
     {
         public Ped Character { get; set; } = new Ped();
         public int Handle { get; set; } = 1;
+        public int WantedLevel { get; set; }
+        public int Money { get; set; }
+        public bool IsDead { get; set; }
+        public bool CanControlCharacter { get; set; } = true;
+        public bool IsAiming { get; set; }
+        public bool IsTargettingAnything { get; set; }
+        public Entity GetTargetedEntity()
+        {
+            Func<Player, Entity> handler = StubRuntime.TargetedEntityHandler;
+            return handler == null ? null : handler(this);
+        }
     }
 
     public static class Game
     {
         public static int GameTime { get; set; }
         public static float LastFrameTime { get; set; } = 0.016f;
+        public static Size ScreenResolution { get; set; } = new Size(1280, 720);
         public static Player Player { get; } = new Player();
+        public static bool IsLoading { get; set; }
+        public static bool IsPaused { get; set; }
+        public static bool MissionFlag { get; set; }
 
         public static bool IsKeyPressed(Keys key) => false;
         public static void DisableAllControlsThisFrame(int index) { }
@@ -192,9 +347,9 @@ namespace GTA
         public static Vehicle CreateVehicle(Model model, Math.Vector3 position, float heading) => new Vehicle { Position = position, Heading = heading };
         public static Prop CreateProp(Model model, Math.Vector3 position, bool dynamic, bool placeOnGround) => new Prop { Position = position };
         public static Camera CreateCamera(Math.Vector3 position, Math.Vector3 rotation, float fov) => new Camera { Position = position, Rotation = rotation };
-        public static Vehicle[] GetAllVehicles() => new Vehicle[0];
-        public static Vehicle[] GetNearbyVehicles(Ped center, float radius) => new Vehicle[0];
-        public static Ped[] GetNearbyPeds(Ped center, float radius) => new Ped[0];
+        public static Vehicle[] GetAllVehicles() => StubRuntime.AllVehicles ?? new Vehicle[0];
+        public static Vehicle[] GetNearbyVehicles(Ped center, float radius) => StubRuntime.NearbyVehicles ?? new Vehicle[0];
+        public static Ped[] GetNearbyPeds(Ped center, float radius) => StubRuntime.NearbyPeds ?? new Ped[0];
         public static Math.Vector3 GetSafeCoordForPed(Math.Vector3 position, bool sidewalk, int flags) => position;
         public static float GetGroundHeight(Math.Vector3 position) => position.Z;
         public static RaycastResult Raycast(Math.Vector3 source, Math.Vector3 target, IntersectOptions options, Entity ignoreEntity) => new RaycastResult();
@@ -211,13 +366,45 @@ namespace GTA
 
     public sealed class UIRectangle
     {
-        public UIRectangle(Point position, Size size, Color color) { }
+        public UIRectangle(Point position, Size size, Color color)
+        {
+            Position = position;
+            Size = size;
+            Color = color;
+        }
+
+        public Point Position { get; set; }
+        public Size Size { get; set; }
+        public Color Color { get; set; }
+        public bool Enabled { get; set; } = true;
+
         public void Draw() { }
     }
 
     public sealed class UIText
     {
-        public UIText(string caption, Point position, float scale, Color color, Font font, bool centered, bool shadow, bool outline) { }
+        public UIText(string caption, Point position, float scale, Color color, Font font, bool centered, bool shadow, bool outline)
+        {
+            Caption = caption;
+            Position = position;
+            Scale = scale;
+            Color = color;
+            Font = font;
+            Centered = centered;
+            Shadow = shadow;
+            Outline = outline;
+        }
+
+        public string Caption { get; set; }
+        public Point Position { get; set; }
+        public float Scale { get; set; }
+        public Color Color { get; set; }
+        public Font Font { get; set; }
+        public bool Centered { get; set; }
+        public bool Shadow { get; set; }
+        public bool Outline { get; set; }
+        public bool Enabled { get; set; } = true;
+
         public void Draw() { }
     }
 
@@ -314,6 +501,24 @@ namespace GTA.Math
 
 namespace GTA.Native
 {
+    public sealed class InputArgument
+    {
+        public InputArgument(ulong value)
+            : this((object)value)
+        {
+        }
+
+        private InputArgument(object value)
+        {
+            Value = value;
+        }
+
+        internal object Value { get; private set; }
+
+        public static implicit operator InputArgument(int value) => new InputArgument(value);
+        public static implicit operator InputArgument(bool value) => new InputArgument(value);
+    }
+
     public enum WeaponHash
     {
         Unarmed = unchecked((int)0xA2719263),
@@ -370,23 +575,38 @@ namespace GTA.Native
     public enum Hash : ulong
     {
         CLEAR_ENTITY_LAST_DAMAGE_ENTITY = 0xA72CD9CA74A5ECBA,
+        CLEAR_PLAYER_WANTED_LEVEL = 0xB302540597885499,
         CLEAR_PED_TASKS = 0xE1EF3C1216AFF2CD,
         DOES_ENTITY_EXIST = 0x7239B21A38F536BA,
         DOES_WEAPON_TAKE_WEAPON_COMPONENT = 0x5CEE3DF569CECAB0,
         DO_SCREEN_FADE_IN = 0xD4E8E24955024033,
         DO_SCREEN_FADE_OUT = 0x891B5B39AC6302AF,
         FREEZE_ENTITY_POSITION = 0x428CA6DBD1094446,
+        GET_ENTITY_MODEL = 0x9F47B058362C84B5,
+        GET_AMMO_IN_CLIP = 0x2E1202248937775C,
+        GET_AMMO_IN_PED_WEAPON = 0x015A522136D7F951,
         GET_GAMEPLAY_CAM_COORD = 0x14D6F5678D8F1B37,
         GET_GAMEPLAY_CAM_ROT = 0x837765A25378F0BB,
+        GET_SAFE_ZONE_SIZE = 0xBAF107B6BB2C97F0,
         GET_NTH_CLOSEST_VEHICLE_NODE = 0xE50E52416CCF948B,
         GET_PED_IN_VEHICLE_SEAT = 0xBB40DD2270B65366,
         GET_PED_LAST_WEAPON_IMPACT_COORD = 0x6C4D0409BA1A2BC2,
         GET_PED_RELATIONSHIP_GROUP_HASH = 0x7DBDD04862D95F04,
+        GET_PED_WEAPON_TINT_INDEX = 0x2B9EEDC07BD06B9F,
+        GET_SELECTED_PED_WEAPON = 0x0A6DB4965674D243,
+        GET_TIME_SINCE_LAST_ARREST = 0x5063F92F07C2A316,
+        GET_TIME_SINCE_LAST_DEATH = 0xC7034807558DDFCA,
+        GET_TIME_SINCE_PLAYER_HIT_PED = 0xE36A25322DC35F42,
+        GET_TIME_SINCE_PLAYER_HIT_VEHICLE = 0x5D35ECF3A81A0EE0,
         GET_VEHICLE_MAX_NUMBER_OF_PASSENGERS = 0xA7C4F2C6E744A550,
         GET_WEAPON_TINT_COUNT = 0x5DCF6C5CAB2E9BF7,
         GIVE_WEAPON_COMPONENT_TO_PED = 0xD966D51AA5B28BB9,
         HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY = 0xC86D67D52A707CF8,
         HAS_ENTITY_CLEAR_LOS_TO_ENTITY = 0xFCDFF7B72D23A1AC,
+        HAS_ENTITY_CLEAR_LOS_TO_ENTITY_IN_FRONT = 0x0267D00AF114F17A,
+        HAS_PED_GOT_WEAPON = 0x8DECB02F88F428BC,
+        HAS_PED_GOT_WEAPON_COMPONENT = 0xC593212475FAE340,
+        HAS_PLAYER_BEEN_SPOTTED_IN_STOLEN_VEHICLE = 0xD705740BB0A1CF4C,
         HIDE_HUD_AND_RADAR_THIS_FRAME = 0x719FF505F097FD20,
         IS_BULLET_IN_AREA = 0x3F2023999AD51C1F,
         IS_DISABLED_CONTROL_JUST_PRESSED = 0x91AEF906BCA88877,
@@ -395,13 +615,17 @@ namespace GTA.Native
         IS_ENTITY_TOUCHING_ENTITY = 0x17FFC1B2BA35A494,
         IS_PED_IN_COMBAT = 0x4859F1FC66A6278E,
         IS_PED_IN_MELEE_COMBAT = 0x4E209B2C1EAD5159,
+        IS_PED_HUMAN = 0xB980061DA992779D,
+        IS_PED_JACKING = 0x4AE4FF911DFB61DA,
         IS_PED_SHOOTING = 0x34616828CD07F1A1,
+        IS_PLAYER_BEING_ARRESTED = 0x388A47C51ABDAC8E,
         IS_PLAYER_FREE_AIMING_AT_ENTITY = 0x3C06B5C839B38F7B,
         IS_PLAYER_TARGETTING_ENTITY = 0x7912F7FC4F6264B6,
         IS_VEHICLE_DRIVEABLE = 0x4C241E39B23DF959,
         IS_VEHICLE_SEAT_FREE = 0x22AC59A870E6A669,
         REQUEST_COLLISION_AT_COORD = 0x07503F7948F491A7,
         REQUEST_IPL = 0x41B4893843BBDB74,
+        REMOVE_ALL_PED_WEAPONS = 0xF25DF915FA38C5F3,
         RESET_ENTITY_ALPHA = 0x9B1E824FFBB7027A,
         SET_DRIVE_TASK_CRUISE_SPEED = 0x5C9B84BD7D31D908,
         SET_DRIVE_TASK_DRIVING_STYLE = 0xDACE1BE37D88AF67,
@@ -431,6 +655,8 @@ namespace GTA.Native
         SET_PED_STAY_IN_VEHICLE_WHEN_JACKED = 0xEDF4079F9D54C9A1,
         SET_PED_SUFFERS_CRITICAL_HITS = 0xEBD76F2359F190AC,
         SET_PED_WEAPON_TINT_INDEX = 0x50969B9B89ED5738,
+        SET_AMMO_IN_CLIP = 0xDCD2A934D65CB497,
+        SET_CURRENT_PED_WEAPON = 0xADF692B254977C0C,
         SET_VEHICLE_COLOURS = 0x4F1D4BE3A7F24601,
         SET_VEHICLE_DIRT_LEVEL = 0x79D3B596FE44EE8B,
         SET_VEHICLE_DOORS_LOCKED = 0xB664292EAECF7FA6,
@@ -454,6 +680,7 @@ namespace GTA.Native
         TASK_LEAVE_VEHICLE = 0xD3DBCE61A490BE02,
         TASK_SHOOT_AT_ENTITY = 0x08DA95E8298AE772,
         TASK_STAND_STILL = 0x919BE13EED931959,
+        TASK_START_SCENARIO_IN_PLACE = 0x142A02425FF02BD9,
         TASK_TURN_PED_TO_FACE_ENTITY = 0x5AD23D40115353AC,
         TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE = 0x158BB33F920D360C,
         TASK_VEHICLE_ESCORT = 0x0FA6E4B75F302400,
@@ -463,14 +690,72 @@ namespace GTA.Native
 
     public sealed class OutputArgument
     {
-        public T GetResult<T>() => default(T);
+        private object _value;
+
+        public void SetResult<T>(T value)
+        {
+            _value = value;
+        }
+
+        public T GetResult<T>()
+        {
+            if (_value == null)
+            {
+                return default(T);
+            }
+
+            if (_value is T)
+            {
+                return (T)_value;
+            }
+
+            Type targetType = typeof(T);
+            if (targetType.IsEnum)
+            {
+                return (T)Enum.ToObject(targetType, _value);
+            }
+
+            return (T)Convert.ChangeType(_value, targetType);
+        }
     }
 
     public static class Function
     {
-        public static T Call<T>(Hash hash, params object[] arguments) => default(T);
-        public static void Call(Hash hash, params object[] arguments) { }
-        public static T Call<T>(ulong hash, params object[] arguments) => default(T);
-        public static void Call(ulong hash, params object[] arguments) { }
+        public static T Call<T>(Hash hash, params object[] arguments) =>
+            ConvertResult<T>(GTA.StubRuntime.InvokeNative((ulong)hash, arguments));
+
+        public static void Call(Hash hash, params object[] arguments)
+        {
+            GTA.StubRuntime.InvokeNative((ulong)hash, arguments);
+        }
+
+        public static T Call<T>(ulong hash, params object[] arguments) =>
+            ConvertResult<T>(GTA.StubRuntime.InvokeNative(hash, arguments));
+
+        public static void Call(ulong hash, params object[] arguments)
+        {
+            GTA.StubRuntime.InvokeNative(hash, arguments);
+        }
+
+        private static T ConvertResult<T>(object value)
+        {
+            if (value == null)
+            {
+                return default(T);
+            }
+
+            if (value is T)
+            {
+                return (T)value;
+            }
+
+            Type targetType = typeof(T);
+            if (targetType.IsEnum)
+            {
+                return (T)Enum.ToObject(targetType, value);
+            }
+
+            return (T)Convert.ChangeType(value, targetType);
+        }
     }
 }

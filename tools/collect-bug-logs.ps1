@@ -2,6 +2,7 @@ param(
     [string]$Title = "bug-report",
     [int]$SinceHours = 24,
     [string]$GtaRoot,
+    [string]$LegacyLogRoot,
     [switch]$IncludeFullLogs,
     [switch]$OpenFolder
 )
@@ -188,6 +189,102 @@ function Collect-GtaRootLogs {
     }
 }
 
+function Get-LegacyRuntimeLogRoots {
+    $roots = New-Object System.Collections.Generic.List[string]
+
+    if (-not [string]::IsNullOrWhiteSpace($LegacyLogRoot)) {
+        Add-UniquePath $roots $LegacyLogRoot
+        return $roots
+    }
+
+    try {
+        $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+            # Je couvre explicitement le cache shadow-copy .NET où NIB v2 avait
+            # caché le journal du crash natif du 26 août.
+            Add-UniquePath $roots (Join-Path $localAppData "assembly")
+            Add-UniquePath $roots (Join-Path $localAppData "Temp")
+        }
+    }
+    catch {
+    }
+
+    try {
+        Add-UniquePath $roots ([System.IO.Path]::GetTempPath())
+    }
+    catch {
+    }
+
+    return $roots
+}
+
+function Collect-StableRuntimeFallbackLogs {
+    $directories = New-Object System.Collections.Generic.List[string]
+
+    try {
+        $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+            Add-UniquePath $directories (Join-Path $localAppData "DonJEnemySpawner\Logs")
+            Add-UniquePath $directories (Join-Path $localAppData "DonJEnemySpawner\Saves")
+        }
+    }
+    catch {
+    }
+
+    try {
+        $documents = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+        if (-not [string]::IsNullOrWhiteSpace($documents)) {
+            Add-UniquePath $directories (Join-Path $documents "Rockstar Games\GTAV Enhanced\DonJEnemySpawnerSaves")
+        }
+    }
+    catch {
+    }
+
+    foreach ($directory in $directories) {
+        $path = Join-Path $directory "DonJCustomNpcPlacer.log"
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            if (-not $checkedSources.Contains([System.IO.Path]::GetFullPath($path))) {
+                Copy-LogFile -File (Get-Item -LiteralPath $path) -SourceRootLabel "DonJ-Runtime-Stable"
+            }
+        }
+        else {
+            $checkedSources.Add($path)
+        }
+    }
+}
+
+function Collect-LatestLegacyRuntimeLog {
+    $candidates = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+    $candidatePaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($root in Get-LegacyRuntimeLogRoots) {
+        $checkedSources.Add($root)
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            continue
+        }
+
+        try {
+            foreach ($file in Get-ChildItem -LiteralPath $root -File -Recurse -Force -Filter "DonJCustomNpcPlacer.log" -ErrorAction SilentlyContinue) {
+                if ($file -ne $null -and
+                    -not $checkedSources.Contains($file.FullName) -and
+                    $candidatePaths.Add($file.FullName)) {
+                    $candidates.Add($file)
+                }
+            }
+        }
+        catch {
+            # Je poursuis les autres emplacements si un dossier temporaire est verrouillé.
+        }
+    }
+
+    $latest = $candidates |
+        Sort-Object LastWriteTimeUtc, FullName -Descending |
+        Select-Object -First 1
+    if ($latest -ne $null) {
+        Copy-LogFile -File $latest -SourceRootLabel "DonJ-Runtime-Legacy"
+    }
+}
+
 function Write-RepoState {
     $repoStatePath = Join-Path $reportRoot "repo-state.txt"
     $lines = New-Object System.Collections.Generic.List[string]
@@ -322,6 +419,8 @@ foreach ($root in Get-ProjectGtaRoots) {
     Collect-GtaRootLogs -Root $root
 }
 
+Collect-StableRuntimeFallbackLogs
+Collect-LatestLegacyRuntimeLog
 Collect-WindowsEvents
 Write-RepoState
 Write-SummaryFiles

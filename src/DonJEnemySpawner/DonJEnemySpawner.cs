@@ -66,28 +66,9 @@ public sealed partial class DonJEnemySpawner : Script
     private const int MaxPatrolRadius = 500;
     private const int PatrolRadiusStep = 5;
 
-// Je garde les constantes historiques pour laisser passer les tests anti-regression deja en place.
-private const int MenuItemCount = 9;
-
-// Constante historique gardee pour les tests et les anciens contrats.
-// Le nouveau menu principal est maintenant dynamique avec sections deroulantes.
-private const int MainMenuItemCount = 24;
-private const int MainMenuVisibleRowLimit = 24;
-
-// Limite visuelle du nouveau menu compact.
-// MainMenuVisibleRowLimit reste a 24 pour les contrats/tests historiques,
-// mais le rendu et le scroll utilisent cette limite plus confortable.
-private const int MainMenuCompactVisibleRowLimit = 16;
-private const int MainMenuPanelX = 34;
-private const int MainMenuPanelY = 24;
-private const int MainMenuPanelWidth = 704;
-private const int MainMenuTitleHeight = 90;
-private const int MainMenuRowHeight = 28;
-private const int MainMenuFooterHeight = 96;
-private const int MainMenuSummaryWidth = 298;
-private const int MainMenuSummaryHeight = 310;
-private const int MainMenuSummaryGap = 16;
-private const int MainMenuValueColumnX = 344;
+// Je limite la page la plus dense (NPC) a treize lignes visibles.
+// Les autres pages tiennent sans scroll avec les actions actuelles.
+private const int MainMenuCompactVisibleRowLimit = 13;
 private const int StatusTextMaxLength = 112;
 private const int WeaponEditorItemCount = 12;
 
@@ -237,17 +218,6 @@ private int _mainMenuScrollOffset;
 private int _weaponEditorIndex;
 private MenuPage _menuPage = MenuPage.Main;
 
-// Sections deroulantes du menu principal.
-// Par defaut, j'ouvre la section NPC car le mod est principalement utilise
-// pour poser et configurer des PNJ armes. Les autres sections restent
-// disponibles mais repliees pour garder un menu propre et lisible.
-private bool _mainMenuNpcExpanded = true;
-private bool _mainMenuVehicleExpanded;
-private bool _mainMenuObjectExpanded;
-private bool _mainMenuInteriorExpanded;
-private bool _mainMenuSaveExpanded;
-private bool _mainMenuCleanupExpanded;
-
 private bool _menuVisible;
 
     private string _customModelName = "s_m_y_swat_01";
@@ -354,10 +324,14 @@ private bool _menuVisible;
         };
 
         InitializePersistentSaveState();
+        InitializeJusticeSystem();
         InitializeRelationshipGroups();
+        EnsureObsidianMenuEntryCache();
+        PrewarmMenuUiPools();
 
         Tick += OnTick;
         KeyDown += OnKeyDown;
+        KeyUp += OnKeyUp;
         Aborted += OnAborted;
 
         LogInfo("Chargement", TrainerTitle + " charge.");
@@ -367,7 +341,20 @@ private bool _menuVisible;
 private enum MenuPage
 {
     Main,
-    WeaponEditor
+    WeaponEditor,
+    JusticeCharges,
+    JusticeRecord
+}
+
+private enum MenuCategory
+{
+    Npc,
+    Vehicle,
+    Object,
+    Interior,
+    Scene,
+    Justice,
+    Tools
 }
 
 private enum MainMenuAction
@@ -377,7 +364,6 @@ private enum MainMenuAction
     DistancePlacement,
     PlacementDistance,
 
-    SectionNpc,
     NpcCategory,
     NpcModel,
     NpcWeaponCategory,
@@ -389,27 +375,36 @@ private enum MainMenuAction
     NpcPatrolRadius,
     NpcAutoRespawn,
 
-    SectionVehicle,
     VehicleCategory,
     VehicleModel,
     VehicleAutoRespawn,
 
-    SectionObject,
     ObjectCategory,
     ObjectModel,
     ObjectAutoRespawn,
 
-    SectionInterior,
     InteriorCategory,
     InteriorModel,
     ExitActiveInfo,
     ExitDestinationInfo,
 
-    SectionSave,
     Save,
     Load,
 
-    SectionCleanup,
+    JusticeEnabled,
+    JusticeProfile,
+    JusticeStatus,
+    JusticeLastCrime,
+    JusticeSeverity,
+    JusticeWarrant,
+    JusticeCharges,
+    JusticeRecord,
+    JusticeFine,
+    JusticePayFine,
+    JusticeSentence,
+    JusticeRecidivism,
+    JusticeResetProfile,
+
     CleanNpcs,
     CleanVehicles,
     CleanObjects,
@@ -421,7 +416,6 @@ private enum MainMenuAction
 private enum MainMenuRowKind
 {
     Normal,
-    SectionHeader,
     Primary,
     PrimaryAction,
     Action,
@@ -435,18 +429,14 @@ private sealed class MainMenuEntry
     public string Label;
     public string Value;
     public MainMenuRowKind Kind;
-    public int Level;
     public bool Enabled;
-    public bool Expanded;
-    public bool Active;
 
-    public MainMenuEntry(MainMenuAction action, string label, string value, MainMenuRowKind kind, int level, bool enabled)
+    public MainMenuEntry(MainMenuAction action, string label, string value, MainMenuRowKind kind, bool enabled)
     {
         Action = action;
         Label = label ?? string.Empty;
         Value = value ?? string.Empty;
         Kind = kind;
-        Level = level;
         Enabled = enabled;
     }
 }
@@ -629,6 +619,9 @@ private enum EnemyBehavior
         public bool ImprovedBarrel;
         public WeaponMk2AmmoMode Mk2Ammo;
 
+        private int _cachedSummaryFingerprint = int.MinValue;
+        private string _cachedSummary = "Standard";
+
         public WeaponLoadout Clone()
         {
             return new WeaponLoadout
@@ -650,19 +643,46 @@ private enum EnemyBehavior
 
         public string Summary()
         {
-            List<string> parts = new List<string>();
+            int fingerprint = CalculateSummaryFingerprint();
 
-            if (ExtendedClip) parts.Add("chargeur+");
-            if (Suppressor) parts.Add("silencieux");
-            if (Flashlight) parts.Add("lampe");
-            if (Grip) parts.Add("poignee");
-            if (Scope != WeaponScopeMode.None) parts.Add("lunette " + Scope.ToString().ToLowerInvariant());
-            if (Muzzle) parts.Add("comp.");
-            if (ImprovedBarrel) parts.Add("canon+");
-            if (Mk2Ammo != WeaponMk2AmmoMode.Standard) parts.Add(Mk2Ammo.ToString());
-            if (Tint > 0) parts.Add("teinte " + Tint.ToString(CultureInfo.InvariantCulture));
+            if (fingerprint == _cachedSummaryFingerprint)
+            {
+                return _cachedSummary;
+            }
 
-            return parts.Count == 0 ? "Standard" : string.Join(", ", parts.ToArray());
+            string summary = string.Empty;
+            if (ExtendedClip) AppendSummaryPart(ref summary, "chargeur+");
+            if (Suppressor) AppendSummaryPart(ref summary, "silencieux");
+            if (Flashlight) AppendSummaryPart(ref summary, "lampe");
+            if (Grip) AppendSummaryPart(ref summary, "poignee");
+            if (Scope != WeaponScopeMode.None) AppendSummaryPart(ref summary, "lunette " + Scope.ToString().ToLowerInvariant());
+            if (Muzzle) AppendSummaryPart(ref summary, "comp.");
+            if (ImprovedBarrel) AppendSummaryPart(ref summary, "canon+");
+            if (Mk2Ammo != WeaponMk2AmmoMode.Standard) AppendSummaryPart(ref summary, Mk2Ammo.ToString());
+            if (Tint > 0) AppendSummaryPart(ref summary, "teinte " + Tint.ToString(CultureInfo.InvariantCulture));
+
+            _cachedSummaryFingerprint = fingerprint;
+            _cachedSummary = summary.Length == 0 ? "Standard" : summary;
+            return _cachedSummary;
+        }
+
+        private int CalculateSummaryFingerprint()
+        {
+            int fingerprint = Tint & 0x3F;
+            fingerprint |= ((int)Scope & 0x03) << 6;
+            fingerprint |= ((int)Mk2Ammo & 0x07) << 8;
+            if (ExtendedClip) fingerprint |= 1 << 11;
+            if (Suppressor) fingerprint |= 1 << 12;
+            if (Flashlight) fingerprint |= 1 << 13;
+            if (Grip) fingerprint |= 1 << 14;
+            if (Muzzle) fingerprint |= 1 << 15;
+            if (ImprovedBarrel) fingerprint |= 1 << 16;
+            return fingerprint;
+        }
+
+        private static void AppendSummaryPart(ref string summary, string part)
+        {
+            summary = summary.Length == 0 ? part : summary + ", " + part;
         }
     }
 
@@ -793,6 +813,7 @@ private enum EnemyBehavior
         try
         {
             RefreshPlayerRelationshipIfNeeded();
+            UpdateJusticeEarly();
             UpdateCartelContactAndConvoy();
             UpdateTerminatorMode();
             _autoRespawnsThisTick = 0;
@@ -820,16 +841,29 @@ private enum EnemyBehavior
                 UpdatePlacementMode();
             }
 
-            DrawTerminatorModeHud();
+            UpdateMenuAnimation();
 
-            if (_menuVisible)
+            // Je masque seulement le HUD Terminator pendant la transition du menu
+            // afin que les deux interfaces ne se superposent jamais.
+            if (!ShouldRenderMenu)
             {
-                DisableMenuGameplayControls();
+                DrawTerminatorModeHud();
+                DrawJusticeCustodyStatusLine();
+            }
+
+            if (ShouldRenderMenu)
+            {
+                if (_menuVisible)
+                {
+                    DisableMenuGameplayControls();
+                }
+
                 DrawMenu();
             }
 
             ProcessPendingSpawn();
             UpdatePlayerHostilityMemory(Game.Player.Character);
+            UpdateJusticeSystem();
             UpdateNpcs();
             UpdateCartelConvoyLate();
             UpdatePlacedVehicles();
@@ -842,6 +876,12 @@ private enum EnemyBehavior
         {
             LogException("OnTick", ex);
             ShowStatus("Erreur " + TrainerTitle + ": " + ex.Message, 7000);
+        }
+        finally
+        {
+            // Je consomme les fronts de dégâts après toutes les IA du tick afin
+            // qu'un ancien flag GTA ne puisse jamais recréer un crime plus tard.
+            FlushJusticeConsumedDamageFronts();
         }
     }
 
@@ -857,7 +897,7 @@ private enum EnemyBehavior
                 }
                 else
                 {
-                    _menuVisible = !_menuVisible;
+                    SetMenuVisible(!_menuVisible);
                 }
 
                 e.Handled = true;
@@ -883,6 +923,12 @@ private enum EnemyBehavior
                 return;
             }
 
+            if (HandleJusticeWorldKey(e.KeyCode))
+            {
+                e.Handled = true;
+                return;
+            }
+
             if (TryHandleTerminatorVisionKey(e.KeyCode))
             {
                 e.Handled = true;
@@ -897,6 +943,11 @@ private enum EnemyBehavior
             if (_menuPage == MenuPage.WeaponEditor)
             {
                 HandleWeaponEditorKey(e);
+            }
+            else if (_menuPage == MenuPage.JusticeCharges ||
+                     _menuPage == MenuPage.JusticeRecord)
+            {
+                HandleJusticeLedgerKey(e);
             }
             else
             {
@@ -913,8 +964,11 @@ private enum EnemyBehavior
     private void OnAborted(object sender, EventArgs e)
     {
         LogInfo("Arret", TrainerTitle + " arrete.");
+        CancelPendingDangerAction();
+        ReleaseMenuUi();
         StopPlacementMode(false);
         DisableTerminatorMode(false);
+        ShutdownJusticeSystem();
         ForceDeleteHighSecurityEscortEntitiesAndRecords(true);
 
         for (int i = 0; i < _spawnedNpcs.Count; i++)
@@ -938,8 +992,22 @@ private enum EnemyBehavior
         }
     }
 
+    private void OnKeyUp(object sender, KeyEventArgs e)
+    {
+        if (_pendingDangerAction.HasValue &&
+            (e.KeyCode == Keys.Enter || e.KeyCode == Keys.NumPad5))
+        {
+            _dangerConfirmationRequiresEnterRelease = false;
+        }
+    }
+
 private void HandleMainMenuKey(KeyEventArgs e)
 {
+    if (HandlePendingDangerKey(e))
+    {
+        return;
+    }
+
     List<MainMenuEntry> entries = BuildMainMenuEntries();
     NormalizeMainMenuSelection(entries);
 
@@ -956,6 +1024,7 @@ private void HandleMainMenuKey(KeyEventArgs e)
         case Keys.NumPad8:
             _mainMenuIndex = Wrap(_mainMenuIndex - 1, entries.Count);
             EnsureMainMenuSelectionVisible(entries.Count);
+            RememberMainMenuSelection(entries);
             e.Handled = true;
             break;
 
@@ -963,30 +1032,35 @@ private void HandleMainMenuKey(KeyEventArgs e)
         case Keys.NumPad2:
             _mainMenuIndex = Wrap(_mainMenuIndex + 1, entries.Count);
             EnsureMainMenuSelectionVisible(entries.Count);
+            RememberMainMenuSelection(entries);
             e.Handled = true;
             break;
 
         case Keys.PageUp:
             _mainMenuIndex = Clamp(_mainMenuIndex - pageSize, 0, entries.Count - 1);
             EnsureMainMenuSelectionVisible(entries.Count);
+            RememberMainMenuSelection(entries);
             e.Handled = true;
             break;
 
         case Keys.PageDown:
             _mainMenuIndex = Clamp(_mainMenuIndex + pageSize, 0, entries.Count - 1);
             EnsureMainMenuSelectionVisible(entries.Count);
+            RememberMainMenuSelection(entries);
             e.Handled = true;
             break;
 
         case Keys.Home:
             _mainMenuIndex = 0;
             EnsureMainMenuSelectionVisible(entries.Count);
+            RememberMainMenuSelection(entries);
             e.Handled = true;
             break;
 
         case Keys.End:
             _mainMenuIndex = entries.Count - 1;
             EnsureMainMenuSelectionVisible(entries.Count);
+            RememberMainMenuSelection(entries);
             e.Handled = true;
             break;
 
@@ -1024,7 +1098,7 @@ private void HandleMainMenuKey(KeyEventArgs e)
         case Keys.Escape:
         case Keys.Back:
         case Keys.NumPad0:
-            _menuVisible = false;
+            SetMenuVisible(false);
             e.Handled = true;
             break;
     }
@@ -1032,57 +1106,8 @@ private void HandleMainMenuKey(KeyEventArgs e)
 
 private void MoveMainMenuSectionFocus(List<MainMenuEntry> entries, int direction)
 {
-    if (entries == null || entries.Count == 0)
-    {
-        return;
-    }
-
-    int currentIndex = Clamp(_mainMenuIndex, 0, entries.Count - 1);
-
-    if (direction >= 0)
-    {
-        for (int i = currentIndex + 1; i < entries.Count; i++)
-        {
-            if (entries[i].Kind == MainMenuRowKind.SectionHeader)
-            {
-                _mainMenuIndex = i;
-                EnsureMainMenuSelectionVisible(entries.Count);
-                return;
-            }
-        }
-
-        for (int i = 0; i <= currentIndex; i++)
-        {
-            if (entries[i].Kind == MainMenuRowKind.SectionHeader)
-            {
-                _mainMenuIndex = i;
-                EnsureMainMenuSelectionVisible(entries.Count);
-                return;
-            }
-        }
-    }
-    else
-    {
-        for (int i = currentIndex - 1; i >= 0; i--)
-        {
-            if (entries[i].Kind == MainMenuRowKind.SectionHeader)
-            {
-                _mainMenuIndex = i;
-                EnsureMainMenuSelectionVisible(entries.Count);
-                return;
-            }
-        }
-
-        for (int i = entries.Count - 1; i >= currentIndex; i--)
-        {
-            if (entries[i].Kind == MainMenuRowKind.SectionHeader)
-            {
-                _mainMenuIndex = i;
-                EnsureMainMenuSelectionVisible(entries.Count);
-                return;
-            }
-        }
-    }
+    RememberMainMenuSelection(entries);
+    CycleMainMenuCategory(direction);
 }
 
     private void HandleWeaponEditorKey(KeyEventArgs e)
@@ -1098,6 +1123,26 @@ private void MoveMainMenuSectionFocus(List<MainMenuEntry> entries, int direction
             case Keys.Down:
             case Keys.NumPad2:
                 _weaponEditorIndex = Wrap(_weaponEditorIndex + 1, WeaponEditorItemCount);
+                e.Handled = true;
+                break;
+
+            case Keys.PageUp:
+                _weaponEditorIndex = Clamp(_weaponEditorIndex - 5, 0, WeaponEditorItemCount - 1);
+                e.Handled = true;
+                break;
+
+            case Keys.PageDown:
+                _weaponEditorIndex = Clamp(_weaponEditorIndex + 5, 0, WeaponEditorItemCount - 1);
+                e.Handled = true;
+                break;
+
+            case Keys.Home:
+                _weaponEditorIndex = 0;
+                e.Handled = true;
+                break;
+
+            case Keys.End:
+                _weaponEditorIndex = WeaponEditorItemCount - 1;
                 e.Handled = true;
                 break;
 
@@ -1119,10 +1164,18 @@ private void MoveMainMenuSectionFocus(List<MainMenuEntry> entries, int direction
                 e.Handled = true;
                 break;
 
+            case Keys.Tab:
+                _menuPage = MenuPage.Main;
+                ResetMenuSelectionAnimation();
+                CycleMainMenuCategory(e.Shift ? -1 : 1);
+                e.Handled = true;
+                break;
+
             case Keys.Escape:
             case Keys.Back:
             case Keys.NumPad0:
                 _menuPage = MenuPage.Main;
+                ResetMenuSelectionAnimation();
                 e.Handled = true;
                 break;
         }
@@ -1142,8 +1195,11 @@ private void ChangeMainMenuValue(int direction, List<MainMenuEntry> entries)
     switch (entry.Action)
     {
         case MainMenuAction.PlacementType:
-            _selectedPlacementType = CycleEnum(_selectedPlacementType, direction);
-            OpenMainMenuSectionForPlacementType(_selectedPlacementType);
+            // Dans la page Interieurs, le type ne doit jamais sortir du couple
+            // Entree/Sortie quand je le modifie avec Gauche/Droite.
+            _selectedPlacementType = _selectedPlacementType == PlacementEntityType.Entrance
+                ? PlacementEntityType.Exit
+                : PlacementEntityType.Entrance;
             DeletePlacementPreview();
             ShowStatus("Type de placement: " + PlacementTypeDisplayName(_selectedPlacementType), 1600);
             break;
@@ -1157,15 +1213,6 @@ private void ChangeMainMenuValue(int direction, List<MainMenuEntry> entries)
             int distanceFast = GetMainMenuFastStep();
             _selectedDistance = Clamp(_selectedDistance + direction * DistanceStep * distanceFast, MinDistance, MaxDistance);
             _selectedDistance = RoundToStep(_selectedDistance, DistanceStep);
-            break;
-
-        case MainMenuAction.SectionNpc:
-        case MainMenuAction.SectionVehicle:
-        case MainMenuAction.SectionObject:
-        case MainMenuAction.SectionInterior:
-        case MainMenuAction.SectionSave:
-        case MainMenuAction.SectionCleanup:
-            SetMainMenuSectionExpanded(entry.Action, direction > 0);
             break;
 
         case MainMenuAction.NpcCategory:
@@ -1189,11 +1236,11 @@ private void ChangeMainMenuValue(int direction, List<MainMenuEntry> entries)
             break;
 
         case MainMenuAction.NpcHealth:
-            _selectedHealth = Clamp(_selectedHealth + direction * (IsShiftHeld() ? 250 : 25), MinHealth, MaxHealth);
+            _selectedHealth = Clamp(_selectedHealth + direction * (IsMenuShiftHeldSafe() ? 250 : 25), MinHealth, MaxHealth);
             break;
 
         case MainMenuAction.NpcArmor:
-            _selectedArmor = Clamp(_selectedArmor + direction * (IsShiftHeld() ? 25 : 5), MinArmor, MaxArmor);
+            _selectedArmor = Clamp(_selectedArmor + direction * (IsMenuShiftHeldSafe() ? 25 : 5), MinArmor, MaxArmor);
             break;
 
         case MainMenuAction.NpcBehavior:
@@ -1244,14 +1291,37 @@ private void ChangeMainMenuValue(int direction, List<MainMenuEntry> entries)
         case MainMenuAction.TerminatorMode:
             ToggleTerminatorMode();
             break;
+
+        case MainMenuAction.JusticeEnabled:
+            RequestJusticeToggle();
+            break;
+
+        case MainMenuAction.JusticeProfile:
+            ChangeJusticeMenuSelectedProfile(direction);
+            break;
     }
 
-    NormalizeMainMenuSelection(BuildMainMenuEntries());
+    List<MainMenuEntry> refreshedEntries = BuildMainMenuEntries();
+    NormalizeMainMenuSelection(refreshedEntries);
+    RememberMainMenuSelection(refreshedEntries);
 }
 
 private int GetMainMenuFastStep()
 {
-    return IsShiftHeld() ? 10 : 1;
+    return IsMenuShiftHeldSafe() ? 10 : 1;
+}
+
+private static bool IsMenuShiftHeldSafe()
+{
+    try
+    {
+        return IsShiftHeld();
+    }
+    catch
+    {
+        // Je garde le pas normal quand l'API GTA n'est pas chargee dans les simulations headless.
+        return false;
+    }
 }
 
 private void ActivateMainMenuItem()
@@ -1267,18 +1337,10 @@ private void ActivateMainMenuItem(List<MainMenuEntry> entries)
 
     switch (entry.Action)
     {
-        case MainMenuAction.SectionNpc:
-        case MainMenuAction.SectionVehicle:
-        case MainMenuAction.SectionObject:
-        case MainMenuAction.SectionInterior:
-        case MainMenuAction.SectionSave:
-        case MainMenuAction.SectionCleanup:
-            ToggleMainMenuSection(entry.Action);
-            break;
-
         case MainMenuAction.PlacementType:
-            _selectedPlacementType = CycleEnum(_selectedPlacementType, 1);
-            OpenMainMenuSectionForPlacementType(_selectedPlacementType);
+            _selectedPlacementType = _selectedPlacementType == PlacementEntityType.Entrance
+                ? PlacementEntityType.Exit
+                : PlacementEntityType.Entrance;
             DeletePlacementPreview();
             ShowStatus("Type de placement: " + PlacementTypeDisplayName(_selectedPlacementType), 1600);
             break;
@@ -1301,6 +1363,7 @@ private void ActivateMainMenuItem(List<MainMenuEntry> entries)
         case MainMenuAction.NpcWeaponEditor:
             _menuPage = MenuPage.WeaponEditor;
             _weaponEditorIndex = 1;
+            ResetMenuSelectionAnimation();
             break;
 
         case MainMenuAction.NpcAutoRespawn:
@@ -1323,165 +1386,59 @@ private void ActivateMainMenuItem(List<MainMenuEntry> entries)
             break;
 
         case MainMenuAction.CleanNpcs:
-            CleanAllSpawnedNpcs();
-            break;
-
         case MainMenuAction.CleanVehicles:
-            CleanAllPlacedVehicles();
-            break;
-
         case MainMenuAction.CleanObjects:
-            CleanAllPlacedObjects();
-            break;
-
         case MainMenuAction.CleanInteriorPortals:
-            CleanAllInteriorPortals();
+            RequestDangerConfirmation(entry.Action);
             break;
 
         case MainMenuAction.TerminatorMode:
             ToggleTerminatorMode();
             break;
+
+        case MainMenuAction.JusticeEnabled:
+            RequestJusticeToggle();
+            break;
+
+        case MainMenuAction.JusticeProfile:
+            ShowStatus("Utilise Gauche/Droite pour choisir le personnage Justice.", 2400);
+            break;
+
+        case MainMenuAction.JusticeStatus:
+        case MainMenuAction.JusticeLastCrime:
+        case MainMenuAction.JusticeSeverity:
+        case MainMenuAction.JusticeWarrant:
+        case MainMenuAction.JusticeFine:
+        case MainMenuAction.JusticeSentence:
+        case MainMenuAction.JusticeRecidivism:
+            ShowStatus("Les details Justice sont regroupes dans le panneau droit.", 2200);
+            break;
+
+        case MainMenuAction.JusticePayFine:
+            RequestJusticeSelectedProfileFinePaymentConfirmation();
+            break;
+
+        case MainMenuAction.JusticeResetProfile:
+            RequestJusticeSelectedProfileReset();
+            break;
+
+        case MainMenuAction.JusticeCharges:
+            OpenJusticeLedger(false);
+            break;
+
+        case MainMenuAction.JusticeRecord:
+            OpenJusticeLedger(true);
+            break;
     }
 
-    // Contrat historique conserve pour les tests source de l'ancien menu:
-    // case 23:
-    //     CleanAllInteriorPortals();
-    NormalizeMainMenuSelection(BuildMainMenuEntries());
+    List<MainMenuEntry> refreshedEntries = BuildMainMenuEntries();
+    NormalizeMainMenuSelection(refreshedEntries);
+    RememberMainMenuSelection(refreshedEntries);
 }
 
 private List<MainMenuEntry> BuildMainMenuEntries()
 {
-    List<MainMenuEntry> entries = new List<MainMenuEntry>(44);
-
-    AddMainMenuRow(entries, MainMenuAction.PlacementType, "Type de placement", PlacementTypeDisplayName(_selectedPlacementType), MainMenuRowKind.Primary, 0, true);
-    AddMainMenuRow(entries, MainMenuAction.PrecisePlacement, "Placement camera precis", "Ouvrir le placement fin", MainMenuRowKind.PrimaryAction, 0, true);
-    AddMainMenuRow(entries, MainMenuAction.DistancePlacement, "Placement direct", "Placer a " + _selectedDistance.ToString(CultureInfo.InvariantCulture) + " m devant le joueur", MainMenuRowKind.Action, 0, true);
-    AddMainMenuRow(entries, MainMenuAction.PlacementDistance, "Distance placement direct", _selectedDistance.ToString(CultureInfo.InvariantCulture) + " m", MainMenuRowKind.Normal, 0, true);
-
-    AddMainMenuSection(
-        entries,
-        MainMenuAction.SectionNpc,
-        "NPC",
-        CurrentModelDisplayName() + " | " + CurrentWeaponDisplayName(),
-        _mainMenuNpcExpanded,
-        _selectedPlacementType == PlacementEntityType.Npc);
-
-    if (_mainMenuNpcExpanded)
-    {
-        AddMainMenuRow(entries, MainMenuAction.NpcCategory, "Categorie NPC", CurrentModelCategory().Name, MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcModel, "Modele NPC", CurrentModelDisplayName(), MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcWeaponCategory, "Categorie arme", CurrentWeaponCategory().Name, MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcWeapon, "Arme", CurrentWeaponDisplayName(), MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcWeaponEditor, "Atelier arme", WeaponPresetDisplayName(_selectedWeaponLoadout.Preset) + " | " + _selectedWeaponLoadout.Summary(), MainMenuRowKind.Action, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcHealth, "Sante NPC", _selectedHealth.ToString(CultureInfo.InvariantCulture), MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcArmor, "Armure NPC", _selectedArmor.ToString(CultureInfo.InvariantCulture), MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcBehavior, "Comportement NPC", NpcBehaviorDisplayName(_selectedBehavior), MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcPatrolRadius, "Rayon patrouille", _selectedPatrolRadius.ToString(CultureInfo.InvariantCulture) + " m", MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.NpcAutoRespawn, "Reapparition auto", BoolText(_selectedAutoRespawn), MainMenuRowKind.Normal, 1, true);
-    }
-
-    AddMainMenuSection(
-        entries,
-        MainMenuAction.SectionVehicle,
-        "Vehicules",
-        CurrentVehicleDisplayName(),
-        _mainMenuVehicleExpanded,
-        _selectedPlacementType == PlacementEntityType.Vehicle);
-
-    if (_mainMenuVehicleExpanded)
-    {
-        AddMainMenuRow(entries, MainMenuAction.VehicleCategory, "Categorie vehicule", CurrentVehicleCategory().Name, MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.VehicleModel, "Vehicule", CurrentVehicleDisplayName(), MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.VehicleAutoRespawn, "Reapparition auto", BoolText(_selectedAutoRespawn), MainMenuRowKind.Normal, 1, true);
-    }
-
-    AddMainMenuSection(
-        entries,
-        MainMenuAction.SectionObject,
-        "Objets",
-        CurrentObjectDisplayName(),
-        _mainMenuObjectExpanded,
-        _selectedPlacementType == PlacementEntityType.Object);
-
-    if (_mainMenuObjectExpanded)
-    {
-        AddMainMenuRow(entries, MainMenuAction.ObjectCategory, "Categorie objet", CurrentObjectCategory().Name, MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.ObjectModel, "Objet", CurrentObjectDisplayName(), MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.ObjectAutoRespawn, "Reapparition auto", BoolText(_selectedAutoRespawn), MainMenuRowKind.Normal, 1, true);
-    }
-
-    AddMainMenuSection(
-        entries,
-        MainMenuAction.SectionInterior,
-        "Entrees / sorties",
-        CurrentInteriorOption().DisplayName,
-        _mainMenuInteriorExpanded,
-        _selectedPlacementType == PlacementEntityType.Entrance || _selectedPlacementType == PlacementEntityType.Exit);
-
-    if (_mainMenuInteriorExpanded)
-    {
-        AddMainMenuRow(entries, MainMenuAction.InteriorCategory, "Categorie interieur", CurrentInteriorCategory().Name, MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.InteriorModel, "Interieur", CurrentInteriorOption().DisplayName, MainMenuRowKind.Normal, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.ExitActiveInfo, "Sortie active", ActiveInteriorSessionDisplayName(), MainMenuRowKind.Info, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.ExitDestinationInfo, "Destination sortie", ExitDestinationDisplayName(), MainMenuRowKind.Info, 1, true);
-    }
-
-    AddMainMenuSection(
-        entries,
-        MainMenuAction.SectionSave,
-        "Sauvegarde",
-        string.IsNullOrEmpty(_lastSaveFileName) ? "Aucun fichier" : _lastSaveFileName,
-        _mainMenuSaveExpanded,
-        false);
-
-    if (_mainMenuSaveExpanded)
-    {
-        AddMainMenuRow(entries, MainMenuAction.Save, "Sauvegarder", _lastSaveFileName, MainMenuRowKind.Action, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.Load, "Charger", _lastSaveFileName, MainMenuRowKind.Action, 1, true);
-    }
-
-    AddMainMenuSection(
-        entries,
-        MainMenuAction.SectionCleanup,
-        "Nettoyage",
-        "NPC / vehicules / objets / portails",
-        _mainMenuCleanupExpanded,
-        false);
-
-    if (_mainMenuCleanupExpanded)
-    {
-        AddMainMenuRow(entries, MainMenuAction.CleanNpcs, "Nettoyer NPC", "Supprimer tous les NPC spawnes", MainMenuRowKind.Danger, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.CleanVehicles, "Nettoyer vehicules", "Supprimer les vehicules places", MainMenuRowKind.Danger, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.CleanObjects, "Nettoyer objets", "Supprimer les objets places", MainMenuRowKind.Danger, 1, true);
-        AddMainMenuRow(entries, MainMenuAction.CleanInteriorPortals, "Nettoyer entrees/sorties", "Supprimer les reperes interieurs", MainMenuRowKind.Danger, 1, true);
-    }
-
-    AddMainMenuRow(
-        entries,
-        MainMenuAction.TerminatorMode,
-        "Mode Terminator",
-        _terminatorModeEnabled ? "ACTIVE - vision rouge T-800" : "DESACTIVE",
-        _terminatorModeEnabled ? MainMenuRowKind.Primary : MainMenuRowKind.Normal,
-        0,
-        true);
-
-    return entries;
-}
-
-private void AddMainMenuSection(List<MainMenuEntry> entries, MainMenuAction action, string label, string value, bool expanded, bool active)
-{
-    MainMenuEntry entry = new MainMenuEntry(action, label, value, MainMenuRowKind.SectionHeader, 0, true)
-    {
-        Expanded = expanded,
-        Active = active
-    };
-
-    entries.Add(entry);
-}
-
-private void AddMainMenuRow(List<MainMenuEntry> entries, MainMenuAction action, string label, string value, MainMenuRowKind kind, int level, bool enabled)
-{
-    entries.Add(new MainMenuEntry(action, label, value, kind, level, enabled));
+    return BuildObsidianMainMenuEntries();
 }
 
 private MainMenuEntry GetSelectedMainMenuEntry()
@@ -1495,7 +1452,7 @@ private MainMenuEntry GetSelectedMainMenuEntry(List<MainMenuEntry> entries)
 {
     if (entries.Count == 0)
     {
-        return new MainMenuEntry(MainMenuAction.PlacementType, string.Empty, string.Empty, MainMenuRowKind.Normal, 0, false);
+        return new MainMenuEntry(MainMenuAction.PlacementType, string.Empty, string.Empty, MainMenuRowKind.Normal, false);
     }
 
     return entries[_mainMenuIndex];
@@ -1543,16 +1500,6 @@ private void EnsureMainMenuSelectionVisible(int entryCount)
     _mainMenuScrollOffset = Clamp(_mainMenuScrollOffset, 0, maxScroll);
 }
 
-private static int GetMainMenuVisibleRowCount(int entryCount)
-{
-    if (entryCount <= 0)
-    {
-        return 1;
-    }
-
-    return Math.Min(MainMenuVisibleRowLimit, entryCount);
-}
-
 private static int GetMainMenuCompactVisibleRowCount(int entryCount)
 {
     if (entryCount <= 0)
@@ -1565,75 +1512,7 @@ private static int GetMainMenuCompactVisibleRowCount(int entryCount)
 
 private void OpenMainMenuSectionForPlacementType(PlacementEntityType placementType)
 {
-    // Focus automatique : quand on change de type, on ouvre uniquement
-    // la section utile. Le joueur peut toujours rouvrir les autres sections
-    // manuellement avec Entree, mais le premier regard reste propre.
-    _mainMenuNpcExpanded = placementType == PlacementEntityType.Npc;
-    _mainMenuVehicleExpanded = placementType == PlacementEntityType.Vehicle;
-    _mainMenuObjectExpanded = placementType == PlacementEntityType.Object;
-    _mainMenuInteriorExpanded = placementType == PlacementEntityType.Entrance || placementType == PlacementEntityType.Exit;
-}
-
-private void ToggleMainMenuSection(MainMenuAction action)
-{
-    SetMainMenuSectionExpanded(action, !IsMainMenuSectionExpanded(action));
-}
-
-private void SetMainMenuSectionExpanded(MainMenuAction action, bool expanded)
-{
-    switch (action)
-    {
-        case MainMenuAction.SectionNpc:
-            _mainMenuNpcExpanded = expanded;
-            break;
-
-        case MainMenuAction.SectionVehicle:
-            _mainMenuVehicleExpanded = expanded;
-            break;
-
-        case MainMenuAction.SectionObject:
-            _mainMenuObjectExpanded = expanded;
-            break;
-
-        case MainMenuAction.SectionInterior:
-            _mainMenuInteriorExpanded = expanded;
-            break;
-
-        case MainMenuAction.SectionSave:
-            _mainMenuSaveExpanded = expanded;
-            break;
-
-        case MainMenuAction.SectionCleanup:
-            _mainMenuCleanupExpanded = expanded;
-            break;
-    }
-}
-
-private bool IsMainMenuSectionExpanded(MainMenuAction action)
-{
-    switch (action)
-    {
-        case MainMenuAction.SectionNpc:
-            return _mainMenuNpcExpanded;
-
-        case MainMenuAction.SectionVehicle:
-            return _mainMenuVehicleExpanded;
-
-        case MainMenuAction.SectionObject:
-            return _mainMenuObjectExpanded;
-
-        case MainMenuAction.SectionInterior:
-            return _mainMenuInteriorExpanded;
-
-        case MainMenuAction.SectionSave:
-            return _mainMenuSaveExpanded;
-
-        case MainMenuAction.SectionCleanup:
-            return _mainMenuCleanupExpanded;
-
-        default:
-            return false;
-    }
+    SetMainMenuCategory(CategoryForPlacementType(placementType));
 }
 
 private string ActiveInteriorSessionDisplayName()
@@ -1653,894 +1532,21 @@ private string ExitDestinationDisplayName()
 private void DrawMenu()
 {
     if (_menuPage == MenuPage.WeaponEditor)
-        {
-            DrawWeaponEditorMenu();
-            return;
-        }
-
-        DrawMainMenu();
-    }
-
-private void DrawMainMenu()
-{
-    List<MainMenuEntry> entries = BuildMainMenuEntries();
-    NormalizeMainMenuSelection(entries);
-
-    int visibleRows = GetMainMenuCompactVisibleRowCount(entries.Count);
-
-    // Base 1280x720 SHVDN: panneau compact, lisible, mais moins envahissant.
-    int x = MainMenuPanelX;
-    int y = MainMenuPanelY;
-    int width = MainMenuPanelWidth;
-    int titleHeight = MainMenuTitleHeight;
-    int rowHeight = MainMenuRowHeight;
-    int footerHeight = MainMenuFooterHeight;
-    int rowAreaHeight = visibleRows * rowHeight;
-    int totalHeight = titleHeight + rowAreaHeight + footerHeight;
-
-    Color accent = GetPlacementTypeColor(_selectedPlacementType);
-    Color panelBackground = Color.FromArgb(224, 7, 8, 12);
-    Color headerBackground = Color.FromArgb(232, 14, 15, 20);
-    Color listBackground = Color.FromArgb(168, 8, 9, 12);
-    Color lineColor = Color.FromArgb(54, 255, 255, 255);
-
-    DrawPanelFrame(x, y, width, totalHeight, accent);
-    DrawRect(x + 1, y + 1, width - 2, totalHeight - 2, panelBackground);
-
-    // Header plus calme : le rouge n'est plus un gros bloc permanent.
-    DrawRect(x, y, width, titleHeight, headerBackground);
-    DrawRect(x, y, width, 4, Color.FromArgb(235, accent.R, accent.G, accent.B));
-    DrawRect(x, y + titleHeight - 1, width, 1, Color.FromArgb(135, accent.R, accent.G, accent.B));
-    DrawRect(x + 18, y + 17, 4, 42, Color.FromArgb(230, accent.R, accent.G, accent.B));
-
-    DrawText(TrainerTitle, x + 30, y + 12, 0.425f, Color.White, false, true);
-    DrawText(TrainerSubtitle, x + 31, y + 42, 0.252f, Color.FromArgb(202, 204, 211), false, false);
-
-    DrawHeaderStat(
-        x + width - 332,
-        y + 15,
-        122,
-        "TYPE",
-        PlacementTypeDisplayName(_selectedPlacementType).ToUpperInvariant(),
-        accent);
-
-    DrawHeaderStat(
-        x + width - 204,
-        y + 15,
-        104,
-        "LIGNES",
-        (_mainMenuIndex + 1).ToString(CultureInfo.InvariantCulture) + "/" + entries.Count.ToString(CultureInfo.InvariantCulture),
-        Color.FromArgb(210, 210, 218));
-
-    DrawHeaderStat(
-        x + width - 94,
-        y + 15,
-        72,
-        "MENU",
-        MenuToggleKeyLabel,
-        accent);
-
-    DrawBadge(
-        x + 31,
-        y + 64,
-        122,
-        "TAB sections",
-        Color.FromArgb(104, 20, 22, 29),
-        accent);
-
-    DrawBadge(
-        x + 161,
-        y + 64,
-        134,
-        "Entree action",
-        Color.FromArgb(104, 20, 22, 29),
-        Color.FromArgb(210, 210, 218));
-
-    DrawBadge(
-        x + 303,
-        y + 64,
-        126,
-        "G/D modifier",
-        Color.FromArgb(104, 20, 22, 29),
-        Color.FromArgb(210, 210, 218));
-
-    DrawBadge(
-        x + 437,
-        y + 64,
-        124,
-        _selectedAutoRespawn ? "Respawn ON" : "Respawn OFF",
-        _selectedAutoRespawn ? Color.FromArgb(116, 18, 72, 46) : Color.FromArgb(104, 20, 22, 29),
-        _selectedAutoRespawn ? Color.FromArgb(230, 80, 190, 120) : Color.FromArgb(150, 151, 158));
-
-    int rowY = y + titleHeight;
-
-    DrawRect(x, rowY, width, rowAreaHeight, listBackground);
-    DrawRect(x + 12, rowY + 8, width - 24, rowAreaHeight - 16, Color.FromArgb(42, 255, 255, 255));
-    DrawRect(x + 326, rowY + 10, 1, rowAreaHeight - 20, lineColor);
-
-    int startIndex = _mainMenuScrollOffset;
-    int endIndex = Math.Min(entries.Count, startIndex + visibleRows);
-
-    for (int i = startIndex; i < endIndex; i++)
     {
-        DrawMainMenuEntryRow(x, width, rowY + (i - startIndex) * rowHeight, rowHeight, entries[i], i == _mainMenuIndex);
-    }
-
-    if (entries.Count > visibleRows)
-    {
-        DrawMainMenuScrollbar(x + width - 13, rowY + 10, 5, rowAreaHeight - 20, entries.Count, visibleRows);
-    }
-
-    int footerY = y + titleHeight + rowAreaHeight;
-    MainMenuEntry selectedEntry = entries.Count > 0
-        ? entries[_mainMenuIndex]
-        : new MainMenuEntry(MainMenuAction.PlacementType, string.Empty, string.Empty, MainMenuRowKind.Normal, 0, false);
-
-    DrawRect(x, footerY, width, footerHeight, Color.FromArgb(232, 8, 9, 13));
-    DrawRect(x, footerY, width, 1, Color.FromArgb(80, 255, 255, 255));
-    DrawSelectedMainMenuCard(x, footerY, width, footerHeight, selectedEntry);
-
-    DrawMainSummaryPanel(x + width + MainMenuSummaryGap, y, MainMenuSummaryWidth, MainMenuSummaryHeight);
-
-    /*
-     * Contrats source historiques conserves volontairement pour les tests anti-regression
-     * de l'ancien menu plat. Le rendu reel utilise maintenant BuildMainMenuEntries().
-     *
-     * DrawMainMenuRow(x, width, rowY + rowHeight * 8, 8, PlacementSlotCategoryLabel(), PlacementSlotCategoryValue());
-     * DrawMainMenuRow(x, width, rowY + rowHeight * 9, 9, PlacementSlotOptionLabel(), PlacementSlotOptionValue());
-     * DrawMainMenuRow(x, width, rowY + rowHeight * 15, 15, "Reapparition auto", BoolText(_selectedAutoRespawn));
-     * DrawMainMenuRow(x, width, rowY + rowHeight * 23, 23, "Nettoyer entrees/sorties", "Supprimer les reperes interieurs");
-     * DrawMainSummaryPanel(x + width + 18, y, 338, 212);
-     */
-}
-
-private void DrawWeaponEditorMenu()
-{
-    int x = 46;
-    int y = 38;
-    int width = 688;
-    int titleHeight = 82;
-    int rowHeight = 30;
-    int footerHeight = 70;
-    int totalHeight = titleHeight + WeaponEditorItemCount * rowHeight + footerHeight;
-
-    Color accent = Color.FromArgb(245, 202, 150, 34);
-
-    DrawPanelFrame(x, y, width, totalHeight, accent);
-    DrawRect(x + 1, y + 1, width - 2, totalHeight - 2, Color.FromArgb(224, 7, 8, 12));
-
-    DrawRect(x, y, width, titleHeight, Color.FromArgb(232, 15, 15, 19));
-    DrawRect(x, y, width, 4, Color.FromArgb(235, accent.R, accent.G, accent.B));
-    DrawRect(x, y + titleHeight - 1, width, 1, Color.FromArgb(135, accent.R, accent.G, accent.B));
-    DrawRect(x + 18, y + 17, 4, 40, Color.FromArgb(230, accent.R, accent.G, accent.B));
-
-    DrawText("Atelier arme", x + 30, y + 12, 0.425f, Color.White, false, true);
-    DrawText(FitText(CurrentWeaponDisplayName(), 54), x + 31, y + 42, 0.252f, Color.FromArgb(202, 204, 211), false, false);
-
-    DrawHeaderStat(
-        x + width - 132,
-        y + 18,
-        104,
-        "MODE",
-        "EDITION",
-        accent);
-
-    int rowY = y + titleHeight;
-
-    DrawRect(x, rowY, width, WeaponEditorItemCount * rowHeight, Color.FromArgb(168, 8, 9, 12));
-    DrawRect(x + 12, rowY + 8, width - 24, WeaponEditorItemCount * rowHeight - 16, Color.FromArgb(42, 255, 255, 255));
-    DrawRect(x + 292, rowY + 10, 1, WeaponEditorItemCount * rowHeight - 20, Color.FromArgb(54, 255, 255, 255));
-
-    DrawMenuRow(x, width, rowY + rowHeight * 0, "Retour", "Revenir au menu principal", _weaponEditorIndex == 0, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 1, "Preset", WeaponPresetDisplayName(_selectedWeaponLoadout.Preset), _weaponEditorIndex == 1, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 2, "Chargeur etendu", BoolText(_selectedWeaponLoadout.ExtendedClip), _weaponEditorIndex == 2, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 3, "Silencieux", BoolText(_selectedWeaponLoadout.Suppressor), _weaponEditorIndex == 3, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 4, "Lampe", BoolText(_selectedWeaponLoadout.Flashlight), _weaponEditorIndex == 4, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 5, "Poignee", BoolText(_selectedWeaponLoadout.Grip), _weaponEditorIndex == 5, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 6, "Lunette", ScopeDisplayName(_selectedWeaponLoadout.Scope), _weaponEditorIndex == 6, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 7, "Compensateur / bouche", BoolText(_selectedWeaponLoadout.Muzzle), _weaponEditorIndex == 7, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 8, "Canon ameliore", BoolText(_selectedWeaponLoadout.ImprovedBarrel), _weaponEditorIndex == 8, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 9, "Munitions MK2", Mk2AmmoDisplayName(_selectedWeaponLoadout.Mk2Ammo), _weaponEditorIndex == 9, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 10, "Teinte", _selectedWeaponLoadout.Tint.ToString(CultureInfo.InvariantCulture), _weaponEditorIndex == 10, rowHeight, 324, accent);
-    DrawMenuRow(x, width, rowY + rowHeight * 11, "Appliquer aux NPC poses", "Mettre a jour les PNJ existants", _weaponEditorIndex == 11, rowHeight, 324, accent);
-
-    int footerY = y + titleHeight + WeaponEditorItemCount * rowHeight;
-
-    DrawRect(x, footerY, width, footerHeight, Color.FromArgb(232, 8, 9, 13));
-    DrawRect(x, footerY, width, 1, Color.FromArgb(80, 255, 255, 255));
-
-    DrawKeyHint(x + 18, footerY + 14, 92, "FLECHES", Color.FromArgb(210, 210, 218));
-    DrawKeyHint(x + 118, footerY + 14, 126, "G/D", accent);
-    DrawKeyHint(x + 252, footerY + 14, 92, "ENTREE", Color.FromArgb(210, 210, 218));
-    DrawKeyHint(x + 352, footerY + 14, 92, "ECHAP", Color.FromArgb(210, 210, 218));
-
-    DrawText(
-        "Composants incompatibles ignores proprement.",
-        x + 18,
-        footerY + 44,
-        0.238f,
-        Color.FromArgb(178, 180, 188),
-        false,
-        false);
-}
-
-private void DrawMainMenuEntryRow(int x, int width, int y, int rowHeight, MainMenuEntry entry, bool selected)
-{
-    int innerX = x + 12;
-    int innerW = width - 24;
-    int rowY = y + 2;
-    int rowH = rowHeight - 4;
-    int indent = Math.Max(0, entry.Level) * 18;
-    int labelX = x + 30 + indent;
-    int valueX = x + MainMenuValueColumnX;
-    int valueRight = x + width - 38;
-    int valueMaxLength = Math.Max(10, (valueRight - valueX) / 7);
-    if (entry.Kind == MainMenuRowKind.SectionHeader && entry.Active)
-    {
-        valueMaxLength = Math.Max(8, valueMaxLength - 8);
-    }
-    int textOffset = 7;
-    float textScale = entry.Kind == MainMenuRowKind.SectionHeader ? 0.270f : 0.252f;
-
-    Color accent = GetMainMenuEntryAccent(entry);
-    Color background = GetMainMenuEntryBackground(entry, selected);
-    Color labelColor = entry.Enabled ? Color.FromArgb(220, 222, 228) : Color.FromArgb(132, 134, 142);
-    Color valueColor = entry.Enabled ? Color.FromArgb(185, 187, 196) : Color.FromArgb(116, 118, 126);
-
-    if (selected)
-    {
-        labelColor = Color.White;
-        valueColor = Color.White;
-    }
-
-    DrawRect(innerX, rowY, innerW, rowH, background);
-
-    if (selected)
-    {
-        DrawRect(innerX, rowY, innerW, 1, Color.FromArgb(72, 255, 255, 255));
-        DrawRect(innerX, rowY + rowH - 1, innerW, 1, Color.FromArgb(148, 0, 0, 0));
-        DrawRect(innerX + innerW - 4, rowY, 4, rowH, Color.FromArgb(208, accent.R, accent.G, accent.B));
-    }
-
-    if (entry.Kind == MainMenuRowKind.SectionHeader)
-    {
-        DrawRect(innerX, rowY, innerW, 1, Color.FromArgb(48, 255, 255, 255));
-        DrawRect(innerX, rowY + rowH - 1, innerW, 1, Color.FromArgb(130, 0, 0, 0));
-        DrawRect(innerX, rowY, 5, rowH, Color.FromArgb(232, accent.R, accent.G, accent.B));
-
-        if (entry.Active)
-        {
-            DrawRect(innerX + 5, rowY, 3, rowH, Color.FromArgb(185, 255, 255, 255));
-        }
-
-        string arrow = entry.Expanded ? "v" : ">";
-        DrawText(arrow + "  " + entry.Label, labelX, y + textOffset, textScale, labelColor, false, true);
-        DrawText(FitText(entry.Value, valueMaxLength), valueX, y + textOffset, textScale, valueColor, false, false);
-
-        if (entry.Active)
-        {
-            DrawText("ACTIF", x + width - 76, y + textOffset, 0.214f, Color.FromArgb(226, accent.R, accent.G, accent.B), false, true);
-        }
-
+        DrawObsidianWeaponEditorMenu();
         return;
     }
 
-    DrawRect(innerX, rowY, 3, rowH, Color.FromArgb(168, accent.R, accent.G, accent.B));
-
-    if (entry.Level > 0)
+    if (_menuPage == MenuPage.JusticeCharges ||
+        _menuPage == MenuPage.JusticeRecord)
     {
-        DrawRect(x + 40, rowY + 6, 10, 1, Color.FromArgb(72, accent.R, accent.G, accent.B));
-        DrawRect(x + 40, rowY + 6, 1, rowH - 11, Color.FromArgb(62, accent.R, accent.G, accent.B));
-    }
-
-    if (entry.Kind == MainMenuRowKind.Primary || entry.Kind == MainMenuRowKind.PrimaryAction)
-    {
-        DrawRect(innerX + 3, rowY, 3, rowH, Color.FromArgb(130, 255, 255, 255));
-    }
-
-    DrawText(
-        entry.Label ?? string.Empty,
-        labelX,
-        y + textOffset,
-        textScale,
-        labelColor,
-        false,
-        selected || entry.Kind == MainMenuRowKind.Primary || entry.Kind == MainMenuRowKind.PrimaryAction);
-
-    DrawText(
-        FitText(entry.Value, valueMaxLength),
-        valueX,
-        y + textOffset,
-        textScale,
-        valueColor,
-        false,
-        false);
-
-    if (selected)
-    {
-        DrawText(">", x + width - 31, y + textOffset - 1, 0.292f, Color.White, false, true);
-    }
-}
-
-private Color GetMainMenuEntryBackground(MainMenuEntry entry, bool selected)
-{
-    if (selected)
-    {
-        switch (entry.Kind)
-        {
-            case MainMenuRowKind.PrimaryAction:
-                return Color.FromArgb(224, 18, 102, 74);
-
-            case MainMenuRowKind.Primary:
-                return Color.FromArgb(220, 55, 58, 70);
-
-            case MainMenuRowKind.Danger:
-                return Color.FromArgb(224, 112, 34, 34);
-
-            case MainMenuRowKind.SectionHeader:
-                return entry.Active
-                    ? Color.FromArgb(220, 58, 60, 72)
-                    : Color.FromArgb(214, 45, 47, 57);
-
-            case MainMenuRowKind.Info:
-                return Color.FromArgb(205, 43, 46, 56);
-
-            default:
-                return Color.FromArgb(214, 48, 51, 62);
-        }
-    }
-
-    switch (entry.Kind)
-    {
-        case MainMenuRowKind.PrimaryAction:
-            return Color.FromArgb(128, 12, 72, 54);
-
-        case MainMenuRowKind.Primary:
-            return Color.FromArgb(88, 24, 27, 36);
-
-        case MainMenuRowKind.Action:
-            return Color.FromArgb(76, 22, 25, 34);
-
-        case MainMenuRowKind.Info:
-            return Color.FromArgb(60, 18, 21, 28);
-
-        case MainMenuRowKind.Danger:
-            return Color.FromArgb(74, 68, 24, 24);
-
-        case MainMenuRowKind.SectionHeader:
-            return entry.Active
-                ? Color.FromArgb(118, 34, 38, 48)
-                : Color.FromArgb(92, 21, 24, 32);
-
-        default:
-            return Color.FromArgb(62, 18, 21, 29);
-    }
-}
-
-private Color GetMainMenuEntryAccent(MainMenuEntry entry)
-{
-    switch (entry.Action)
-    {
-        case MainMenuAction.PlacementType:
-            return GetPlacementTypeColor(_selectedPlacementType);
-
-        case MainMenuAction.PrecisePlacement:
-            return Color.FromArgb(245, 60, 220, 150);
-
-        case MainMenuAction.DistancePlacement:
-        case MainMenuAction.PlacementDistance:
-            return Color.FromArgb(230, 70, 145, 220);
-
-        case MainMenuAction.SectionNpc:
-        case MainMenuAction.NpcCategory:
-        case MainMenuAction.NpcModel:
-        case MainMenuAction.NpcWeaponCategory:
-        case MainMenuAction.NpcWeapon:
-        case MainMenuAction.NpcWeaponEditor:
-        case MainMenuAction.NpcHealth:
-        case MainMenuAction.NpcArmor:
-        case MainMenuAction.NpcBehavior:
-        case MainMenuAction.NpcPatrolRadius:
-        case MainMenuAction.NpcAutoRespawn:
-            return Color.FromArgb(230, 190, 58, 64);
-
-        case MainMenuAction.SectionVehicle:
-        case MainMenuAction.VehicleCategory:
-        case MainMenuAction.VehicleModel:
-        case MainMenuAction.VehicleAutoRespawn:
-            return Color.FromArgb(230, 70, 145, 220);
-
-        case MainMenuAction.SectionObject:
-        case MainMenuAction.ObjectCategory:
-        case MainMenuAction.ObjectModel:
-        case MainMenuAction.ObjectAutoRespawn:
-            return Color.FromArgb(230, 210, 158, 46);
-
-        case MainMenuAction.SectionInterior:
-        case MainMenuAction.InteriorCategory:
-        case MainMenuAction.InteriorModel:
-        case MainMenuAction.ExitActiveInfo:
-        case MainMenuAction.ExitDestinationInfo:
-            return Color.FromArgb(230, 150, 95, 220);
-
-        case MainMenuAction.SectionSave:
-        case MainMenuAction.Save:
-        case MainMenuAction.Load:
-            return Color.FromArgb(230, 80, 190, 120);
-
-        case MainMenuAction.SectionCleanup:
-        case MainMenuAction.CleanNpcs:
-        case MainMenuAction.CleanVehicles:
-        case MainMenuAction.CleanObjects:
-        case MainMenuAction.CleanInteriorPortals:
-            return Color.FromArgb(230, 210, 80, 80);
-
-        case MainMenuAction.TerminatorMode:
-            return _terminatorModeEnabled
-                ? Color.FromArgb(245, 255, 42, 42)
-                : Color.FromArgb(220, 140, 42, 42);
-
-        default:
-            return Color.FromArgb(230, 185, 32, 40);
-    }
-}
-
-private Color GetPlacementTypeColor(PlacementEntityType placementType)
-{
-    switch (placementType)
-    {
-        case PlacementEntityType.Vehicle:
-            return Color.FromArgb(230, 70, 145, 220);
-
-        case PlacementEntityType.Object:
-            return Color.FromArgb(230, 210, 158, 46);
-
-        case PlacementEntityType.Entrance:
-        case PlacementEntityType.Exit:
-            return Color.FromArgb(230, 150, 95, 220);
-
-        case PlacementEntityType.Npc:
-        default:
-            return Color.FromArgb(230, 190, 58, 64);
-    }
-}
-
-private void DrawMainMenuScrollbar(int x, int y, int width, int height, int entryCount, int visibleRows)
-{
-    if (entryCount <= visibleRows || entryCount <= 0)
-    {
+        DrawObsidianJusticeLedgerMenu(_menuPage == MenuPage.JusticeRecord);
         return;
     }
 
-    int trackHeight = Math.Max(1, height);
-    int maxScroll = Math.Max(1, entryCount - visibleRows);
-    int thumbHeight = Math.Max(28, (int)Math.Round(trackHeight * (visibleRows / (double)entryCount)));
-    int thumbTravel = Math.Max(1, trackHeight - thumbHeight);
-    int thumbY = y + (int)Math.Round(thumbTravel * (_mainMenuScrollOffset / (double)maxScroll));
-    Color accent = GetPlacementTypeColor(_selectedPlacementType);
-
-    DrawRect(x, y, width, height, Color.FromArgb(82, 0, 0, 0));
-    DrawRect(x, thumbY, width, thumbHeight, Color.FromArgb(205, accent.R, accent.G, accent.B));
+    DrawObsidianMainMenu();
 }
 
-private void DrawMainMenuRow(int x, int width, int y, int index, string label, string value)
-{
-    DrawMenuRow(x, width, y, label, value, _mainMenuIndex == index, 23, 330, GetMainMenuAccent(index));
-}
-
-private void DrawMenuRow(int x, int width, int y, string label, string value, bool selected)
-{
-    DrawMenuRow(x, width, y, label, value, selected, 25, 270, Color.FromArgb(220, 180, 40, 40));
-}
-
-private void DrawMenuRow(int x, int width, int y, string label, string value, bool selected, int rowHeight, int valueX, Color accentColor)
-{
-    int innerX = x + 12;
-    int innerW = width - 24;
-    int rowY = y + 2;
-    int rowH = rowHeight - 4;
-    int textOffset = rowHeight <= 24 ? 6 : 8;
-    float textScale = rowHeight <= 24 ? 0.258f : 0.268f;
-    int valueMaxLength = Math.Max(18, (innerW - valueX + 16) / 7);
-
-    if (selected)
-    {
-        DrawRect(innerX, rowY, innerW, rowH, Color.FromArgb(216, 48, 51, 62));
-        DrawRect(innerX, rowY, 5, rowH, Color.FromArgb(232, accentColor.R, accentColor.G, accentColor.B));
-        DrawRect(innerX, rowY, innerW, 1, Color.FromArgb(55, 255, 255, 255));
-        DrawRect(innerX, rowY + rowH - 1, innerW, 1, Color.FromArgb(130, 0, 0, 0));
-    }
-    else
-    {
-        DrawRect(innerX, rowY, innerW, rowH, Color.FromArgb(62, 18, 21, 29));
-        DrawRect(innerX, rowY, 3, rowH, Color.FromArgb(150, accentColor.R, accentColor.G, accentColor.B));
-    }
-
-    DrawText(label ?? string.Empty, x + 30, y + textOffset, textScale, selected ? Color.White : Color.FromArgb(220, 222, 228), false, selected);
-    DrawText(FitText(value, valueMaxLength), x + valueX, y + textOffset, textScale, selected ? Color.White : Color.FromArgb(185, 187, 196), false, false);
-
-    if (selected)
-    {
-        DrawText(">", x + width - 31, y + textOffset - 1, 0.292f, Color.White, false, true);
-    }
-}
-
-private void DrawPanelFrame(int x, int y, int width, int height, Color accentColor)
-{
-    DrawRect(x + 10, y + 12, width, height, Color.FromArgb(72, 0, 0, 0));
-    DrawRect(x + 5, y + 6, width, height, Color.FromArgb(58, 0, 0, 0));
-
-    DrawRect(x, y, width, height, Color.FromArgb(212, 6, 7, 10));
-    DrawRect(x, y, width, 1, Color.FromArgb(160, accentColor.R, accentColor.G, accentColor.B));
-    DrawRect(x, y + height - 1, width, 1, Color.FromArgb(95, accentColor.R, accentColor.G, accentColor.B));
-    DrawRect(x, y, 1, height, Color.FromArgb(115, accentColor.R, accentColor.G, accentColor.B));
-    DrawRect(x + width - 1, y, 1, height, Color.FromArgb(55, 255, 255, 255));
-}
-
-private void DrawBadge(int x, int y, int width, string text, Color background, Color accentColor)
-{
-    DrawRect(x, y, width, 24, background);
-    DrawRect(x, y, 3, 24, Color.FromArgb(225, accentColor.R, accentColor.G, accentColor.B));
-    DrawRect(x, y, width, 1, Color.FromArgb(62, 255, 255, 255));
-
-    DrawText(
-        FitText(text, Math.Max(6, width / 7)),
-        x + 10,
-        y + 6,
-        0.235f,
-        Color.FromArgb(232, 234, 238),
-        false,
-        false);
-}
-
-private void DrawHeaderStat(int x, int y, int width, string label, string value, Color accentColor)
-{
-    DrawRect(x, y, width, 40, Color.FromArgb(126, 20, 22, 29));
-    DrawRect(x, y, width, 1, Color.FromArgb(54, 255, 255, 255));
-    DrawRect(x, y, 3, 40, Color.FromArgb(225, accentColor.R, accentColor.G, accentColor.B));
-
-    DrawText(label, x + 10, y + 6, 0.190f, Color.FromArgb(148, 151, 160), false, false);
-    DrawText(FitText(value, Math.Max(6, (width - 16) / 7)), x + 10, y + 20, 0.230f, Color.FromArgb(235, 236, 240), false, false);
-}
-
-private void DrawKeyHint(int x, int y, int width, string label, Color accentColor)
-{
-    DrawRect(x, y, width, 24, Color.FromArgb(122, 21, 23, 30));
-    DrawRect(x, y, 3, 24, Color.FromArgb(215, accentColor.R, accentColor.G, accentColor.B));
-    DrawText(FitText(label, Math.Max(5, width / 7)), x + 10, y + 6, 0.225f, Color.FromArgb(232, 234, 238), false, false);
-}
-
-private void DrawSelectedMainMenuCard(int x, int y, int width, int height, MainMenuEntry entry)
-{
-    Color accent = GetMainMenuEntryAccent(entry);
-
-    DrawRect(x + 18, y + 13, width - 36, height - 26, Color.FromArgb(76, 255, 255, 255));
-    DrawRect(x + 18, y + 13, 4, height - 26, Color.FromArgb(230, accent.R, accent.G, accent.B));
-
-    DrawText(
-        MainMenuActionTag(entry),
-        x + 32,
-        y + 18,
-        0.198f,
-        Color.FromArgb(160, 163, 172),
-        false,
-        false);
-
-    DrawText(
-        FitText(entry.Label, 34),
-        x + 32,
-        y + 36,
-        0.282f,
-        Color.White,
-        false,
-        true);
-
-    DrawText(
-        FitText(entry.Value, 48),
-        x + 302,
-        y + 36,
-        0.250f,
-        Color.FromArgb(218, 220, 226),
-        false,
-        false);
-
-    DrawText(
-        FitText(MainMenuActionHint(entry), 100),
-        x + 32,
-        y + 66,
-        0.224f,
-        Color.FromArgb(168, 170, 178),
-        false,
-        false);
-
-    DrawKeyHint(x + width - 262, y + 17, 62, "G/D", IsMainMenuValueEditable(entry.Action) ? accent : Color.FromArgb(120, 122, 130));
-    DrawKeyHint(x + width - 193, y + 17, 76, "ENTREE", accent);
-    DrawKeyHint(x + width - 110, y + 17, 70, MenuToggleKeyLabel, Color.FromArgb(210, 210, 218));
-}
-
-private string MainMenuActionTag(MainMenuEntry entry)
-{
-    if (entry.Kind == MainMenuRowKind.Danger)
-    {
-        return "DANGER";
-    }
-
-    if (entry.Kind == MainMenuRowKind.PrimaryAction || entry.Kind == MainMenuRowKind.Action)
-    {
-        return "ACTION";
-    }
-
-    if (entry.Kind == MainMenuRowKind.SectionHeader)
-    {
-        return entry.Expanded ? "SECTION OUVERTE" : "SECTION FERMEE";
-    }
-
-    if (entry.Kind == MainMenuRowKind.Info)
-    {
-        return "INFO";
-    }
-
-    return "REGLAGE";
-}
-
-private string MainMenuActionHint(MainMenuEntry entry)
-{
-    switch (entry.Action)
-    {
-        case MainMenuAction.PlacementType:
-            return "Change le type a placer. La section utile s'ouvre automatiquement.";
-
-        case MainMenuAction.PrecisePlacement:
-            return "Ouvre la camera de placement fin avec apercu transparent.";
-
-        case MainMenuAction.DistancePlacement:
-            return "Pose rapidement l'element devant le joueur avec la distance reglee.";
-
-        case MainMenuAction.PlacementDistance:
-            return "Gauche/Droite ajuste la distance. Shift accelere le changement.";
-
-        case MainMenuAction.NpcCategory:
-            return "Filtre rapidement les peds par famille avant de choisir le modele.";
-
-        case MainMenuAction.NpcModel:
-            return CurrentModelOption().IsCustom
-                ? "Modele custom actif : appuie sur T pour saisir le nom exact."
-                : "Choisis le ped a placer dans la categorie NPC active.";
-
-        case MainMenuAction.NpcWeaponCategory:
-            return "Change la famille d'armes pour reduire la liste suivante.";
-
-        case MainMenuAction.NpcWeapon:
-            return "Choisis l'arme donnee au prochain NPC place.";
-
-        case MainMenuAction.NpcWeaponEditor:
-            return "Entree ouvre l'atelier; Gauche/Droite change le preset rapide.";
-
-        case MainMenuAction.NpcHealth:
-        case MainMenuAction.NpcArmor:
-        case MainMenuAction.NpcPatrolRadius:
-            return "Gauche/Droite ajuste la valeur. Shift accelere le changement.";
-
-        case MainMenuAction.NpcBehavior:
-            return "Selectionne le comportement IA applique au prochain NPC place.";
-
-        case MainMenuAction.NpcAutoRespawn:
-        case MainMenuAction.VehicleAutoRespawn:
-        case MainMenuAction.ObjectAutoRespawn:
-            return "Active la reapparition automatique quand le joueur quitte la zone.";
-
-        case MainMenuAction.VehicleCategory:
-            return "Filtre les vehicules par type pour aller plus vite dans la liste.";
-
-        case MainMenuAction.VehicleModel:
-            return "Choisis le vehicule qui sera place ou sauvegarde dans la scene.";
-
-        case MainMenuAction.ObjectCategory:
-            return "Filtre les props par usage : securite, butin, soin, mobilier ou decor.";
-
-        case MainMenuAction.ObjectModel:
-            return "Choisis l'objet a placer. Les butins affichent leur valeur utile.";
-
-        case MainMenuAction.InteriorCategory:
-            return "Filtre le catalogue d'interieurs avant de poser une entree.";
-
-        case MainMenuAction.InteriorModel:
-            return "Choisis la destination de l'entree interieure a placer.";
-
-        case MainMenuAction.Save:
-            return "Sauvegarde la scene courante dans le fichier XML actif.";
-
-        case MainMenuAction.Load:
-            return "Recharge NPC, vehicules, objets et portails depuis le XML actif.";
-
-        case MainMenuAction.CleanNpcs:
-        case MainMenuAction.CleanVehicles:
-        case MainMenuAction.CleanObjects:
-        case MainMenuAction.CleanInteriorPortals:
-            return "Nettoyage immediat. Utilise cette action seulement si tu es sur.";
-
-        case MainMenuAction.TerminatorMode:
-            return "Active/desactive le mode T-800. Tu peux revenir en 3e personne; la vision rouge marche seulement en 1ere personne.";
-
-        case MainMenuAction.ExitActiveInfo:
-        case MainMenuAction.ExitDestinationInfo:
-            return "Place une entree, entre dedans, puis pose une sortie dans l'interieur.";
-
-        default:
-            if (entry.Kind == MainMenuRowKind.SectionHeader)
-            {
-                return "Entree ouvre/ferme la section. Droite ouvre, Gauche ferme.";
-            }
-
-            return "Gauche/Droite modifie la valeur selectionnee.";
-    }
-}
-
-private static bool IsMainMenuValueEditable(MainMenuAction action)
-{
-    switch (action)
-    {
-        case MainMenuAction.PlacementType:
-        case MainMenuAction.PlacementDistance:
-        case MainMenuAction.SectionNpc:
-        case MainMenuAction.SectionVehicle:
-        case MainMenuAction.SectionObject:
-        case MainMenuAction.SectionInterior:
-        case MainMenuAction.SectionSave:
-        case MainMenuAction.SectionCleanup:
-        case MainMenuAction.NpcCategory:
-        case MainMenuAction.NpcModel:
-        case MainMenuAction.NpcWeaponCategory:
-        case MainMenuAction.NpcWeapon:
-        case MainMenuAction.NpcWeaponEditor:
-        case MainMenuAction.NpcHealth:
-        case MainMenuAction.NpcArmor:
-        case MainMenuAction.NpcBehavior:
-        case MainMenuAction.NpcPatrolRadius:
-        case MainMenuAction.NpcAutoRespawn:
-        case MainMenuAction.VehicleCategory:
-        case MainMenuAction.VehicleModel:
-        case MainMenuAction.VehicleAutoRespawn:
-        case MainMenuAction.ObjectCategory:
-        case MainMenuAction.ObjectModel:
-        case MainMenuAction.ObjectAutoRespawn:
-        case MainMenuAction.InteriorCategory:
-        case MainMenuAction.InteriorModel:
-        case MainMenuAction.TerminatorMode:
-            return true;
-
-        default:
-            return false;
-    }
-}
-
-private void DrawMainSummaryPanel(int x, int y, int width, int height)
-{
-    Color accent = GetPlacementTypeColor(_selectedPlacementType);
-
-    DrawPanelFrame(x, y, width, height, accent);
-    DrawRect(x + 1, y + 1, width - 2, height - 2, Color.FromArgb(214, 7, 8, 12));
-
-    DrawRect(x, y, width, 48, Color.FromArgb(228, 14, 15, 20));
-    DrawRect(x, y, width, 4, Color.FromArgb(230, accent.R, accent.G, accent.B));
-    DrawRect(x, y + 47, width, 1, Color.FromArgb(120, accent.R, accent.G, accent.B));
-
-    DrawText("Resume " + PlacementTypeDisplayName(_selectedPlacementType), x + 16, y + 13, 0.315f, Color.White, false, true);
-
-    int lineY = y + 62;
-    DrawMainSummaryContextLines(x, width, lineY, accent);
-
-    int metricY = y + height - 78;
-    int metricW = (width - 48) / 4;
-
-    DrawSummaryMetric(x + 12, metricY, metricW, "NPC", _spawnedNpcs.Count.ToString(CultureInfo.InvariantCulture), Color.FromArgb(230, 190, 58, 64));
-    DrawSummaryMetric(x + 18 + metricW, metricY, metricW, "VEH", _placedVehicles.Count.ToString(CultureInfo.InvariantCulture), Color.FromArgb(230, 70, 145, 220));
-    DrawSummaryMetric(x + 24 + metricW * 2, metricY, metricW, "OBJ", _placedObjects.Count.ToString(CultureInfo.InvariantCulture), Color.FromArgb(230, 210, 158, 46));
-    DrawSummaryMetric(x + 30 + metricW * 3, metricY, metricW, "INT", _placedInteriorPortals.Count.ToString(CultureInfo.InvariantCulture), Color.FromArgb(230, 150, 95, 220));
-
-    string saveName = string.IsNullOrEmpty(_lastSaveFileName) ? "Aucun fichier" : _lastSaveFileName;
-
-    DrawRect(x + 12, y + height - 33, width - 24, 22, Color.FromArgb(76, 255, 255, 255));
-    DrawRect(x + 12, y + height - 33, 3, 22, Color.FromArgb(210, 80, 190, 120));
-    DrawText(
-        "Save: " + FitText(saveName, 33),
-        x + 22,
-        y + height - 28,
-        0.218f,
-        Color.FromArgb(204, 206, 214),
-        false,
-        false);
-}
-
-private void DrawMainSummaryContextLines(int x, int width, int lineY, Color accent)
-{
-    DrawSummaryLine(x, width, lineY + 0, "Type", PlacementTypeDisplayName(_selectedPlacementType), accent);
-
-    switch (_selectedPlacementType)
-    {
-        case PlacementEntityType.Vehicle:
-            DrawSummaryLine(x, width, lineY + 25, "Vehicule", CurrentVehicleDisplayName(), Color.FromArgb(230, 70, 145, 220));
-            DrawSummaryLine(x, width, lineY + 50, "Categorie", CurrentVehicleCategory().Name, Color.FromArgb(230, 70, 145, 220));
-            DrawSummaryLine(x, width, lineY + 75, "Distance", _selectedDistance.ToString(CultureInfo.InvariantCulture) + " m", accent);
-            DrawSummaryLine(x, width, lineY + 100, "Respawn", BoolText(_selectedAutoRespawn), Color.FromArgb(230, 80, 190, 120));
-            DrawSummaryLine(x, width, lineY + 125, "Action", "Camera ou direct", Color.FromArgb(230, 60, 220, 150));
-            break;
-
-        case PlacementEntityType.Object:
-            ObjectIdentity objectPreview = CreateObjectIdentityPreview(CurrentObjectOption());
-            DrawSummaryLine(x, width, lineY + 25, "Objet", objectPreview.DisplayName, Color.FromArgb(230, 210, 158, 46));
-            DrawSummaryLine(x, width, lineY + 50, "Categorie", CurrentObjectCategory().Name, Color.FromArgb(230, 210, 158, 46));
-            DrawSummaryLine(x, width, lineY + 75, "Interaction", ObjectInteractionDisplayName(objectPreview), Color.FromArgb(230, 80, 190, 120));
-            DrawSummaryLine(x, width, lineY + 100, "Distance", _selectedDistance.ToString(CultureInfo.InvariantCulture) + " m", accent);
-            DrawSummaryLine(x, width, lineY + 125, "Respawn", BoolText(_selectedAutoRespawn), Color.FromArgb(230, 80, 190, 120));
-            break;
-
-        case PlacementEntityType.Entrance:
-        case PlacementEntityType.Exit:
-            DrawSummaryLine(x, width, lineY + 25, "Interieur", CurrentInteriorOption().DisplayName, Color.FromArgb(230, 150, 95, 220));
-            DrawSummaryLine(x, width, lineY + 50, "Categorie", CurrentInteriorCategory().Name, Color.FromArgb(230, 150, 95, 220));
-            DrawSummaryLine(x, width, lineY + 75, "Portail", _selectedPlacementType == PlacementEntityType.Exit ? "Sortie" : "Entree", accent);
-            DrawSummaryLine(x, width, lineY + 100, "Sortie", ActiveInteriorSessionDisplayName(), Color.FromArgb(230, 80, 190, 120));
-            DrawSummaryLine(x, width, lineY + 125, "Retour", ExitDestinationDisplayName(), Color.FromArgb(230, 80, 190, 120));
-            break;
-
-        case PlacementEntityType.Npc:
-        default:
-            DrawSummaryLine(x, width, lineY + 25, "NPC", CurrentModelDisplayName(), Color.FromArgb(230, 190, 58, 64));
-            DrawSummaryLine(x, width, lineY + 50, "Categorie", CurrentModelCategory().Name, Color.FromArgb(230, 190, 58, 64));
-            DrawSummaryLine(x, width, lineY + 75, "Arme", CurrentWeaponDisplayName(), Color.FromArgb(230, 190, 58, 64));
-            DrawSummaryLine(x, width, lineY + 100, "IA", NpcBehaviorDisplayName(_selectedBehavior), Color.FromArgb(230, 80, 190, 120));
-            DrawSummaryLine(x, width, lineY + 125, "PV / Armure", _selectedHealth.ToString(CultureInfo.InvariantCulture) + " / " + _selectedArmor.ToString(CultureInfo.InvariantCulture), accent);
-            break;
-    }
-}
-
-private void DrawSummaryLine(int x, int width, int y, string label, string value)
-{
-    DrawSummaryLine(x, width, y, label, value, Color.FromArgb(170, 180, 184, 194));
-}
-
-private void DrawSummaryLine(int x, int width, int y, string label, string value, Color accentColor)
-{
-    DrawRect(x + 12, y, width - 24, 21, Color.FromArgb(62, 255, 255, 255));
-    DrawRect(x + 12, y, 3, 21, Color.FromArgb(155, accentColor.R, accentColor.G, accentColor.B));
-
-    DrawText(label, x + 21, y + 5, 0.214f, Color.FromArgb(150, 153, 162), false, false);
-    DrawText(FitText(value, 24), x + 100, y + 5, 0.218f, Color.FromArgb(228, 230, 236), false, false);
-}
-
-private void DrawSummaryMetric(int x, int y, int width, string label, string value, Color accentColor)
-{
-    DrawRect(x, y, width, 34, Color.FromArgb(70, 255, 255, 255));
-    DrawRect(x, y, width, 2, Color.FromArgb(190, accentColor.R, accentColor.G, accentColor.B));
-    DrawText(label, x + 8, y + 6, 0.182f, Color.FromArgb(148, 151, 160), false, false);
-    DrawText(FitText(value, 5), x + 8, y + 18, 0.228f, Color.White, false, true);
-}
-
-    private Color GetMainMenuAccent(int index)
-    {
-        if (index <= 5)
-        {
-            return Color.FromArgb(230, 185, 32, 40);
-        }
-
-        if (index <= 9)
-        {
-            return Color.FromArgb(230, 70, 145, 220);
-        }
-
-        if (index <= 15)
-        {
-            return Color.FromArgb(230, 210, 158, 46);
-        }
-
-        if (index <= 19)
-        {
-            return Color.FromArgb(230, 80, 190, 120);
-        }
-
-        return Color.FromArgb(230, 210, 80, 80);
-    }
 
     private void ChangeWeaponEditorValue(int direction)
     {
@@ -2611,6 +1617,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         {
             case 0:
                 _menuPage = MenuPage.Main;
+                ResetMenuSelectionAnimation();
                 break;
 
             case 11:
@@ -3039,7 +2046,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private void EditCustomModelName()
     {
-        _menuVisible = false;
+        SetMenuVisible(false);
 
         string input = Game.GetUserInput(_customModelName, 64);
 
@@ -3054,7 +2061,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             ShowStatus("Nom de modele custom ignore.", 2500);
         }
 
-        _menuVisible = true;
+        SetMenuVisible(true);
     }
 
     private void SelectCustomModelCategory()
@@ -4601,6 +3608,14 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             }
 
             RefreshNpcBlipIfNeeded(npc, now, ref blipBudget);
+
+            if (JusticeIsCustodyActive && IsJusticeOwnedAlly(npc.Ped))
+            {
+                // Je ne donne aucun nouvel ordre pendant la détention. Les alliés
+                // restent dans le monde, sans immobilisation ni ordre de retraite,
+                // puis leur IA normale reprend à la libération ou après l'évasion.
+                continue;
+            }
 
             /*
              * Les vagues ennemies appelées au téléphone ont leur propre couche IA :
@@ -6225,7 +5240,11 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             }
         }
 
-        ActivateCombatAgainstTarget(ally, target, false);
+        if (TryActivateCombatAgainstTarget(ally, target, false))
+        {
+            // Je crée le jeton causal seulement après l'ordre offensif accepté.
+            RecordJusticeAllyPoliceEngagement(ally.Ped, target, false);
+        }
     }
 
     private void ActivateCombatAgainstBestTarget(SpawnedNpc npc, bool stationary)
@@ -6281,9 +5300,14 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private void ActivateCombatAgainstTarget(SpawnedNpc npc, Ped target, bool stationary)
     {
+        TryActivateCombatAgainstTarget(npc, target, stationary);
+    }
+
+    private bool TryActivateCombatAgainstTarget(SpawnedNpc npc, Ped target, bool stationary)
+    {
         if (npc == null || !Entity.Exists(npc.Ped) || !Entity.Exists(target) || target.IsDead)
         {
-            return;
+            return false;
         }
 
         npc.Activated = true;
@@ -6293,16 +5317,163 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         npc.Ped.BlockPermanentEvents = false;
         npc.Ped.IsEnemy = !IsAllyBehavior(npc.BaseBehavior);
 
-        Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, npc.Ped.Handle, IsAllyBehavior(npc.BaseBehavior) ? _allyGroupHash : _hostileGroupHash);
-        Function.Call(Hash.SET_PED_COMBAT_MOVEMENT, npc.Ped.Handle, stationary ? 0 : 2);
-        Function.Call(Hash.SET_PED_COMBAT_RANGE, npc.Ped.Handle, 2);
+        try
+        {
+            Function.Call(Hash.SET_PED_RELATIONSHIP_GROUP_HASH, npc.Ped.Handle, IsAllyBehavior(npc.BaseBehavior) ? _allyGroupHash : _hostileGroupHash);
+            Function.Call(Hash.SET_PED_COMBAT_MOVEMENT, npc.Ped.Handle, stationary ? 0 : 2);
+            Function.Call(Hash.SET_PED_COMBAT_RANGE, npc.Ped.Handle, 2);
 
-        Function.Call(
-            Hash.TASK_COMBAT_PED,
-            npc.Ped.Handle,
-            target.Handle,
-            0,
-            16);
+            Function.Call(
+                Hash.TASK_COMBAT_PED,
+                npc.Ped.Handle,
+                target.Handle,
+                0,
+                16);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryReleaseJusticeAllyPoliceTargetForTransfer(
+        JusticeAllyCausalToken token,
+        Ped player)
+    {
+        if (!_justiceEnabled || _justiceCaseState == null ||
+            _justiceCaseState.Phase != JusticePhase.Captured ||
+            token == null ||
+            !string.Equals(token.EpisodeId, CurrentJusticeEpisodeId(), StringComparison.Ordinal) ||
+            !Entity.Exists(player) || !Entity.Exists(token.Ally) ||
+            !Entity.Exists(token.PoliceTarget))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (token.Ally.IsDead || token.PoliceTarget.IsDead ||
+                !HasJusticeValidAllyOwnership(
+                    IsJusticeOwnedAlly(token.Ally),
+                    token.Ally.IsDead,
+                    token.WasDonJOwnedAtCreation) ||
+                !IsJusticePolicePed(token.PoliceTarget) ||
+                GetJusticeEntityGeneration(token.Ally) != token.AllyGeneration ||
+                GetJusticeEntityGeneration(token.PoliceTarget) != token.TargetGeneration)
+            {
+                return false;
+            }
+
+            float allyDistance = token.Ally.Position.DistanceTo(player.Position);
+            float targetDistance = token.PoliceTarget.Position.DistanceTo(player.Position);
+            bool stillTargetingPolice = IsPedInCombatWith(token.Ally, token.PoliceTarget);
+            if (!IsJusticeTransferTargetContextValid(
+                    _justiceMonotonicTimeMs,
+                    token.ExpiresAtMs,
+                    allyDistance,
+                    targetDistance,
+                    stillTargetingPolice))
+            {
+                return false;
+            }
+
+            // Je remplace immédiatement la tâche offensive prouvée par un ordre
+            // de service neutre. L'allié ne suit donc jamais le joueur en prison
+            // et ne reste pas sans tâche pendant la suspension de son IA.
+            if (!TryHoldJusticeAllyServiceDuringCustody(token.Ally))
+            {
+                return false;
+            }
+            PrepareJusticeAllyServiceResume(token.Ally);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryHoldJusticeAllyServiceDuringCustody(Ped ally)
+    {
+        if (!Entity.Exists(ally) || ally.IsDead)
+        {
+            return false;
+        }
+
+        try
+        {
+            Vehicle currentVehicle = ally.IsInVehicle() ? ally.CurrentVehicle : null;
+            if (Entity.Exists(currentVehicle) && IsPedDriverOfVehicle(ally, currentVehicle))
+            {
+                Function.Call(Hash.SET_DRIVE_TASK_CRUISE_SPEED, ally.Handle, 0.0f);
+                Function.Call(
+                    (Hash)NativeTaskVehicleTempAction,
+                    ally.Handle,
+                    currentVehicle.Handle,
+                    HighSecurityEscortImmediateBrakeAction,
+                    JusticeAllyCustodyHoldMs);
+            }
+            else
+            {
+                Function.Call(
+                    Hash.TASK_STAND_STILL,
+                    ally.Handle,
+                    JusticeAllyCustodyHoldMs);
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsJusticeTransferTargetContextValid(
+        long nowMs,
+        long expiresAtMs,
+        float allyDistance,
+        float targetDistance,
+        bool stillTargetingPolice)
+    {
+        return expiresAtMs >= nowMs &&
+               allyDistance >= 0.0f && allyDistance <= JusticeAllyAttributionRadius &&
+               targetDistance >= 0.0f && targetDistance <= JusticeAllyAttributionRadius &&
+               stillTargetingPolice;
+    }
+
+    private void PrepareJusticeAllyServiceResume(Ped ally)
+    {
+        if (!Entity.Exists(ally))
+        {
+            return;
+        }
+
+        SpawnedNpc npc = FindSpawnedNpcByHandle(ally.Handle);
+        if (npc == null)
+        {
+            return;
+        }
+
+        int now = Game.GameTime;
+        npc.Activated = true;
+        npc.IsReturningHome = false;
+        npc.LastCombatActivityAt = unchecked(now - GuardReturnDelayMs);
+        npc.NextThinkAt = now;
+        npc.NextBodyguardTaskAt = now;
+
+        if (_cartelNpcHandles.Contains(ally.Handle))
+        {
+            _cartelNextCombatOrderAt[ally.Handle] = 0;
+            Vehicle assignedVehicle = FindVehicleByHandle(npc.BodyguardAssignedVehicleHandle);
+            if (Entity.Exists(assignedVehicle))
+            {
+                _cartelNextVehicleOrderAt[assignedVehicle.Handle] = 0;
+            }
+        }
+
+        PrepareHighSecurityEscortGuardServiceResumeAfterJustice(npc);
     }
 
     private void StartOrContinuePatrol(SpawnedNpc npc, bool forceNewTarget)
@@ -7745,7 +6916,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
         EnsureRelationshipGroups();
 
-        _menuVisible = false;
+        SetMenuVisible(false);
 
         _storedPlayerInvincible = player.IsInvincible;
         _storedPlayerFrozen = player.FreezePosition;
@@ -7779,6 +6950,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             player.IsInvincible = _storedPlayerInvincible;
             player.FreezePosition = _storedPlayerFrozen;
             ShowStatus("Impossible de creer la camera de placement.", 4000);
+            SetMenuVisible(true);
         }
     }
 
@@ -7814,7 +6986,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
         if (reopenMenu)
         {
-            _menuVisible = true;
+            SetMenuVisible(true);
         }
     }
 
@@ -8558,11 +7730,11 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private void SaveCurrentSetupWithPrompt()
     {
-        _menuVisible = false;
+        SetMenuVisible(false);
 
         string input = Game.GetUserInput(_lastSaveFileName, 64);
 
-        _menuVisible = true;
+        SetMenuVisible(true);
 
         if (string.IsNullOrWhiteSpace(input))
         {
@@ -8576,11 +7748,11 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private void LoadSetupWithPrompt()
     {
-        _menuVisible = false;
+        SetMenuVisible(false);
 
         string input = Game.GetUserInput(_lastSaveFileName, 64);
 
-        _menuVisible = true;
+        SetMenuVisible(true);
 
         if (string.IsNullOrWhiteSpace(input))
         {
@@ -9743,6 +8915,14 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         if (!safe.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
         {
             safe += ".xml";
+        }
+
+        if (safe.StartsWith("_", StringComparison.Ordinal))
+        {
+            // Je réserve tous les noms internes au mod. Une scène saisie comme
+            // `_justice_state.xml` devient ainsi un fichier de scène distinct
+            // et ne peut ni écraser ni charger l'état judiciaire.
+            safe = "scene" + safe;
         }
 
         if (safe.Length > MaxSaveFileNameLength)
@@ -11329,7 +10509,9 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
 
     private void DrawStatus()
     {
-        if (Game.GameTime > _statusUntil || string.IsNullOrEmpty(_statusText))
+        // Quand la console est visible, je rends ce message dans son panneau
+        // de detail pour ne jamais recouvrir l'en-tete.
+        if (ShouldRenderMenu || Game.GameTime > _statusUntil || string.IsNullOrEmpty(_statusText))
         {
             return;
         }
@@ -11341,7 +10523,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
     private void ShowStatus(string text, int milliseconds)
     {
         _statusText = text ?? string.Empty;
-        _statusUntil = Game.GameTime + milliseconds;
+        _statusUntil = GetMenuGameTimeSafe() + milliseconds;
     }
 
     private static void DrawRect(int x, int y, int width, int height, Color color)
@@ -11863,6 +11045,14 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             return;
         }
 
+        if (JusticeIsCustodyActive)
+        {
+            // Je fige le raid sans supprimer ses entités : aucun ennemi ne doit
+            // être relocalisé dans la prison ou au commissariat. Son état reprend
+            // normalement dès la libération ou l'évasion.
+            return;
+        }
+
         UpdateCartelPhoneContact(player);
         UpdateCartelConvoyState(player);
         UpdateEnemyRaidState(player);
@@ -11876,6 +11066,11 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
      */
     private void UpdateCartelConvoyLate()
     {
+        if (JusticeIsCustodyActive)
+        {
+            return;
+        }
+
         Ped player = Game.Player.Character;
 
         if (!Entity.Exists(player))
@@ -14525,6 +13720,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             return;
         }
 
+        bool offensiveOrderIssued = false;
         try
         {
             passenger.Weapons.Select(WeaponHash.MachinePistol, true);
@@ -14560,16 +13756,23 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
                 90,
                 true,
                 CartelFullAutoFiringPattern);
+            offensiveOrderIssued = true;
         }
         catch
         {
             try
             {
                 Function.Call(Hash.TASK_COMBAT_PED, passenger.Handle, threat.Handle, 0, 16);
+                offensiveOrderIssued = true;
             }
             catch
             {
             }
+        }
+
+        if (offensiveOrderIssued)
+        {
+            RecordJusticeAllyPoliceEngagement(passenger, threat, true);
         }
     }
 
@@ -14580,6 +13783,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             return;
         }
 
+        bool offensiveOrderIssued = false;
         try
         {
             guard.Weapons.Select(WeaponHash.ServiceCarbine, true);
@@ -14602,6 +13806,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
              * TASK_COMBAT_PED donne le comportement general de combat.
              */
             Function.Call(Hash.TASK_COMBAT_PED, guard.Handle, threat.Handle, 0, 16);
+            offensiveOrderIssued = true;
 
             /*
              * TASK_SHOOT_AT_ENTITY force le declenchement du tir si le garde voit la cible.
@@ -14620,6 +13825,11 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
         }
         catch
         {
+        }
+
+        if (offensiveOrderIssued)
+        {
+            RecordJusticeAllyPoliceEngagement(guard, threat, true);
         }
     }
 
@@ -14673,6 +13883,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             ? 16.0f
             : (distanceToTarget > 45.0f ? 18.0f : 28.0f);
 
+        bool offensiveOrderIssued = false;
         try
         {
             Function.Call(
@@ -14685,6 +13896,7 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
                 combatDriveSpeed,
                 CartelRapidDrivingStyle,
                 stoppingRange);
+            offensiveOrderIssued = true;
         }
         catch
         {
@@ -14707,6 +13919,11 @@ private void DrawSummaryMetric(int x, int y, int width, string label, string val
             catch
             {
             }
+        }
+
+        if (offensiveOrderIssued && !playerOnFoot)
+        {
+            RecordJusticeAllyPoliceEngagement(driver, threat, true);
         }
     }
 

@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <IsPackable>false</IsPackable>
@@ -17,6 +18,11 @@
     <ShvdnApiPath Condition="'$(ShvdnApiPath)' == '' and Exists('$(GtaRoot)\ScriptHookVDotNet2.dll')">$(GtaRoot)\ScriptHookVDotNet2.dll</ShvdnApiPath>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(UseStubApi)' == 'true'">
+    <!-- Je compile les scénarios natifs simulés uniquement avec notre API de test. -->
+    <DefineConstants>$(DefineConstants);DONJ_STUB_API</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="MSTest.TestAdapter" Version="3.6.4" />
@@ -25,6 +31,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\\..\\src\\DonJEnemySpawner\\DonJEnemySpawner.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Je référence explicitement les contrats de bord Justice tout en conservant l'inclusion SDK implicite. -->
+    <Compile Update="JusticeRuntimeEdgeContractTests.cs" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(ShvdnApiReferenceName)' != ''">

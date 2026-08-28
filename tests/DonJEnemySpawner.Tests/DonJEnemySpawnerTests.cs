@@ -26,6 +26,15 @@ public class DonJEnemySpawnerTests
     }
 
     [TestMethod]
+    public void NativeHash_GetEntityModelKeepsExpectedValue()
+    {
+        Assert.AreEqual(
+            0x9F47B058362C84B5UL,
+            (ulong)Hash.GET_ENTITY_MODEL,
+            "Le stub API v2 doit exposer la valeur native exacte de GET_ENTITY_MODEL.");
+    }
+
+    [TestMethod]
     public void StableConstants_KeepCurrentMenuAndSpawnBounds()
     {
         Assert.AreEqual("DonJ Custom NPC Placer", GetStaticFieldValue<string>("TrainerTitle"));
@@ -44,7 +53,6 @@ public class DonJEnemySpawnerTests
         Assert.AreEqual(25, GetStaticFieldValue<int>("MinDistance"));
         Assert.AreEqual(2500, GetStaticFieldValue<int>("MaxDistance"));
         Assert.AreEqual(25, GetStaticFieldValue<int>("DistanceStep"));
-        Assert.AreEqual(9, GetStaticFieldValue<int>("MenuItemCount"));
         Assert.AreEqual(0, GetStaticFieldValue<int>("RelationshipCompanion"));
         Assert.AreEqual(3, GetStaticFieldValue<int>("RelationshipNeutral"));
         Assert.AreEqual(4, GetStaticFieldValue<int>("RelationshipDislike"));
@@ -77,9 +85,6 @@ public class DonJEnemySpawnerTests
     [TestMethod]
     public void ExpandedConstants_KeepPlacementMenuAndPatrolBounds()
     {
-        Assert.AreEqual(24, GetStaticFieldValue<int>("MainMenuItemCount"));
-        Assert.AreEqual(24, GetStaticFieldValue<int>("MainMenuVisibleRowLimit"));
-        Assert.AreEqual(16, GetStaticFieldValue<int>("MainMenuCompactVisibleRowLimit"));
         Assert.AreEqual(1000, GetStaticFieldValue<int>("AutoRespawnCheckIntervalMs"));
         Assert.AreEqual(6000, GetStaticFieldValue<int>("AutoRespawnMinDelayMs"));
         Assert.AreEqual(15000, GetStaticFieldValue<int>("AutoRespawnRetryDelayMs"));
@@ -121,20 +126,6 @@ public class DonJEnemySpawnerTests
         Assert.AreEqual(4.85f, GetStaticFieldValue<float>("TerminatorVehiclePushSpeed"), 0.001f);
         Assert.AreEqual(0x18F621F7A5B1F85DUL, GetStaticFieldValue<ulong>("NativeSetNightvision"));
         Assert.AreEqual(0x7E08924259E08CE0UL, GetStaticFieldValue<ulong>("NativeSetSeethrough"));
-    }
-
-    [TestMethod]
-    public void MainMenuVisibleRowCount_ClampsDynamicMenuRows()
-    {
-        Assert.AreEqual(1, (int)InvokeStatic("GetMainMenuVisibleRowCount", 0));
-        Assert.AreEqual(12, (int)InvokeStatic("GetMainMenuVisibleRowCount", 12));
-        Assert.AreEqual(24, (int)InvokeStatic("GetMainMenuVisibleRowCount", 24));
-        Assert.AreEqual(24, (int)InvokeStatic("GetMainMenuVisibleRowCount", 40));
-
-        Assert.AreEqual(1, (int)InvokeStatic("GetMainMenuCompactVisibleRowCount", 0));
-        Assert.AreEqual(12, (int)InvokeStatic("GetMainMenuCompactVisibleRowCount", 12));
-        Assert.AreEqual(16, (int)InvokeStatic("GetMainMenuCompactVisibleRowCount", 24));
-        Assert.AreEqual(16, (int)InvokeStatic("GetMainMenuCompactVisibleRowCount", 40));
     }
 
     [TestMethod]
@@ -2327,12 +2318,10 @@ public class DonJEnemySpawnerTests
     }
 
     [TestMethod]
-    public void SourceFile_MainMenuUsesContextualPlacementSlotsAndPortalSpawnHooks()
+    public void SourceFile_PlacementKeepsInteriorPortalSpawnHooks()
     {
         string source = File.ReadAllText(GetSourceFilePath());
 
-        StringAssert.Contains(source, "DrawMainMenuRow(x, width, rowY + rowHeight * 8, 8, PlacementSlotCategoryLabel(), PlacementSlotCategoryValue());");
-        StringAssert.Contains(source, "DrawMainMenuRow(x, width, rowY + rowHeight * 9, 9, PlacementSlotOptionLabel(), PlacementSlotOptionValue());");
         StringAssert.Contains(source, "UpdateInteriorPortals();");
         StringAssert.Contains(source, "return TryPlaceInteriorEntrance(requestedPosition, surfaceNormal, precise, hasHeadingOverride, headingOverride);");
         StringAssert.Contains(source, "return TryPlaceInteriorExit(requestedPosition, surfaceNormal, precise, hasHeadingOverride, headingOverride);");
@@ -2341,131 +2330,25 @@ public class DonJEnemySpawnerTests
     }
 
     [TestMethod]
-    public void SourceFile_MainMenuAddsInteriorPortalCleanupAction()
+    public void SourceFiles_MenuOwnsStatusAndTemporarilySuppressesTerminatorHud()
     {
         string source = File.ReadAllText(GetSourceFilePath());
-        string menuBlock = ExtractSourceSection(
+        string menuUiSource = File.ReadAllText(
+            Path.Combine(GetRepositoryRoot(), "src", "DonJEnemySpawner", "DonJEnemySpawner.MenuUi.cs"));
+        string tickBlock = ExtractSourceSection(
             source,
-            "private void ActivateMainMenuItem()",
-            "private void DrawMenu()");
-
-        StringAssert.Contains(source, "DrawMainMenuRow(x, width, rowY + rowHeight * 23, 23, \"Nettoyer entrees/sorties\", \"Supprimer les reperes interieurs\");");
-        StringAssert.Contains(menuBlock, "case 23:");
-        StringAssert.Contains(menuBlock, "CleanAllInteriorPortals();");
-    }
-
-    [TestMethod]
-    public void SourceFile_MainMenuUsesCustomNpcPlacerVisualFrame()
-    {
-        string source = File.ReadAllText(GetSourceFilePath());
-
-        StringAssert.Contains(source, "DrawText(TrainerSubtitle, x + 31, y + 42");
-        StringAssert.Contains(source, "DrawMainSummaryPanel(x + width + MainMenuSummaryGap, y, MainMenuSummaryWidth, MainMenuSummaryHeight);");
-        StringAssert.Contains(source, "private void DrawPanelFrame(int x, int y, int width, int height, Color accentColor)");
-        StringAssert.Contains(source, "private void DrawBadge(int x, int y, int width, string text, Color background, Color accentColor)");
-        StringAssert.Contains(source, "private void DrawHeaderStat(int x, int y, int width, string label, string value, Color accentColor)");
-        StringAssert.Contains(source, "private void DrawSelectedMainMenuCard(int x, int y, int width, int height, MainMenuEntry entry)");
-        StringAssert.Contains(source, "private void DrawMainSummaryContextLines(int x, int width, int lineY, Color accent)");
-        StringAssert.Contains(source, "private void DrawSummaryMetric(int x, int y, int width, string label, string value, Color accentColor)");
-        StringAssert.Contains(source, "private Color GetMainMenuAccent(int index)");
-        StringAssert.Contains(source, "private const int MainMenuPanelX = 34;");
-        StringAssert.Contains(source, "private const int MainMenuValueColumnX = 344;");
-        StringAssert.Contains(source, "FitText(_statusText, StatusTextMaxLength)");
-    }
-
-    [TestMethod]
-    public void SourceFile_MainMenuUsesDynamicCollapsibleSections()
-    {
-        string source = File.ReadAllText(GetSourceFilePath());
-
-        StringAssert.Contains(source, "private List<MainMenuEntry> BuildMainMenuEntries()");
-        StringAssert.Contains(source, "private int _mainMenuScrollOffset;");
-        StringAssert.Contains(source, "private bool _mainMenuNpcExpanded = true;");
-        StringAssert.Contains(source, "private void EnsureMainMenuSelectionVisible(int entryCount)");
-        StringAssert.Contains(source, "private void DrawMainMenuScrollbar(int x, int y, int width, int height, int entryCount, int visibleRows)");
-        StringAssert.Contains(source, "case Keys.PageUp:");
-        StringAssert.Contains(source, "case Keys.PageDown:");
-        StringAssert.Contains(source, "case Keys.Tab:");
-        StringAssert.Contains(source, "MoveMainMenuSectionFocus(entries, e.Shift ? -1 : 1);");
-        StringAssert.Contains(source, "private void MoveMainMenuSectionFocus(List<MainMenuEntry> entries, int direction)");
-
-        int placementTypeIndex = source.IndexOf("MainMenuAction.PlacementType, \"Type de placement\"", StringComparison.Ordinal);
-        int precisePlacementIndex = source.IndexOf("MainMenuAction.PrecisePlacement, \"Placement camera precis\"", StringComparison.Ordinal);
-        int distancePlacementIndex = source.IndexOf("MainMenuAction.DistancePlacement, \"Placement direct\"", StringComparison.Ordinal);
-        int placementDistanceIndex = source.IndexOf("MainMenuAction.PlacementDistance, \"Distance placement direct\"", StringComparison.Ordinal);
-
-        Assert.IsTrue(placementTypeIndex >= 0, "La ligne Type de placement doit rester presente.");
-        Assert.IsTrue(precisePlacementIndex > placementTypeIndex, "Le placement camera precis doit rester en deuxieme position.");
-        Assert.IsTrue(distancePlacementIndex > precisePlacementIndex, "Le placement direct doit rester apres le placement camera precis.");
-        Assert.IsTrue(placementDistanceIndex > distancePlacementIndex, "La distance du placement direct doit rester apres l'action directe.");
-
-        StringAssert.Contains(source, "MainMenuAction.SectionNpc");
-        StringAssert.Contains(source, "\"NPC\"");
-        StringAssert.Contains(source, "MainMenuAction.SectionVehicle");
-        StringAssert.Contains(source, "\"Vehicules\"");
-        StringAssert.Contains(source, "MainMenuAction.SectionObject");
-        StringAssert.Contains(source, "\"Objets\"");
-        StringAssert.Contains(source, "MainMenuAction.SectionInterior");
-        StringAssert.Contains(source, "\"Entrees / sorties\"");
-        StringAssert.Contains(source, "MainMenuAction.SectionSave");
-        StringAssert.Contains(source, "\"Sauvegarde\"");
-        StringAssert.Contains(source, "MainMenuAction.SectionCleanup");
-        StringAssert.Contains(source, "\"Nettoyage\"");
-        StringAssert.Contains(source, "return GetPlacementTypeColor(_selectedPlacementType);");
-        StringAssert.Contains(source, "return Color.FromArgb(245, 60, 220, 150);");
-    }
-
-    [TestMethod]
-    public void SourceFile_MainMenuUsesContextualSummaryBadgesAndNoRedundantSelectionRebuild()
-    {
-        string source = File.ReadAllText(GetSourceFilePath());
-        string drawMenuBlock = ExtractSourceSection(
+            "private void OnTick(object sender, EventArgs e)",
+            "private void OnKeyDown(object sender, KeyEventArgs e)");
+        string statusBlock = ExtractSourceSection(
             source,
-            "private void DrawMainMenu()",
-            "private void DrawWeaponEditorMenu()");
-        string summaryBlock = ExtractSourceSection(
-            source,
-            "private void DrawMainSummaryContextLines(int x, int width, int lineY, Color accent)",
-            "private void DrawSummaryLine(int x, int width, int y, string label, string value)");
-        string keyBlock = ExtractSourceSection(
-            source,
-            "private void HandleMainMenuKey(KeyEventArgs e)",
-            "private void MoveMainMenuSectionFocus");
+            "private void DrawStatus()",
+            "private void ShowStatus(string text, int milliseconds)");
 
-        StringAssert.Contains(drawMenuBlock, "DrawBadge(");
-        StringAssert.Contains(drawMenuBlock, "\"TAB sections\"");
-        StringAssert.Contains(drawMenuBlock, "_selectedAutoRespawn ? \"Respawn ON\" : \"Respawn OFF\"");
-        StringAssert.Contains(drawMenuBlock, "MainMenuEntry selectedEntry = entries.Count > 0");
-        Assert.IsFalse(drawMenuBlock.Contains("GetSelectedMainMenuEntry();"), "Le rendu ne doit pas reconstruire les entrees juste pour connaitre la selection.");
-
-        StringAssert.Contains(summaryBlock, "case PlacementEntityType.Vehicle:");
-        StringAssert.Contains(summaryBlock, "case PlacementEntityType.Object:");
-        StringAssert.Contains(summaryBlock, "case PlacementEntityType.Entrance:");
-        StringAssert.Contains(summaryBlock, "ObjectInteractionDisplayName(objectPreview)");
-        StringAssert.Contains(summaryBlock, "PV / Armure");
-
-        StringAssert.Contains(keyBlock, "ChangeMainMenuValue(-1, entries);");
-        StringAssert.Contains(keyBlock, "ChangeMainMenuValue(1, entries);");
-        StringAssert.Contains(keyBlock, "ActivateMainMenuItem(entries);");
-        StringAssert.Contains(source, "private static ObjectIdentity CreateObjectIdentityPreview(ObjectOption option)");
-    }
-
-    [TestMethod]
-    public void SourceFile_MainMenuHintsCoverCriticalCategoriesAndActions()
-    {
-        string source = File.ReadAllText(GetSourceFilePath());
-        string hintBlock = ExtractSourceSection(
-            source,
-            "private string MainMenuActionHint(MainMenuEntry entry)",
-            "private static bool IsMainMenuValueEditable(MainMenuAction action)");
-
-        StringAssert.Contains(hintBlock, "case MainMenuAction.NpcCategory:");
-        StringAssert.Contains(hintBlock, "case MainMenuAction.NpcWeaponCategory:");
-        StringAssert.Contains(hintBlock, "case MainMenuAction.VehicleCategory:");
-        StringAssert.Contains(hintBlock, "case MainMenuAction.ObjectCategory:");
-        StringAssert.Contains(hintBlock, "case MainMenuAction.InteriorCategory:");
-        StringAssert.Contains(hintBlock, "Les butins affichent leur valeur utile.");
-        StringAssert.Contains(hintBlock, "Entree ouvre/ferme la section. Droite ouvre, Gauche ferme.");
+        StringAssert.Contains(tickBlock, "if (!ShouldRenderMenu)");
+        StringAssert.Contains(tickBlock, "DrawTerminatorModeHud();");
+        StringAssert.Contains(statusBlock, "if (ShouldRenderMenu ||");
+        StringAssert.Contains(menuUiSource, "DrawMenuStatus(details, accent);");
+        StringAssert.Contains(menuUiSource, "DrawMenuStatus(details, MenuRed);");
     }
 
     [TestMethod]
@@ -2481,10 +2364,6 @@ public class DonJEnemySpawnerTests
             source,
             "private void OnAborted(object sender, EventArgs e)",
             "private void HandleMainMenuKey(KeyEventArgs e)");
-        string buildMenuBlock = ExtractSourceSection(
-            source,
-            "private List<MainMenuEntry> BuildMainMenuEntries()",
-            "private void AddMainMenuSection");
         string updateTerminatorBlock = ExtractSourceSection(
             terminatorSource,
             "private void UpdateTerminatorMode()",
@@ -2515,8 +2394,6 @@ public class DonJEnemySpawnerTests
         StringAssert.Contains(tickBlock, "UpdateTerminatorMode();");
         StringAssert.Contains(tickBlock, "DrawTerminatorModeHud();");
         StringAssert.Contains(abortBlock, "DisableTerminatorMode(false);");
-        StringAssert.Contains(buildMenuBlock, "\"Mode Terminator\"");
-        StringAssert.Contains(buildMenuBlock, "_terminatorModeEnabled ? \"ACTIVE - vision rouge T-800\" : \"DESACTIVE\"");
 
         StringAssert.Contains(terminatorSource, "private void ToggleTerminatorMode()");
         StringAssert.Contains(terminatorSource, "private void EnableTerminatorMode()");
@@ -2609,7 +2486,6 @@ public class DonJEnemySpawnerTests
     {
         string source = File.ReadAllText(GetSourceFilePath());
 
-        StringAssert.Contains(source, "DrawMainMenuRow(x, width, rowY + rowHeight * 15, 15, \"Reapparition auto\", BoolText(_selectedAutoRespawn));");
         StringAssert.Contains(source, "writer.WriteAttributeString(\"autoRespawn\",");
         StringAssert.Contains(source, "ReadBoolAttribute(node, \"autoRespawn\", false)");
         StringAssert.Contains(source, "MainMenuAction.VehicleAutoRespawn");

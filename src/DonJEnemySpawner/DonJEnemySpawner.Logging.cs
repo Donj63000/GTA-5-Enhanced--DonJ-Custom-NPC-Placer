@@ -88,10 +88,17 @@ public sealed partial class DonJEnemySpawner
     {
         List<string> candidates = new List<string>();
 
-        AddUniqueDirectory(candidates, GetAssemblyDirectorySafe());
+        // Je privilégie les emplacements stables avant le répertoire d'assembly,
+        // car NIB peut charger le script depuis une copie temporaire difficile à retrouver.
+        AddUniqueDirectory(candidates, GetProcessScriptsDirectorySafe());
+        if (LooksLikeGtaRoot(DefaultEnhancedGtaRoot))
+        {
+            AddUniqueDirectory(candidates, Path.Combine(DefaultEnhancedGtaRoot, "Scripts"));
+        }
         AddUniqueDirectory(candidates, GetConfiguredSaveDirectorySafe());
-        AddUniqueDirectory(candidates, GetLocalAppDataSaveDirectorySafe());
         AddUniqueDirectory(candidates, GetLocalAppDataRuntimeLogDirectorySafe());
+        AddUniqueDirectory(candidates, GetLocalAppDataSaveDirectorySafe());
+        AddUniqueDirectory(candidates, GetAssemblyDirectorySafe());
         AddUniqueDirectory(candidates, AppDomain.CurrentDomain.BaseDirectory);
 
         return candidates;

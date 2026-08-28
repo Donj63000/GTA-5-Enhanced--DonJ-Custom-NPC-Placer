@@ -25,6 +25,7 @@ Son but est de permettre au joueur de créer des scènes personnalisées en mode
 - appels téléphoniques Cartel ;
 - attaques Ballas ;
 - escorte haute sécurité avec limousine blindée ;
+- système optionnel Justice avancée : preuves, casier, mandats, amendes et détention ;
 - gestion d'objets interactifs comme argent, soin, armure, munitions ;
 - debug/logs ;
 - tests de non-régression.
@@ -38,14 +39,14 @@ Configuration cible actuelle :
 Plateforme : Windows x64
 Jeu : Grand Theft Auto V Enhanced version Steam
 Exécutable : GTA5_Enhanced.exe
-Version jeu sur le poste : 1.0.1013.34
+Version jeu sur le poste : 1.0.1158.13
 Dossier jeu :
 C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced
 
 Loader / runtime côté jeu :
 
-ScriptHookV.dll 3788.0.1013.34
-dinput8.dll 1.0.0.1
+ScriptHookV.dll 3889.0.1158.13
+xinput1_4.dll 1.0.0.2 (chargeur Enhanced)
 NIBScriptHookVDotNet.asi
 NIBScriptHookVDotNet2.dll 2.11.6
 
@@ -112,6 +113,12 @@ Mode-pour-jeu-ici\
 src\
   DonJEnemySpawner\
     DonJEnemySpawner.cs
+    DonJEnemySpawner.MenuUi.cs
+    DonJEnemySpawner.Justice.Domain.cs
+    DonJEnemySpawner.Justice.Profiles.cs
+    DonJEnemySpawner.Justice.Payment.cs
+    DonJEnemySpawner.Justice.cs
+    DonJEnemySpawner.Justice.Custody.cs
     DonJEnemySpawner.HighSecurityEscort.cs
     DonJEnemySpawner.Interiors.cs
     DonJEnemySpawner.Interiors.AdvancedLoading.cs
@@ -123,12 +130,23 @@ tests\
   DonJEnemySpawner.Tests\
     DonJEnemySpawnerTests.cs
     SafetySimulationTests.cs
+    JusticeDomainTests.cs
+    JusticePlayerProfilePersistenceTests.cs
+    JusticeRuntimeContractTests.cs
+    JusticeRuntimeEdgeContractTests.cs
+    JusticeCustodyHardeningTests.cs
+    JusticeEnginePersistenceRegressionTests.cs
+    JusticeStateRepairTests.cs
+    JusticeUiIntegrationObservabilityTests.cs
+    StubRuntimeBehaviorTests.cs
     BugLogCollectionTests.cs
     DonJEnemySpawner.Tests.csproj
 
 tools\
   run-safety-checks.ps1
   collect-bug-logs.ps1
+  repair-justice-state.ps1
+  Stubs\NIBScriptHookVDotNet2\StubApi.cs
 
 Rôle des fichiers source :
 
@@ -137,7 +155,7 @@ DonJEnemySpawner.cs
 C'est le cœur du mod. Il contient :
 
 - la classe principale DonJEnemySpawner : Script ;
-- le menu F10 ;
+- l'état, la navigation et les actions gameplay du menu F10 ;
 - la logique de placement ;
 - les modèles PNJ/véhicules/objets ;
 - les armes ;
@@ -149,6 +167,41 @@ C'est le cœur du mod. Il contient :
 - les Ballas ;
 - les objets interactifs ;
 - une grande partie du runtime principal.
+
+DonJEnemySpawner.MenuUi.cs
+
+Contient la présentation de la console F10 Obsidienne :
+
+- calcul du viewport responsive et de la safe-zone ;
+- rail des catégories, panneau d'actions et panneau de contexte ;
+- thème, primitives graphiques, monogramme et icônes dessinés en code ;
+- animations d'ouverture et de sélection ;
+- pool des objets UI et modèle de page mis en cache ;
+- safe-zone cadencée à 250 ms avec coupe-circuit, et cache du casier invalidé par sa révision ;
+- ligne de détention Justice discrète, seul HUD Justice persistant hors F10 ;
+- rendu cohérent de l'atelier d'armes.
+
+Ce fichier ne doit pas muter directement les entités du monde. Les actions gameplay restent traitées dans `DonJEnemySpawner.cs`.
+
+DonJEnemySpawner.Justice.Domain.cs
+
+Contient le domaine déterministe Justice sans dépendance GTA : catalogue des infractions, preuves, circonstances, sanctions, dossier actif, casier, récidive, déduplication et machine d'états. Les types restent `internal` et sont exposés uniquement au projet de tests par `InternalsVisibleTo`.
+
+DonJEnemySpawner.Justice.Profiles.cs
+
+Contient les trois profils indépendants Michael, Franklin et Trevor, leur activation selon le slot canonique, leur persistance XML, le sélecteur F10 et la réinitialisation protégée du profil choisi.
+
+DonJEnemySpawner.Justice.Payment.cs
+
+Contient le paiement volontaire et son intention durable reprise de façon idempotente. Le rendu F10 n'écrit jamais directement dans l'argent du protagoniste.
+
+DonJEnemySpawner.Justice.cs
+
+Contient le pont runtime Justice : détection événementielle, témoins bornés et priorisés, résolution des incidents en deux phases, lecture/corrélation du wanted GTA, mandats, reconnaissance, causalité des alliés DonJ, persistance atomique version 1, notifications GTA natives et intégration au tick. Les natives scalaires sont cadencées et les scans de témoins ne sont ouverts qu'après un front d'événement réel. Une infraction ordinaire ne produit aucune écriture wanted Justice : GTA reste seul responsable des étoiles liées aux crimes.
+
+DonJEnemySpawner.Justice.Custody.cs
+
+Contient la détention Justice : transfert vers Mission Row ou Bolingbroke, identité canonique du protagoniste, transactions cash tri-state, inventaire exact et durable, volumes autorisés, activités, gardes privés non létaux, discipline, évasion, libération et reprise après chargement. Il encapsule aussi le tampon unmanaged réutilisable de 312 octets nécessaire à `GET_DLC_WEAPON_DATA`.
 
 DonJEnemySpawner.HighSecurityEscort.cs
 
@@ -205,7 +258,7 @@ Contient :
 
 - logger runtime ;
 - écriture dans DonJCustomNpcPlacer.log ;
-- fallback vers dossiers accessibles ;
+- emplacements stables `Scripts` puis LocalAppData avant tout fallback de shadow-copy ;
 - sanitation des noms de fichiers ;
 - protections pour ne jamais crasher à cause du logger.
 
@@ -402,15 +455,39 @@ TrainerSubtitle = "Placement propre pour NPC, vehicules et objets"
 MenuToggleKey = Keys.F10
 MenuToggleKeyLabel = "F10"
 
-Sections principales :
+La console Obsidienne utilise trois zones sans masquer tout le monde du jeu :
 
-- Placement type ;
+- rail gauche : monogramme DonJ et navigation entre catégories ;
+- panneau central : actions et réglages de la catégorie active ;
+- panneau droit : valeur sélectionnée, aide contextuelle, compteurs de scène, sauvegarde active et notifications.
+
+Catégories stables :
+
 - NPC ;
-- Vehicle ;
-- Object ;
-- Interior ;
-- Save ;
-- Cleanup.
+- Véhicules ;
+- Objets ;
+- Intérieurs ;
+- Scène ;
+- Justice avancée ;
+- Outils.
+
+NPC est la catégorie initiale. Chaque catégorie mémorise sa dernière action sélectionnée par `MainMenuAction`, et non par un index global dépendant du nombre de lignes. Les catégories NPC, Véhicules et Objets sélectionnent automatiquement leur type de placement. Intérieurs conserve le choix explicite Entrée/Sortie. Scène regroupe sauvegarde et chargement ; Justice avancée regroupe l'activation du héros actuellement joué, le sélecteur de dossier Michael/Franklin/Trevor, le casier, le paiement volontaire et la réinitialisation protégée d'un profil ; Outils regroupe le mode Terminator et les quatre nettoyages.
+
+Les commandes de placement caméra précis, de placement direct et de distance sont affichées en tête des catégories compatibles.
+
+Rendu :
+
+- hauteur logique de référence de 720, largeur calculée selon le ratio réel ;
+- résolution obtenue via `Game.ScreenResolution` et marges via `GET_SAFE_ZONE_SIZE` ;
+- valeur de safe-zone mise en cache au moins 250 ms, avec coupe-circuit de 5 s après une native défaillante ;
+- fallback 16:9 borné si une information d'écran n'est pas exploitable ;
+- monogramme, icônes, cadres et décorations dessinés uniquement avec les primitives GTA ;
+- aucun PNG, YTD, OIV, RPF ou Scaleform requis ;
+- pool de `UIRectangle` et `UIText` réutilisé après initialisation ;
+- modèle de page mis en cache pour éviter les allocations à chaque frame ;
+- animations courtes et bornées pour l'ouverture et le déplacement de la sélection.
+
+Quand la console est ouverte, les notifications sont intégrées au panneau droit. Seul l'affichage HUD du mode Terminator est masqué ; le mode lui-même reste actif.
 
 Contrôles menu :
 
@@ -418,10 +495,119 @@ F10 : ouvrir/fermer
 Haut/Bas ou NumPad 8/2 : naviguer
 Gauche/Droite ou NumPad 4/6 : modifier valeur
 Entrée ou NumPad 5 : valider
+Tab ou Shift+Tab : catégorie suivante/précédente
 PageUp/PageDown : scroll rapide
 Home/End : début/fin
-Esc/Backspace/NumPad 0 : fermer ou retour
+Esc/Backspace/NumPad 0 : annuler une confirmation, fermer ou retour
 T : saisir un modèle custom si le modèle sélectionné est Custom
+
+La navigation du menu reste exclusivement au clavier. La refonte n'ajoute aucune gestion souris ou manette.
+
+Sécurité des nettoyages :
+
+1. Le premier appui sur Entrée ou NumPad 5 arme l'action et affiche une confirmation stylée.
+2. Le relâchement de la touche est obligatoire avant qu'un second appui exécute uniquement le nettoyage sélectionné ; la répétition clavier ne peut pas confirmer.
+3. Esc, Backspace, NumPad 0 ou la fermeture du menu annule l'action sans retirer d'entité.
+
+### 8.1 Justice avancée
+
+Justice avancée est désactivée par défaut. Michael, Franklin et Trevor possèdent chacun un profil indépendant contenant son choix d'activation, son dossier actif, son casier, sa récidive, sa dette, sa peine et son état de détention. Ces trois profils sont stockés séparément des scènes dans :
+
+`DonJEnemySpawnerSaves\_justice_state.xml`
+
+Le document racine reste en version `1`. Le nœud `PlayerProfiles` contient exactement les slots canoniques 0, 1 et 2 ; les nœuds racine `Case`, `Record` et `Custody` restent le miroir validé du profil actif pour la reprise compatible. L'écriture utilise un fichier temporaire, un remplacement atomique et un `.bak`. Une version inconnue ou un XML corrompu n'est jamais interprété partiellement ; le backup valide est essayé, sinon Justice repart désactivée sans toucher aux scènes version 5. Les anciens dossiers de recherche ne servent à une migration que si le dossier canonique ne contient ni primaire ni backup : un état canonique présent mais invalide interdit tout fallback legacy sans numéro de génération, afin qu'une ancienne peine ou transaction ne puisse jamais ressusciter silencieusement.
+
+Découpage des responsabilités :
+
+- `Justice.Domain.cs` ne référence pas GTA et reste testable de façon déterministe ;
+- `Justice.Profiles.cs` isole les trois états judiciaires et les changements de protagoniste ;
+- `Justice.Payment.cs` précommitte et reprend le paiement volontaire sans laisser le menu toucher au cash ;
+- `Justice.cs` transforme des fronts runtime bornés en incidents et preuves ;
+- `Justice.Custody.cs` est seul responsable des transferts, de l'inventaire et des entités de détention ;
+- `MenuUi.cs` présente les treize actions `MainMenuAction` Justice, les deux registres consultables et les confirmations d'amnistie ou de réinitialisation.
+
+La page Justice commence par `Justice du héros joué`, qui cible toujours le profil canonique actuellement incarné et affiche explicitement `ACTIVÉE/DÉSACTIVÉE · MICHAEL/FRANKLIN/TREVOR` hors transition. Pendant l'identification ou un basculement non committé, elle refuse temporairement l'action. La ligne suivante, `Personnage`, est un sélecteur de dossier : Gauche/Droite ou NumPad 4/6 fait défiler Michael, Franklin et Trevor sans fusionner leurs données et ajoute `JOUÉ` ou `CONSULTATION` à la valeur. Elle détermine les informations consultées et la cible du paiement ou de la réinitialisation, mais ne redirige jamais l'activation. `Payer la dette` n'autorise le débit que si le dossier sélectionné correspond au profil canonique actuellement joué ; aucun autre compte de protagoniste ne peut être débité, et le débit exige désormais la confirmation danger complète. Le montant numérique présenté au premier Entrée est conservé jusqu'au second ; si la dette augmente entre les deux, le paiement est refusé et une nouvelle confirmation est exigée. `Réinitialiser ce personnage` capture le slot ciblé au premier Entrée et annonce explicitement l'effacement du casier, du dossier, de la récidive, de la dette et de la détention. Un profil inactif portant une récupération est refusé. Hors détention, le profil vide est écrit deux fois afin que le primaire et le `.bak` portent tous deux la remise à zéro ; un échec de la seconde génération conserve le reset appliqué et sale pour retry. Pour le héros effectivement détenu, un WAL `ResetProfile` doit être présent dans le primaire et `.bak` avant de restaurer inventaire, état transitoire, police et sortie, puis il remplace directement le profil vide sans repasser par le garde recovery devenu obsolète. Un échec de la première ou de la seconde écriture conserve le latch et l'opération sans appliquer d'effet ; le chargement réaffirme systématiquement la barrière redondante. Les WAL de mort, d'amnistie, de libération, d'évasion, de rollback de transfert, de paiement, de réparation du backup, de switch ou de reset déjà engagé bloquent toute nouvelle réinitialisation.
+
+La catégorie expose deux vues de consultation en lecture seule :
+
+- `Délits du dossier` parcourt chaque ligne de charge conservée, y compris une éventuelle ligne d'agrégat `Infractions consolidées · xN` ;
+- `Casier judiciaire` aplatit chaque ligne conservée dans les vingt dernières condamnations, de la condamnation la plus récente à la plus ancienne, sans masquer les lignes supplémentaires d'une même affaire.
+
+Le panneau droit détaille l'infraction sélectionnée, sa gravité, son amende, sa peine, les circonstances prouvées lorsqu'elles restent individualisées et, pour le casier, la date et les totaux de la condamnation. Une ligne agrégée affiche explicitement `xN faits` ; le compteur d'en-tête additionne les faits représentés et non les seules lignes, sans prétendre restituer les libellés ou circonstances individuelles déjà consolidés. Haut/Bas et les alias pavé numérique naviguent ligne par ligne ; PageUp/PageDown, Home/End et le scroll borné rendent toute la liste accessible ; Échap, Retour arrière ou NumPad0 revient à la catégorie Justice sans mutation du dossier. Gauche, Droite et Entrée sont consommées dans ces vues en lecture seule afin qu'aucune action gameplay ne soit déclenchée accidentellement. La vue aplatie du casier est mise en cache et n'est reconstruite que lorsque `LedgerRevision` change ; aucun parcours massif du registre ni nouvel objet UI n'est créé à chaque frame après le préchauffage du pool Obsidienne.
+
+Hors F10, les infractions confirmées, mandats et évasions passent par le bandeau GTA natif existant. L'ancienne grande fenêtre Justice et son ancien bloc compact permanent ont été supprimés. Pendant une détention seulement, `MenuUi.cs` dessine une unique ligne discrète contenant le lieu, le temps restant et l'activité proche. `IsJusticePlayedProfileCustodyContextReady` exige que cette détention appartienne au protagoniste réellement joué : la ligne et la touche d'activité `E` disparaissent immédiatement sur les deux autres héros. Le détail judiciaire complet reste dans F10.
+
+Règle de preuve :
+
+1. Un acte détecté crée un incident provisoire de six secondes, sans HUD ni charge.
+2. Un policier avec ligne de vue confirme immédiatement.
+3. Une victime ou un civil crédible confirme après trois secondes s'il est encore valide et vivant.
+4. Une hausse de wanted dans les quatre secondes peut corroborer uniquement cet incident déjà détecté avec observateur plausible.
+5. Une hausse de wanted seule ne fabrique jamais d'infraction ; si aucune preuve ne survit, l'incident expire silencieusement.
+
+La résolution n'altère jamais `_justicePendingIncidents` pendant son parcours. Une première phase collecte et qualifie dans des buffers réutilisés ; la deuxième résout les conflits et supersessions, puis applique les mutations et notifications sur le résultat stabilisé. Une violence corrélée remplace donc le tir dangereux provisoire sans retrait déclenché depuis un callback ni décalage d'index.
+
+Les files bornées protègent les homicides et les faits graves sur victime ou agent contre l'éviction par une infraction mineure. Dans le quota de témoins, le runtime réserve d'abord les victimes mortes utiles à la qualification d'un homicide, puis les policiers vivants et enfin les autres témoins crédibles vivants. Une foule ou des cadavres voisins ne peuvent donc plus masquer l'homicide ni évincer tous les témoins capables de le signaler.
+
+Les observations de proximité sont limitées à 24 humains dans 80 mètres, uniquement dans la fenêtre d'un nouvel acte. Une mêlée encore active prolonge cette même fenêtre : un décès tardif au couteau reste donc qualifiable même si la native du timer de coup récent est momentanément indisponible. Un simple état `inCombat` prolongé n'ouvre la fenêtre que sur son front initial afin de ne pas rescanner le monde à 8 Hz pendant une longue poursuite. Ne jamais remplacer ce mécanisme par `World.GetAllPeds`, du LINQ sur le monde ou un scan à chaque frame.
+
+Les fronts persistants de dégâts GTA sont protégés par un baseline circulaire borné sur la paire `(victime, génération, auteur, génération)`. Une valeur déjà vraie lors de sa première observation est consommée sans infraction, sauf si un signal GTA récent et explicite prouve l'acte courant. La génération combine le handle, le modèle et `Entity.MemoryAddress`; quand cette adresse n'est pas disponible dans le stub, seule la même enveloppe `Entity` peut conserver son identité. Les témoins, les policiers reconnaissant un mandat et les victimes réutilisent tous cette identité renforcée.
+
+Pendant mission, cinématique, chargement, changement de protagoniste ou détention, le runtime synchronise uniquement les latches scalaires. Il ne parcourt ni les peds ni les véhicules et ne purge aucun historique de dégâts à répétition. À la reprise du jeu libre, une passe unique photographie et consomme l'historique accumulé avant de rouvrir la détection. Une perte de wanted survenue pendant cette suspension est matérialisée une seule fois comme mandat, avant toute interprétation d'une mort éventuelle.
+
+Le domaine déduplique par épisode, victime et génération de handle. Il remplace une agression par l'homicide correspondant, une dégradation par la destruction et une complicité par l'action directe, tout en conservant l'aggravant collectif prouvé. La fuite et l'évasion sont uniques par épisode, pas uniques pour toute la vie du dossier.
+
+Le dossier actif persiste au maximum 512 lignes de charges. Au-delà, les faits les plus anciens de même statut judiciaire sont consolidés dans une charge d'agrégat : leur nombre et leurs sanctions saturées restent conservés, tandis que leurs libellés et circonstances individuels ne sont plus disponibles. Les nouvelles charges détaillées et les remplacements de qualification continuent d'être enregistrés. L'UI signale cette borne avec `Infractions consolidées · xN`, compte tous les faits représentés dans son total, et ne promet donc pas une fausse liste individuelle illimitée. L'agrégat ne participe jamais aux règles de victime, de doublon ou de supersession.
+
+Une confirmation d'infraction ordinaire et la reconnaissance d'un mandat n'écrivent jamais le wanted. Justice observe le niveau GTA pour corréler un signalement, suivre une poursuite et conserver un mandat, mais GTA reste seul responsable de créer, augmenter ou retirer les étoiles liées aux crimes. Le casier purgé seul ne déclenche jamais une poursuite. Les seules mutations explicites restent les contrats séparés et volontaires : minimum de trois étoiles après une évasion confirmée, ou effacement unique lors d'une amnistie confirmée.
+
+Les alliés DonJ continuent de défendre le joueur. Un jeton causal n'est créé qu'après la réussite réelle d'un ordre offensif. Une attaque sur policier n'est imputée que si l'auteur est une entité DonJ enregistrée, si son jeton causal de défense a moins de 12 secondes, si les deux entités sont à moins de 120 mètres du joueur et si l'acte possède sa propre preuve. Un allié implique un crime en réunion ; deux alliés ou une équipe Cartel/escorte structurée impliquent une bande organisée. À la capture, la cible est revérifiée avec son identité, sa distance et la fraîcheur du jeton avant de remplacer uniquement le combat policier courant par une tâche d'attente ou de freinage. Justice n'appelle jamais `CLEAR_PED_TASKS`, qui interromprait aussi la conduite et l'escorte. Aucun allié, garde ou véhicule n'est retiré, supprimé ou renvoyé : leurs handles et leur service actif sont conservés. Pendant la détention, leurs boucles de suivi sont suspendues ; ces systèmes reprennent leur fonctionnement normal après la détention.
+
+L'identité d'un contributeur allié est la paire `handle + génération`, conservée dans l'incident, la charge et le XML Justice v1. Les anciens XML v1 qui ne stockaient que le handle restent lisibles avec une génération historique zéro. Un handle recyclé avec une nouvelle génération constitue donc un contributeur distinct. Si un allié DonJ meurt dans l'échange qui tue aussi l'agent, son jeton peut encore prouver la complicité tant que sa génération, sa causalité, ses distances et sa preuve restent valides ; ce snapshot d'appartenance ne peut jamais autoriser un ped vivant autonome ou non-DonJ.
+
+Le dernier slot canonique est mémorisé avant toute transformation en ped Iron Man ou autre modèle custom. Une capture ne peut utiliser que le slot canonique courant ou ce dernier slot prouvé dans la session ; si l'identité reste inconnue après une mort, elle attend un rebinding sûr ou redevient un mandat. Après la mort qui crée la capture comme après une mort en détention, un ped custom sans slot n'est relié que si le latch de mort, le profil actif et le dernier slot canonique désignent tous le même héros. Une fois ce rebind durable, l'absence persistante de slot cash suit le fallback contractuel : aucune écriture `STAT_SET_INT`, conversion complète de l'amende en peine, puis poursuite du transfert. Le runtime n'adopte jamais automatiquement Franklin, Michael ou Trevor parce qu'un autre protagoniste réapparaît, et ne désarme ni ne débite ce personnage sans preuve. La même identité persistée protège les reprises de détention après chargement.
+
+La détention choisit : amende seule pour zéro seconde, Mission Row sous cinq minutes, Bolingbroke dès qu'une peine atteint cinq minutes. Les amendes ne possèdent aucun plafond de gameplay : chaque charge continue d'ajouter sa valeur complète. `JusticePolicy.MaxActiveFine = 1 000 000 000 000` dollars est uniquement une saturation technique anti-overflow et une borne de validation XML, pas un équilibrage destiné à réduire une dette. Le débit vise exclusivement le slot canonique prouvé. Si l'identité est inconnue, aucune mutation d'inventaire ou d'argent n'est effectuée avant résolution sûre ; si l'identité custom est prouvée mais son slot cash reste masqué, l'amende est convertie sans écriture d'argent. Les paiements volontaires précommittés sont déduits du minimum exigé par la condamnation lors de la capture : le validateur compare `FineDue` à `max(0, Conviction.Fine - VoluntaryFinePaid)` et conserve la peine brute. Les écritures `STAT_SET_INT` produisent un résultat durable `Succeeded`, `Rejected` ou `Unknown` : un rejet explicite convertit l'amende en temps, tandis qu'un résultat réellement ambigu seul entre dans la fenêtre bornée de rapprochement at-most-once. Si la lecture du cash reste indisponible au-delà de cette fenêtre après une écriture déjà tentée, le débit est présumé appliqué et le WAL avance sans jamais rejouer `STAT_SET_INT` ; cette résolution conservative préfère une remise de dette à un double prélèvement. Une annulation avant débit est d'abord précommittée comme `Rejected` dans le primaire et le `.bak`, puis l'intention terminale est supprimée redondamment : même si le primaire est ensuite corrompu, le backup ne peut jamais ressusciter une écriture d'argent. Un manque d'argent est converti à raison d'une seconde par 50 dollars, arrondi à 15 secondes et borné par le site. Le débit externe utilise une intention persistée avant l'écriture du cash ; l'opération n'est finalisée qu'après résolution. Les débits de jugement et de paiement volontaire sont idempotents : un crash ne peut ni débiter deux fois ni cumuler le même débit avec sa conversion en détention.
+
+Le snapshot d'inventaire validé est persisté avant `RemoveAll`. Pour `GET_DLC_WEAPON_DATA`, `Justice.Custody.cs` alloue une seule fois un tampon unmanaged de 312 octets, le remet à zéro avant chaque appel, le passe comme `InputArgument(ulong)`, ne lit que le hash à l'offset 8, puis le libère en `finally`. Il ne faut jamais réintroduire `OutputArgument` pour cette structure : NIB v2 n'y réserve que 24 octets et une écriture native de 312 octets corrompt le tas du jeu. Toute allocation, native ou lecture invalide ferme l'opération sans retirer l'inventaire et active seulement le verrou des contrôles d'arme. Une restitution différée conserve en mémoire le handle, le modèle et le slot du ped custom jusqu'à son commit dans la même session, mais ne sérialise jamais ce handle GTA instable dans le XML.
+
+L'énumération combine l'enum NIB v2 et les définitions d'armes DLC chargées. Une lecture incomplète invalide tout le snapshot et bascule vers le verrou non destructif. La restitution fusionne sans destruction puis vérifie exactement armes, munitions, composants, teintes, chargeurs et arme sélectionnée ; elle ne supprime le snapshot qu'après validation et commit durables. Une restitution partielle reste persistée et récupérable. `OnAborted` ne rappelle jamais `RemoveAll` : il tente la même restauration fusionnée et conserve l'état différé si GTA ne peut pas encore la confirmer. Une évasion précommitte l'intention de discard puis supprime le snapshot sans restitution.
+
+Après une confiscation vérifiée, le joueur reste forcé à mains nues mais peut attaquer, viser et se défendre contre les détenus. Le changement d'arme, le rechargement et la roue restent bloqués. Tant que le retrait physique des armes n'est pas prouvé, le verrou de secours bloque aussi le combat afin qu'une arme conservée par erreur ne soit jamais utilisable. La discipline ne se déclenche que sur un nouveau front de dommage attribué au joueur ou un homicide causalement prouvé, jamais sur le simple état `IsInCombat`, un tir sans impact ou une animation de mêlée. Un front détenu→joueur ouvre une fenêtre de légitime défense de huit secondes, liée au handle et à sa génération : une riposte non létale à mains nues pendant cette fenêtre est ignorée, tandis qu'une riposte tardive, un autre détenu ou un homicide restent sanctionnés. Un dernier scan non cadencé précède toute libération, évasion ou compaction de scène ; les gardes et détenus sont possédés par la paire `handle + génération`, afin qu'un handle GTA recyclé ne puisse jamais être adopté ou supprimé.
+
+Le fichier `_justice_state.xml` v1 reste borné à 16 Mio. Cette limite couvre le pire état métier autorisé des trois profils — vingt condamnations visibles et jusqu'à 512 résumés consolidés par condamnation — ainsi que le miroir racine du profil actif. L'écriture temporaire et la lecture refusent toujours un fichier vide ou supérieur à cette borne.
+
+L'effacement wanted d'amnistie et le minimum wanted d'évasion utilisent un précommit redondant : deux écritures atomiques successives placent l'indicateur `Attempted` dans le primaire et dans `.bak` avant l'appel GTA. Après ce point, une reprise est strictement at-most-once et acquitte seulement le WAL ; elle ne rejoue jamais la native. Aucun essai amorcé pour Trevor ne peut donc écrire le wanted de Franklin ou Michael, et une ancienne évasion ne peut pas réappliquer trois étoiles après leur disparition naturelle.
+
+Les quatre indicateurs de suppression policière (`active`, ignore appliqué, dispatch désactivé et restauration en attente) font partie de `HasJusticeCustodyRecoveryState`. Les attributs `policeSuppressionApplied` et `policeDispatchDisabled` sont aussi reconnus par `HasJusticeProfileCustodyRecovery`. Leur retry s'exécute même si Justice est désactivée. Une incarcération stable peut être mise en arrière-plan lors d'un changement GTA, mais seulement après annulation de l'activité courante, restauration durable des deux natives globales et suppression de la scène Justice. Tant que cette restauration n'est pas réellement réussie puis commise, le basculement du profil Justice reste différé. Même lorsqu'un WAL interdit encore ce basculement, la restauration globale police est tentée dès que le nouveau slot canonique est prouvé. Après un crash, les jetons retrouvés dans n'importe quel profil inactif sont fusionnés dans le retry global, retirés de leur fragment XML puis durcis uniquement après le succès des deux natives. Les WAL financiers, disciplinaires, de mort, d'amnistie, de rollback, de reset ou de libération continuent eux aussi de bloquer le basculement. Aucun inventaire ni état transitoire du détenu n'est restauré sur le protagoniste entrant.
+
+`ResetJusticeRuntimeFrontsForProfileChange` appelle aussi `CancelPendingDangerAction`. En complément, la modale capture au premier Entrée le slot Justice et, pour le héros joué, le handle et le modèle du ped. Au second Entrée, un slot canonique différent est refusé immédiatement, même avant le tick de switch. Un ped Iron Man/custom déjà prouvé reste accepté seulement si son slot actif historique, son handle et son modèle disponible correspondent encore ; changer la ligne `Personnage` ne redirige jamais un reset préparé.
+
+`IsJusticePlayedProfileContextReady` centralise le gate des mutations F10 liées au héros joué. Il exige l'absence de sélection/switch bloqué, un profil actif canonique et la compatibilité runtime ; `RequestJusticeToggle`, le paiement et les libellés `JOUÉ` l'utilisent tous. `IsJusticePlayedProfileCustodyContextReady` ajoute l'appartenance de la détention au même slot et l'absence de suspension runtime mise en cache pour le HUD et les interactions monde. La ligne de peine disparaît donc dès l'animation de changement GTA, sans nouvelle native dans le rendu. Une armure Iron Man déjà rattachée reste compatible, tandis qu'un changement GTA pas encore réconcilié affiche `IDENTIFICATION / CHANGEMENT EN COURS` et ne modifie aucun profil.
+
+Le paiement ajoute le prédicat plus strict `CanJusticeMenuPaySelectedProfile` : le slot canonique courant doit être visible et identique au profil actif/sélectionné. Sous un ped custom correctement rattaché, les autres fonctions restent disponibles mais la ligne de dette affiche `indisponible` et l'aide demande de reprendre brièvement le héros GTA, au lieu d'afficher un faux `payer`.
+
+Le temps de peine avance uniquement pendant le gameplay actif. La transition GTA elle-même reste suspendue pendant pause, chargement, mission, cinématique, mort et changement de personnage. Une fois un autre héros jouable, chaque profil stable incarcéré et inactif possède toutefois son propre dernier tick et son reliquat en millisecondes pendant chaque intervalle continu de gameplay : sa `SentenceSeconds` continue de diminuer sans HUD, scène, police, inventaire, téléportation ni effet monde. Une suspension ferme l'intervalle et remet ce reliquat sous-seconde à zéro. Ce cache runtime n'utilise jamais l'heure UTC et ne rattrape donc aucun temps passé hors jeu. Une peine arrivée à zéro hors écran conserve sa phase et son snapshot ; la transaction WAL de libération et la restitution ne s'exécutent qu'au retour du bon slot, avant tout transfert inutile en cellule. Au retour, toute ancienne tâche de scénario est retirée sur le bon ped avant la reprise ou la libération. Les phases `Captured`, `Transporting`, `Escaping` et tout profil portant une transaction bloquante ne progressent jamais en arrière-plan. Après une grâce de démarrage, chaque activité vérifie à cadence bornée que son scénario GTA reste réellement actif ; une interruption, un combat ou une sortie de zone annule tout bonus. L'horloge d'activité est indépendante du framerate : une sonde valide ne consomme pas la frame courante et seule une réponse native inconnue gèle la progression. La réduction totale reste plafonnée à 25 % de la peine initiale, une minute au poste ou cinq minutes en prison.
+
+Si le détenu meurt et que GTA le fait réapparaître à l'hôpital, le front de mort persisté relie uniquement le même profil canonique puis le renvoie dans la cellule du bon site. Ce retour est idempotent : il ne recrée pas la condamnation, ne rajoute pas la peine et ne rejoue pas les opérations d'inventaire déjà commises.
+
+Avant un transfert de détention, un éventuel mode placement est fermé et sa caméra ainsi que ses flags sont restaurés avant le snapshot Justice. Après chaque téléport physiquement vérifié, Justice garantit que le protagoniste est mobile avant de valider ou de faire progresser la peine. Le drapeau `FreezePosition` transitoire encore imposé par GTA après une arrestation ou un respawn est retiré. Tous les échecs de transfert — snapshot, précommit ou téléportation — déclenchent après trente secondes le même rollback durable ; une remise en liberté technique ne réinjecte jamais le gel transitoire et repasse explicitement par le garde de mobilité. Le même garde léger s'exécute pendant la détention pour réparer les anciens XML actifs et suspend l'horloge tant que GTA refuse le dégel. Le téléporteur partagé des intérieurs continue, lui, de restaurer exactement son état d'entrée.
+
+La libération légale conserve son WAL jusqu'à restitution, restauration transitoire, sortie et précommit redondant de l'unique tentative d'effacement wanted. Cette tentative est at-most-once : `Rejected` ou `Unknown` est journalisé, puis aucune écriture tardive n'est autorisée, car elle pourrait effacer les étoiles d'une nouvelle infraction commise après la reprise de contrôle. Si l'acquittement XML échoue, la reprise conserve `Attempted=true`, n'impose plus l'arme et ne rappelle plus la native GTA.
+
+À Bolingbroke, le volume autorisé suit un périmètre fixe de huit sommets autour de toute l'enceinte, et non la seule cour centrale ni un grand rectangle englobant des coins situés hors des murs. Une évasion est confirmée après trois secondes continues réellement passées hors de ce périmètre. Toute téléportation, y compris depuis F10, suit la même règle. L'opération est idempotente, conserve la dette et le temps restant, ajoute une seule nouvelle charge d'évasion et applique un minimum exact de trois étoiles sans diminuer un wanted GTA déjà supérieur.
+
+La désactivation avec dossier actif utilise le modal destructif Obsidienne et son verrou de relâchement de touche. L'intention d'amnistie est écrite durablement dans le primaire et `.bak` avant le moindre effet externe, puis reprise de façon idempotente après un crash. Comme le helper booléen ne peut pas distinguer un refus de la première écriture d'un primaire réussi suivi d'un backup refusé, tout échec conserve `_justiceAmnestyPending` et le cache runtime reste non validé. Le tick réessaie seulement la duplication ; inventaire, dossier, wanted et cash restent intacts jusqu'aux deux succès. L'amnistie attend aussi la résolution de tout débit de capture ou paiement volontaire. Elle n'efface l'état actif qu'après restitution réussie de l'inventaire et conserve l'historique ainsi que l'indice de récidive. L'unique tentative wanted est précommitée dans le primaire et `.bak` avant son application ; une reprise ambiguë ne la répète pas. Le rollback de transfert suit la même règle et ne retire jamais son opération sur un échec potentiellement limité au backup.
+
+L'outil `tools\repair-justice-state.ps1` répond uniquement à la récupération hors ligne du dossier Justice v1 bloqué identifié lors du crash du 26 août 2026. Il exige exactement un `Case`, un `Record` et un `Custody`, refuse tout inventaire retiré, verrouillé, différé ou accompagné d'un snapshot, sauvegarde et hash les fichiers primaire/backup, préserve intégralement `Record` et la récidive, puis vide seulement affaire, peine, mandat, capture et détention actifs. Justice reste activée et `pendingAmnestyWantedClear=true` demande un unique effacement du wanted au prochain lancement. Ce script est un réparateur ciblé de cet état canonique, pas un validateur sémantique exhaustif ni un réparateur XML universel.
+
+Je l'exécute uniquement jeu et loaders fermés, après avoir vérifié le chemin exact :
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\repair-justice-state.ps1 -StatePath "C:\chemin\vers\DonJEnemySpawnerSaves\_justice_state.xml"
+```
+
+Le `ShouldProcess` demande confirmation par défaut. Le dossier horodaté `_justice_recovery_backups` et son `manifest.json` doivent être conservés jusqu'à validation en jeu.
 
 Types de placement :
 
@@ -462,11 +648,12 @@ private enum ObjectInteractionKind
 Quand on ajoute une nouvelle option menu :
 
 1. Ajouter l'entrée dans MainMenuAction si nécessaire.
-2. Ajouter l'affichage dans BuildMainMenuEntries().
+2. L'affecter explicitement à l'une des catégories dans le modèle de page mis en cache, sans introduire de nombre magique.
 3. Gérer les changements dans ChangeMainMenuValue().
 4. Gérer l'action dans ActivateMainMenuItem().
-5. Garder la sélection normalisée.
-6. Ajouter un test si la constante ou le contrat devient stable.
+5. Garder la sélection par action et la normaliser dans la catégorie concernée.
+6. Si l'action est destructive, conserver le passage obligatoire par la confirmation.
+7. Ajouter les tests de navigation, de disposition et de comportement correspondants.
 
 ## 9. Placement PNJ
 
@@ -898,6 +1085,13 @@ Règles importantes pour travailler sur la limousine :
 - faire des offsets propres en file ou formation ;
 - garder un fallback si aucun node route n'est trouvé.
 
+Interaction avec Justice avancée :
+
+- lors d'une capture confirmée, la cible policière courante est revérifiée puis remplacée par une tâche d'attente/freinage sans `CLEAR_PED_TASKS` ;
+- le convoi, ses gardes et ses véhicules ne sont jamais retirés, supprimés ou renvoyés par Justice ;
+- l'IA de route, de formation et de combat du convoi est suspendue pendant toute la détention ;
+- les handles, le mode actif et les entités sont conservés afin que le service reprenne après la détention.
+
 Bon pattern convoi :
 
 - trouver un point de route hors champ ;
@@ -1013,7 +1207,8 @@ Le logger doit :
 
 - ne jamais crasher le mod ;
 - sanitariser les noms ;
-- trouver un dossier writable ;
+- chercher d'abord un dossier stable sous `Scripts`, puis les emplacements configurés et LocalAppData ;
+- ne considérer le dossier de l'assembly/shadow-copy qu'après les emplacements stables ;
 - écrire des messages courts ;
 - garder stack trace utile en cas d'exception ;
 - être utilisé pour erreurs importantes, pas pour chaque frame.
@@ -1040,6 +1235,7 @@ Il collecte :
 - logs NIB ;
 - logs ScriptHookV ;
 - logs Scripts ;
+- dernier journal DonJ historique trouvé dans le cache shadow-copy `.NET` sous `%LocalAppData%\assembly` ;
 - DirectStorageFix.log ;
 - menyooLog.txt ;
 - MapEditor.log ;
@@ -1101,8 +1297,82 @@ Teste :
 
 - scénarios simulés hors jeu ;
 - comportements menu ;
+- catégories, mémorisation de sélection et confirmation des nettoyages ;
+- dispositions responsive/safe-zone et stabilité du pool UI ;
 - garde-fous ;
 - logique testable sans lancer GTA.
+
+JusticeDomainTests.cs
+
+Teste sans GTA :
+
+- catalogue des infractions, preuves et circonstances ;
+- calcul des points, amendes, peines, plafonds et récidive ;
+- déduplication, remplacements de charges et machine d'états ;
+- condamnations idempotentes et transitions de capture, détention, libération et évasion.
+
+JusticePlayerProfilePersistenceTests.cs
+
+Teste les contrats propres aux trois protagonistes :
+
+- casiers, dossiers, activation et XML v1/`.bak` isolés par slot ;
+- mise en arrière-plan d'une incarcération stable avec snapshot d'inventaire conservé sur le bon héros ;
+- horloge inactive, pause, reliquat, wrap, retour en cellule et libération à zéro différée ;
+- reprise après chargement avec slot initialement inconnu et conservation des cooldowns.
+
+JusticeRuntimeContractTests.cs
+
+Teste par comportement, réflexion et inspection structurée :
+
+- cadence runtime, buffers bornés et absence de scan global du monde ;
+- témoins priorisés, corrélation wanted, mandats et absence d'écriture wanted pour les crimes ordinaires ;
+- corruption, versions inconnues et contrats runtime communs de persistance Justice ;
+- amendes sans plafond de gameplay, paiements, conversion en temps, activités, zones, snapshot d'armes et opérations idempotentes ;
+- sept catégories, treize actions Justice, distinction héros joué/dossier consulté, compteurs d'agrégats, notifications GTA natives, mini-ligne de détention, stabilité des pools et confirmations d'amnistie/réinitialisation ;
+- capture, discipline, évasion puis recapture sans double condamnation.
+
+JusticeRuntimeEdgeContractTests.cs
+
+Verrouille les fronts runtime les plus sensibles :
+
+- consommation différée et bornée des dégâts GTA ;
+- causalité fraîche des homicides et légitime défense ;
+- délit de fuite différé, témoins partagés et file d'incidents priorisée ;
+- renouvellement des générations lors de la réutilisation d'un handle.
+
+JusticeCustodyHardeningTests.cs
+
+Verrouille les corrections de crash et de perte de données :
+
+- structure unmanaged réutilisable de 312 octets pour `GET_DLC_WEAPON_DATA` et libération en `finally` ;
+- échec fermé sans confiscation si l'inventaire ne peut pas être lu exactement ;
+- restitution fusionnée et durable, incluant composants, teinte, chargeur et arme sélectionnée ;
+- résultats cash `Succeeded`, `Rejected`, `Unknown`, transition poste/prison et suppression policière persistée ;
+- retour idempotent en cellule après respawn, libération hors écran différée au bon héros, enceinte complète de Bolingbroke et évasion à trois étoiles ;
+- défense à mains nues uniquement après confiscation vérifiée et discipline sur nouveau dommage attribué ;
+- absence de `RemoveAll` dans le chemin `OnAborted`.
+
+JusticeEnginePersistenceRegressionTests.cs
+
+Teste les régressions d'intégration :
+
+- résolution des incidents en deux phases sans mutation concurrente ;
+- identité canonique après mort ou transformation en ped custom ;
+- amnistie précommittée et reprise idempotente ;
+- condamnation active épinglée au-delà de 128 opérations ;
+- reprise ciblée du wanted après réparation hors ligne.
+
+JusticeStateRepairTests.cs
+
+Teste `tools\repair-justice-state.ps1` sur des copies temporaires : sauvegardes et hashes, conservation du casier et de la récidive, effacement du seul état actif et refus d'un inventaire retiré/verrouillé/en reprise. Ces tests ne transforment pas l'outil ciblé en réparateur XML universel.
+
+JusticeUiIntegrationObservabilityTests.cs
+
+Teste le contrat HUD sans grande fenêtre hors F10, la mini-ligne de détention réservée au héros réellement joué, la distinction entre activation du héros joué et dossier consulté, le câblage sélecteur/paiement/réinitialisation, le comptage des faits représentés par les agrégats, les caches safe-zone/casier, l'ordre des chemins du logger et la collecte du dernier journal caché.
+
+StubRuntimeBehaviorTests.cs
+
+Teste le backend configurable du stub NIB v2. Celui-ci enregistre appels natives, wanted, dégâts, tâches, monde, inventaire et argent ; il expose aussi `InputArgument(ulong)` afin d'exercer le passage de pointeur x64 sans lancer GTA.
 
 BugLogCollectionTests.cs
 
@@ -1345,8 +1615,8 @@ Lis d'abord AGENTS.md, README.md et les fichiers source concernés avant toute m
 
 Contexte cible :
 - GTA V Enhanced Steam Windows x64.
-- GTA5_Enhanced.exe 1.0.1013.34.
-- ScriptHookV.dll 3788.0.1013.34.
+- GTA5_Enhanced.exe 1.0.1158.13.
+- ScriptHookV.dll 3889.0.1158.13 avec le chargeur Enhanced xinput1_4.dll 1.0.0.2.
 - Runtime .NET côté jeu : NIBScriptHookVDotNet.asi + NIBScriptHookVDotNet2.dll 2.11.6.
 - API cible : ScriptHookVDotNet API v2 via NIBScriptHookVDotNet2.dll.
 - Ne pas utiliser API v3.
@@ -1355,7 +1625,13 @@ Contexte cible :
 - Dossier scripts GTA : Grand Theft Auto V Enhanced\Scripts.
 
 Architecture :
-- src/DonJEnemySpawner/DonJEnemySpawner.cs : cœur du mod, menu, placements, sauvegardes, PNJ, véhicules, objets, Cartel/Ballas.
+- src/DonJEnemySpawner/DonJEnemySpawner.cs : cœur du mod, état/actions du menu, placements, sauvegardes, PNJ, véhicules, objets, Cartel/Ballas.
+- src/DonJEnemySpawner/DonJEnemySpawner.MenuUi.cs : rendu responsive de la console F10 Obsidienne, atelier d'armes, mini-ligne de détention et caches UI.
+- src/DonJEnemySpawner/DonJEnemySpawner.Justice.Domain.cs : domaine déterministe des crimes, preuves, sanctions, dossier et casier.
+- src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs : profils séparés Michael/Franklin/Trevor, activation canonique, sélection F10 et persistance.
+- src/DonJEnemySpawner/DonJEnemySpawner.Justice.Payment.cs : paiement volontaire durable et lié au bon protagoniste.
+- src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs : pont runtime, incidents en deux phases, témoins bornés/priorisés, lecture du wanted GTA, alliés, notifications natives et persistance Justice.
+- src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs : poste, prison, identité canonique, transactions cash, inventaire exact, activités, discipline, libération et évasion.
 - src/DonJEnemySpawner/DonJEnemySpawner.HighSecurityEscort.cs : limousine blindée, convoi haute sécurité, trajet VIP, combat convoi.
 - src/DonJEnemySpawner/DonJEnemySpawner.Interiors.cs : portails d'intérieurs.
 - src/DonJEnemySpawner/DonJEnemySpawner.Interiors.AdvancedLoading.cs : chargement avancé des intérieurs.
@@ -1364,6 +1640,7 @@ Architecture :
 - tests/DonJEnemySpawner.Tests : tests MSTest.
 - tools/run-safety-checks.ps1 : validation build/tests/livrable.
 - tools/collect-bug-logs.ps1 : collecte logs bug/crash.
+- tools/repair-justice-state.ps1 : récupération ciblée d'un état Justice v1 bloqué, jamais réparation XML universelle.
 
 Règles :
 - Ne jamais modifier hors sujet.

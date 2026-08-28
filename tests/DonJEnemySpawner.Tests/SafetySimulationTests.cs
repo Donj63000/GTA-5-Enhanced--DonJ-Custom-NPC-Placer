@@ -1,10 +1,11 @@
 using System;
 using System.Collections;
-using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
+using System.Windows.Forms;
 using System.Xml.Linq;
 using GTA.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -17,163 +18,603 @@ public class SafetySimulationTests
     private const BindingFlags PrivateStatic = BindingFlags.NonPublic | BindingFlags.Static;
 
     [TestMethod]
-    public void HeadlessMainMenuSimulation_KeepsCriticalActionsAndSections()
+    public void HeadlessMainMenuSimulation_ExposesExactActionsForEveryCategory()
     {
         object script = CreateInitializedHeadlessScript();
 
-        SetFieldValue(script, "_mainMenuNpcExpanded", true);
-        SetFieldValue(script, "_mainMenuVehicleExpanded", true);
-        SetFieldValue(script, "_mainMenuObjectExpanded", true);
-        SetFieldValue(script, "_mainMenuInteriorExpanded", true);
-        SetFieldValue(script, "_mainMenuSaveExpanded", true);
-        SetFieldValue(script, "_mainMenuCleanupExpanded", true);
-
-        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
-        Dictionary<string, object> byAction = entries
-            .Cast<object>()
-            .GroupBy(entry => GetFieldValue<object>(entry, "Action").ToString())
-            .ToDictionary(group => group.Key, group => group.Single(), StringComparer.Ordinal);
-
-        CollectionAssert.AreEquivalent(
-            new[]
-            {
-                "PlacementType",
-                "PrecisePlacement",
-                "DistancePlacement",
-                "PlacementDistance",
-                "SectionNpc",
-                "NpcCategory",
-                "NpcModel",
-                "NpcWeaponCategory",
-                "NpcWeapon",
-                "NpcWeaponEditor",
-                "NpcHealth",
-                "NpcArmor",
-                "NpcBehavior",
-                "NpcPatrolRadius",
-                "NpcAutoRespawn",
-                "SectionVehicle",
-                "VehicleCategory",
-                "VehicleModel",
-                "VehicleAutoRespawn",
-                "SectionObject",
-                "ObjectCategory",
-                "ObjectModel",
-                "ObjectAutoRespawn",
-                "SectionInterior",
-                "InteriorCategory",
-                "InteriorModel",
-                "ExitActiveInfo",
-                "ExitDestinationInfo",
-                "SectionSave",
-                "Save",
-                "Load",
-                "SectionCleanup",
-                "CleanNpcs",
-                "CleanVehicles",
-                "CleanObjects",
-                "CleanInteriorPortals",
-                "TerminatorMode"
-            },
-            byAction.Keys.ToArray());
-
-        AssertEntry(byAction["PlacementType"], "Type de placement", "NPC", "Primary", 0, true);
-        AssertEntry(byAction["PrecisePlacement"], "Placement camera precis", "Ouvrir le placement fin", "PrimaryAction", 0, true);
-        AssertEntry(byAction["DistancePlacement"], "Placement direct", "Placer a 200 m devant le joueur", "Action", 0, true);
-        AssertEntry(byAction["PlacementDistance"], "Distance placement direct", "200 m", "Normal", 0, true);
-        AssertEntry(byAction["NpcHealth"], "Sante NPC", "300", "Normal", 1, true);
-        AssertEntry(byAction["NpcArmor"], "Armure NPC", "100", "Normal", 1, true);
-        AssertEntry(byAction["NpcAutoRespawn"], "Reapparition auto", "Non", "Normal", 1, true);
-        AssertEntry(byAction["VehicleAutoRespawn"], "Reapparition auto", "Non", "Normal", 1, true);
-        AssertEntry(byAction["ObjectAutoRespawn"], "Reapparition auto", "Non", "Normal", 1, true);
-        AssertEntry(byAction["CleanInteriorPortals"], "Nettoyer entrees/sorties", "Supprimer les reperes interieurs", "Danger", 1, true);
-        AssertEntry(byAction["TerminatorMode"], "Mode Terminator", "DESACTIVE", "Normal", 0, true);
-        Assert.AreEqual("TerminatorMode", GetFieldValue<object>(entries[entries.Count - 1], "Action").ToString());
+        AssertCategoryActions(
+            script,
+            "Npc",
+            "PrecisePlacement", "DistancePlacement", "PlacementDistance", "NpcCategory", "NpcModel",
+            "NpcWeaponCategory", "NpcWeapon", "NpcWeaponEditor", "NpcHealth", "NpcArmor", "NpcBehavior",
+            "NpcPatrolRadius", "NpcAutoRespawn");
+        AssertCategoryActions(
+            script,
+            "Vehicle",
+            "PrecisePlacement", "DistancePlacement", "PlacementDistance", "VehicleCategory", "VehicleModel",
+            "VehicleAutoRespawn");
+        AssertCategoryActions(
+            script,
+            "Object",
+            "PrecisePlacement", "DistancePlacement", "PlacementDistance", "ObjectCategory", "ObjectModel",
+            "ObjectAutoRespawn");
+        AssertCategoryActions(
+            script,
+            "Interior",
+            "PlacementType", "PrecisePlacement", "DistancePlacement", "PlacementDistance", "InteriorCategory",
+            "InteriorModel", "ExitActiveInfo", "ExitDestinationInfo");
+        AssertCategoryActions(script, "Scene", "Save", "Load");
+        AssertCategoryActions(
+            script,
+            "Justice",
+            "JusticeEnabled", "JusticeProfile", "JusticeStatus", "JusticeLastCrime", "JusticeSeverity",
+            "JusticeWarrant", "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticePayFine",
+            "JusticeSentence", "JusticeRecidivism", "JusticeResetProfile");
+        AssertCategoryActions(
+            script,
+            "Tools",
+            "TerminatorMode", "CleanNpcs", "CleanVehicles", "CleanObjects", "CleanInteriorPortals");
     }
 
     [TestMethod]
-    public void HeadlessMainMenuSimulation_DefaultSectionsStayCollapsedExceptNpc()
+    public void HeadlessMainMenuSimulation_CategorySelectionMapsPlacementTypes()
     {
         object script = CreateInitializedHeadlessScript();
 
+        AssertCategoryMapsPlacementType(script, "Vehicle", "Vehicle");
+        AssertCategoryMapsPlacementType(script, "Object", "Object");
+        AssertCategoryMapsPlacementType(script, "Npc", "Npc");
+
+        SetFieldValue(script, "_selectedPlacementType", Enum.Parse(GetNestedType("PlacementEntityType"), "Entrance"));
+        SetMenuCategory(script, "Interior");
+        Assert.AreEqual(
+            "Entrance",
+            GetFieldValue<object>(script, "_selectedPlacementType").ToString(),
+            "La categorie Interieurs doit conserver le choix explicite Entree / Sortie.");
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_RemembersSelectionByActionForEachCategory()
+    {
+        object script = CreateInitializedHeadlessScript();
+
+        SetMenuCategory(script, "Npc");
+        IList npcEntries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(npcEntries, "NpcArmor"));
+
+        SetMenuCategory(script, "Vehicle");
+        IList vehicleEntries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(vehicleEntries, "VehicleModel"));
+
+        SetMenuCategory(script, "Npc");
+        npcEntries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        AssertSelectedAction(script, npcEntries, "NpcArmor");
+
+        SetMenuCategory(script, "Vehicle");
+        vehicleEntries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        AssertSelectedAction(script, vehicleEntries, "VehicleModel");
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_JusticeProfileCyclesWithLeftAndRight()
+    {
+        object script = CreateInitializedHeadlessScript();
+        SetMenuCategory(script, "Justice");
         IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
-        string[] actions = entries
-            .Cast<object>()
-            .Select(entry => GetFieldValue<object>(entry, "Action").ToString())
-            .ToArray();
+        int profileIndex = FindActionIndex(entries, "JusticeProfile");
+        SetFieldValue(script, "_mainMenuIndex", profileIndex);
+        string initialProfile = GetFieldValue<string>(entries[profileIndex], "Value");
 
-        CollectionAssert.Contains(actions, "SectionNpc");
-        CollectionAssert.Contains(actions, "NpcModel");
-        CollectionAssert.Contains(actions, "NpcAutoRespawn");
-        CollectionAssert.Contains(actions, "SectionVehicle");
-        CollectionAssert.Contains(actions, "SectionObject");
-        CollectionAssert.Contains(actions, "SectionInterior");
-        CollectionAssert.Contains(actions, "SectionSave");
-        CollectionAssert.Contains(actions, "SectionCleanup");
-        CollectionAssert.Contains(actions, "TerminatorMode");
+        InvokeInstance(script, "ChangeMainMenuValue", 1, entries);
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        string nextProfile = GetFieldValue<string>(entries[profileIndex], "Value");
+        Assert.AreNotEqual(initialProfile, nextProfile);
 
-        CollectionAssert.DoesNotContain(actions, "VehicleModel");
-        CollectionAssert.DoesNotContain(actions, "ObjectModel");
-        CollectionAssert.DoesNotContain(actions, "InteriorModel");
-        CollectionAssert.DoesNotContain(actions, "Save");
-        CollectionAssert.DoesNotContain(actions, "CleanNpcs");
+        InvokeInstance(script, "ChangeMainMenuValue", -1, entries);
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        Assert.AreEqual(initialProfile, GetFieldValue<string>(entries[profileIndex], "Value"));
+        AssertSelectedAction(script, entries, "JusticeProfile");
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_DangerActionRequiresConfirmationAndCanBeCancelled()
+    {
+        object script = CreateInitializedHeadlessScript();
+        SetMenuCategory(script, "Tools");
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, "CleanNpcs"));
+
+        InvokeInstance(script, "ActivateMainMenuItem", entries);
+
+        object pendingAction = GetFieldValue<object>(script, "_pendingDangerAction");
+        Assert.IsNotNull(pendingAction, "Le premier appui doit seulement armer la confirmation.");
+        Assert.AreEqual("CleanNpcs", pendingAction.ToString());
+
+        InvokeInstance(script, "CancelPendingDangerAction");
+
+        Assert.IsNull(GetFieldValue<object>(script, "_pendingDangerAction"));
+
+        InvokeInstance(script, "ActivateMainMenuItem", entries);
+        InvokeMainMenuKey(script, Keys.Enter);
+        InvokeMainMenuKey(script, Keys.Enter);
+
+        Assert.AreEqual("CleanNpcs", GetFieldValue<object>(script, "_pendingDangerAction").ToString());
+        Assert.IsTrue(GetFieldValue<bool>(script, "_dangerConfirmationRequiresEnterRelease"));
+
+        InvokeInstance(script, "OnKeyUp", null, new KeyEventArgs(Keys.Enter));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_dangerConfirmationRequiresEnterRelease"));
+
+        InvokeMainMenuKey(script, Keys.Enter);
+
+        Assert.IsNull(GetFieldValue<object>(script, "_pendingDangerAction"));
+        StringAssert.Contains(GetFieldValue<string>(script, "_statusText"), "Nettoyage NPC: 0 supprime(s).");
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_DangerLatchAlsoRequiresNumpad5Release()
+    {
+        object script = CreateInitializedHeadlessScript();
+        ArmDangerConfirmation(script, "CleanObjects");
+
+        InvokeMainMenuKey(script, Keys.NumPad5);
+        InvokeMainMenuKey(script, Keys.NumPad5);
+        Assert.AreEqual("CleanObjects", GetFieldValue<object>(script, "_pendingDangerAction").ToString());
+
+        InvokeInstance(script, "OnKeyUp", null, new KeyEventArgs(Keys.NumPad5));
+        InvokeMainMenuKey(script, Keys.NumPad5);
+
+        Assert.IsNull(GetFieldValue<object>(script, "_pendingDangerAction"));
+        StringAssert.Contains(GetFieldValue<string>(script, "_statusText"), "Nettoyage objets: 0 supprime(s).");
     }
 
     [TestMethod]
     public void HeadlessMainMenuSimulation_TerminatorModeReflectsActiveState()
     {
         object script = CreateInitializedHeadlessScript();
+        SetMenuCategory(script, "Tools");
 
         IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
         object terminator = entries[FindActionIndex(entries, "TerminatorMode")];
-        AssertEntry(terminator, "Mode Terminator", "DESACTIVE", "Normal", 0, true);
+        Assert.AreEqual("DESACTIVE", GetFieldValue<string>(terminator, "Value"));
 
         SetFieldValue(script, "_terminatorModeEnabled", true);
 
         entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
         terminator = entries[FindActionIndex(entries, "TerminatorMode")];
-        AssertEntry(terminator, "Mode Terminator", "ACTIVE - vision rouge T-800", "Primary", 0, true);
-        Assert.AreEqual("TerminatorMode", GetFieldValue<object>(entries[entries.Count - 1], "Action").ToString());
+        Assert.AreEqual("ACTIVE - vision rouge T-800", GetFieldValue<string>(terminator, "Value"));
     }
 
     [TestMethod]
-    public void HeadlessMainMenuSimulation_TabSectionFocusSkipsDetailRows()
+    public void HeadlessMainMenuSimulation_ResponsiveLayoutStaysInsideSafeCanvas()
+    {
+        int[,] resolutions =
+        {
+            { 1280, 720 },
+            { 1920, 1200 },
+            { 2560, 1080 },
+            { 3840, 2160 }
+        };
+        float[] safeZones = { 0.80f, 0.90f, 1.0f };
+        float[] referenceRailWidths = new float[safeZones.Length];
+        float[] referenceContentWidths = new float[safeZones.Length];
+        float[] referenceDetailsWidths = new float[safeZones.Length];
+
+        AssertCompactThreshold("IsCompactMenuRail", 124);
+        AssertCompactThreshold("IsCompactMenuContent", 430);
+        AssertCompactThreshold("IsCompactMenuDetails", 210);
+        AssertCompactThreshold("IsCompactMenuFooter", 650);
+
+        for (int resolutionIndex = 0; resolutionIndex < resolutions.GetLength(0); resolutionIndex++)
+        {
+            for (int safeZoneIndex = 0; safeZoneIndex < safeZones.Length; safeZoneIndex++)
+            {
+                object layout = AssertResponsiveLayout(
+                    resolutions[resolutionIndex, 0],
+                    resolutions[resolutionIndex, 1],
+                    safeZones[safeZoneIndex]);
+                object rail = GetMemberValue(layout, "Rail");
+                object content = GetMemberValue(layout, "Content");
+                object details = GetMemberValue(layout, "Details");
+                object footer = GetMemberValue(layout, "Footer");
+                float uiToLogical = Convert.ToSingle(GetMemberValue(layout, "LogicalWidth")) / 1280.0f;
+                float logicalRailWidth = RectangleWidth(rail) * uiToLogical;
+                float logicalContentWidth = RectangleWidth(content) * uiToLogical;
+                float logicalDetailsWidth = RectangleWidth(details) * uiToLogical;
+
+                Assert.AreEqual(RectangleWidth(rail) < 124.0f, (bool)InvokeStatic("IsCompactMenuRail", (int)RectangleWidth(rail)));
+                Assert.AreEqual(RectangleWidth(content) < 430.0f, (bool)InvokeStatic("IsCompactMenuContent", (int)RectangleWidth(content)));
+                Assert.AreEqual(RectangleWidth(details) < 210.0f, (bool)InvokeStatic("IsCompactMenuDetails", (int)RectangleWidth(details)));
+                Assert.AreEqual(RectangleWidth(footer) < 650.0f, (bool)InvokeStatic("IsCompactMenuFooter", (int)RectangleWidth(footer)));
+
+                if (resolutionIndex == 0)
+                {
+                    referenceRailWidths[safeZoneIndex] = logicalRailWidth;
+                    referenceContentWidths[safeZoneIndex] = logicalContentWidth;
+                    referenceDetailsWidths[safeZoneIndex] = logicalDetailsWidth;
+                }
+                else
+                {
+                    Assert.AreEqual(referenceRailWidths[safeZoneIndex], logicalRailWidth, 2.0f);
+                    Assert.AreEqual(referenceContentWidths[safeZoneIndex], logicalContentWidth, 2.0f);
+                    Assert.AreEqual(referenceDetailsWidths[safeZoneIndex], logicalDetailsWidth, 2.0f);
+                }
+            }
+        }
+
+        AssertResponsiveLayout(0, 0, -1.0f);
+        AssertResponsiveLayout(8000, 600, 2.0f);
+    }
+
+    [TestMethod]
+    public void HeadlessJusticeHud_StaysInsideSafeZoneAtSupportedResolutions()
+    {
+        int[,] resolutions =
+        {
+            { 1280, 720 },
+            { 1920, 1200 },
+            { 2560, 1080 },
+            { 3840, 2160 }
+        };
+        float[] safeZones = { 0.90f, 0.95f, 1.00f };
+
+        for (int resolutionIndex = 0; resolutionIndex < resolutions.GetLength(0); resolutionIndex++)
+        {
+            for (int safeIndex = 0; safeIndex < safeZones.Length; safeIndex++)
+            {
+                int width = resolutions[resolutionIndex, 0];
+                int height = resolutions[resolutionIndex, 1];
+                float safeZone = safeZones[safeIndex];
+                Rectangle hud = (Rectangle)InvokeStatic("CalculateJusticeHudBounds", width, height, safeZone);
+                object layout = InvokeStatic("CalculateMenuLayout", width, height, safeZone);
+                Rectangle safeBounds = (Rectangle)GetMemberValue(layout, "SafeBounds");
+
+                Assert.IsTrue(hud.Width > 0 && hud.Height > 0);
+                Assert.IsTrue(hud.Left >= safeBounds.Left && hud.Top >= safeBounds.Top);
+                Assert.IsTrue(hud.Right <= safeBounds.Right && hud.Bottom <= safeBounds.Bottom,
+                    width + "x" + height + " safe=" + safeZone);
+            }
+        }
+    }
+
+    [TestMethod]
+    public void HeadlessJusticeLedger_ScrollbarTracksItsOwnBoundedOffset()
+    {
+        Assert.AreEqual(100, InvokeStatic("ComputeMenuScrollbarThumbY", 100, 200, 40, 20, 5, 0));
+        Assert.AreEqual(174, InvokeStatic("ComputeMenuScrollbarThumbY", 100, 200, 40, 20, 5, 7));
+        Assert.AreEqual(260, InvokeStatic("ComputeMenuScrollbarThumbY", 100, 200, 40, 20, 5, 15));
+        Assert.AreEqual(100, InvokeStatic("ComputeMenuScrollbarThumbY", 100, 200, 40, 20, 5, -10));
+        Assert.AreEqual(260, InvokeStatic("ComputeMenuScrollbarThumbY", 100, 200, 40, 20, 5, 99));
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_PageModelIsCachedAndRefreshedInPlace()
     {
         object script = CreateInitializedHeadlessScript();
-        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        SetMenuCategory(script, "Npc");
 
+        IList first = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        IList second = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+
+        Assert.AreSame(first, second, "La page ne doit pas recreer sa liste a chaque frame.");
+        Assert.AreSame(first[0], second[0], "Les lignes doivent etre reutilisees apres le prechauffage.");
+
+        SetFieldValue(script, "_selectedDistance", 425);
+        IList refreshed = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        object distanceEntry = refreshed[FindActionIndex(refreshed, "PlacementDistance")];
+
+        Assert.AreSame(first, refreshed);
+        Assert.AreEqual("425 m", GetFieldValue<string>(distanceEntry, "Value"));
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_AnimationsRemainBoundedAndMonotonic()
+    {
+        Assert.AreEqual(160, GetStaticFieldValue<int>("MenuOpenAnimationMs"));
+        Assert.AreEqual(120, GetStaticFieldValue<int>("MenuCategoryAnimationMs"));
+        Assert.AreEqual(100, GetStaticFieldValue<int>("MenuSelectionAnimationMs"));
+        Assert.AreEqual(1.0f, (float)InvokeStatic("AdvanceMenuAnimation", 0.95f, true, 100, 160), 0.0001f);
+        Assert.AreEqual(0.0f, (float)InvokeStatic("AdvanceMenuAnimation", 0.05f, false, 100, 160), 0.0001f);
+        Assert.AreEqual(0.4f, (float)InvokeStatic("AdvanceMenuAnimation", 0.4f, true, -20, 160), 0.0001f);
+        Assert.AreEqual(1.0f, (float)InvokeStatic("AdvanceMenuAnimation", 0.4f, true, 20, 0), 0.0001f);
+        Assert.AreEqual(0.0f, (float)InvokeStatic("AdvanceMenuAnimation", 0.4f, false, 20, 0), 0.0001f);
+        Assert.AreEqual(25.0f, (float)InvokeStatic("InterpolateMenuSelection", 25.0f, 125.0f, 0, 100), 0.0001f);
+        Assert.AreEqual(125.0f, (float)InvokeStatic("InterpolateMenuSelection", 25.0f, 125.0f, 100, 100), 0.0001f);
+        Assert.AreEqual(125.0f, (float)InvokeStatic("InterpolateMenuSelection", 25.0f, 125.0f, 140, 100), 0.0001f);
+        Assert.AreEqual(125.0f, (float)InvokeStatic("InterpolateMenuSelection", 25.0f, 125.0f, 1, 0), 0.0001f);
+
+        for (int elapsed = -20; elapsed <= 120; elapsed += 5)
+        {
+            float forward = (float)InvokeStatic("InterpolateMenuSelection", 25.0f, 125.0f, elapsed, 100);
+            float reverse = (float)InvokeStatic("InterpolateMenuSelection", 125.0f, 25.0f, elapsed, 100);
+            Assert.IsTrue(forward >= 25.0f && forward <= 125.0f, "L'interpolation avant doit rester bornee.");
+            Assert.IsTrue(reverse >= 25.0f && reverse <= 125.0f, "L'interpolation arriere doit rester bornee.");
+        }
+
+        float previous = -1.0f;
+
+        for (int step = 0; step <= 10; step++)
+        {
+            float eased = (float)InvokeStatic("EaseOutCubic", step / 10.0f);
+            Assert.IsTrue(eased >= 0.0f && eased <= 1.0f, "L'easing doit rester borne.");
+            Assert.IsTrue(eased >= previous, "L'easing doit progresser sans retour en arriere.");
+            previous = eased;
+        }
+
+        object script = CreateInitializedHeadlessScript();
+        int now = (int)InvokeStatic("GetMenuGameTimeSafe");
+        SetFieldValue(script, "_menuCategoryTransitionStartedAt", now);
+        float justStarted = (float)InvokeInstance(script, "GetMenuCategoryTransitionAlpha");
+        Assert.IsTrue(
+            justStarted >= 0.72f && justStarted <= 0.82f,
+            "Le test tolère les quelques millisecondes écoulées entre les deux lectures GameTime.");
+        SetFieldValue(script, "_menuCategoryTransitionStartedAt", now - 120);
+        Assert.AreEqual(1.0f, (float)InvokeInstance(script, "GetMenuCategoryTransitionAlpha"), 0.001f);
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_KeyboardAndNumpadAliasesStayEquivalent()
+    {
+        AssertMainMenuKeyAlias(Keys.Up, Keys.NumPad8, "Npc", "NpcArmor");
+        AssertMainMenuKeyAlias(Keys.Down, Keys.NumPad2, "Npc", "NpcArmor");
+        AssertMainMenuKeyAlias(Keys.Left, Keys.NumPad4, "Npc", "PlacementDistance");
+        AssertMainMenuKeyAlias(Keys.Right, Keys.NumPad6, "Npc", "PlacementDistance");
+        AssertMainMenuKeyAlias(Keys.Enter, Keys.NumPad5, "Tools", "CleanObjects");
+        AssertMainMenuKeyAlias(Keys.Escape, Keys.Back, "Npc", "NpcArmor", true);
+        AssertMainMenuKeyAlias(Keys.Escape, Keys.NumPad0, "Npc", "NpcArmor", true);
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_PageHomeEndAndTabNavigatePredictably()
+    {
+        object script = CreateInitializedHeadlessScript();
+        SetMenuCategory(script, "Npc");
+
+        InvokeMainMenuKey(script, Keys.End);
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        AssertSelectedAction(script, entries, "NpcAutoRespawn");
+
+        InvokeMainMenuKey(script, Keys.Home);
+        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        AssertSelectedAction(script, entries, "PrecisePlacement");
+
+        InvokeMainMenuKey(script, Keys.PageDown);
+        Assert.IsTrue(GetFieldValue<int>(script, "_mainMenuIndex") > 0);
+        InvokeMainMenuKey(script, Keys.PageUp);
         Assert.AreEqual(0, GetFieldValue<int>(script, "_mainMenuIndex"));
 
-        InvokeInstance(script, "MoveMainMenuSectionFocus", entries, 1);
-        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
-        AssertSelectedAction(script, entries, "SectionNpc");
+        InvokeMainMenuKey(script, Keys.Tab);
+        Assert.AreEqual("Vehicle", GetFieldValue<object>(script, "_mainMenuCategory").ToString());
 
-        InvokeInstance(script, "MoveMainMenuSectionFocus", entries, 1);
-        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
-        AssertSelectedAction(script, entries, "SectionVehicle");
-
-        InvokeInstance(script, "MoveMainMenuSectionFocus", entries, -1);
-        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
-        AssertSelectedAction(script, entries, "SectionNpc");
+        InvokeInstance(script, "HandleMainMenuKey", new KeyEventArgs(Keys.Shift | Keys.Tab));
+        Assert.AreEqual("Npc", GetFieldValue<object>(script, "_mainMenuCategory").ToString());
     }
 
     [TestMethod]
-    public void HeadlessMainMenuSimulation_LeftRightOpenAndCloseSection()
+    public void HeadlessMainMenuSimulation_TRequestsInputOnlyForCustomNpcModel()
     {
         object script = CreateInitializedHeadlessScript();
+        IList modelCategories = GetFieldValue<IList>(script, "_modelCategories");
+        int customCategoryIndex = -1;
+        int customModelIndex = -1;
+
+        for (int categoryIndex = 0; categoryIndex < modelCategories.Count && customModelIndex < 0; categoryIndex++)
+        {
+            IList modelOptions = GetFieldValue<IList>(modelCategories[categoryIndex], "Options");
+
+            for (int modelIndex = 0; modelIndex < modelOptions.Count; modelIndex++)
+            {
+                if (GetFieldValue<bool>(modelOptions[modelIndex], "IsCustom"))
+                {
+                    customCategoryIndex = categoryIndex;
+                    customModelIndex = modelIndex;
+                    break;
+                }
+            }
+        }
+
+        Assert.IsTrue(customModelIndex >= 0, "La liste NPC doit conserver une option de modele personnalise.");
+        SetFieldValue(script, "_selectedModelCategoryIndex", customCategoryIndex);
+        SetFieldValue(script, "_selectedModelIndexInCategory", customModelIndex);
+        SetMenuCategory(script, "Npc");
         IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, "NpcModel"));
 
-        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, "SectionVehicle"));
-        InvokeInstance(script, "ChangeMainMenuValue", 1);
+        InvokeMainMenuKey(script, Keys.T);
+
+        Assert.IsTrue(GetFieldValue<bool>(script, "_customModelInputRequested"));
+    }
+
+    [TestMethod]
+    public void HeadlessWeaponEditorSimulation_KeyboardAndNumpadAliasesStayEquivalent()
+    {
+        AssertWeaponEditorKeyAlias(Keys.Up, Keys.NumPad8, 5);
+        AssertWeaponEditorKeyAlias(Keys.Down, Keys.NumPad2, 5);
+        AssertWeaponEditorKeyAlias(Keys.Left, Keys.NumPad4, 10, 5);
+        AssertWeaponEditorKeyAlias(Keys.Right, Keys.NumPad6, 10, 5);
+        AssertWeaponEditorKeyAlias(Keys.Enter, Keys.NumPad5, 0);
+        AssertWeaponEditorKeyAlias(Keys.Escape, Keys.Back, 5);
+        AssertWeaponEditorKeyAlias(Keys.Escape, Keys.NumPad0, 5);
+    }
+
+    [TestMethod]
+    public void HeadlessWeaponEditorSimulation_AllRowsExposeAValueAndLoadoutSummary()
+    {
+        object script = CreateInitializedHeadlessScript();
+
+        for (int index = 0; index < GetStaticFieldValue<int>("WeaponEditorItemCount"); index++)
+        {
+            string label = (string)InvokeInstance(script, "WeaponEditorLabel", index);
+            string value = (string)InvokeInstance(script, "WeaponEditorValue", index);
+
+            Assert.IsFalse(string.IsNullOrWhiteSpace(label), "La ligne " + index + " doit avoir un libelle.");
+            Assert.IsFalse(string.IsNullOrWhiteSpace(value), "La ligne " + index + " doit avoir une valeur.");
+        }
+
+        object loadout = GetFieldValue<object>(script, "_selectedWeaponLoadout");
+        string firstSummary = (string)InvokeObjectInstance(loadout, "Summary");
+        string unchangedSummary = (string)InvokeObjectInstance(loadout, "Summary");
+        Assert.IsFalse(string.IsNullOrWhiteSpace(firstSummary), "Le panneau droit doit pouvoir presenter un resume du loadout.");
+        Assert.AreSame(firstSummary, unchangedSummary, "Summary doit reutiliser la meme chaine tant que le loadout ne change pas.");
+
+        SetFieldValue(loadout, "Tint", 7);
+        string mutatedSummary = (string)InvokeObjectInstance(loadout, "Summary");
+        string stableMutatedSummary = (string)InvokeObjectInstance(loadout, "Summary");
+
+        Assert.AreNotSame(firstSummary, mutatedSummary, "Une mutation doit invalider le cache de Summary.");
+        Assert.AreEqual("teinte 7", mutatedSummary);
+        Assert.AreSame(mutatedSummary, stableMutatedSummary, "Le nouveau resume doit ensuite etre remis en cache.");
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_InteriorTypeStaysExplicitlyLimitedToEntranceAndExit()
+    {
+        object script = CreateInitializedHeadlessScript();
+        SetFieldValue(script, "_selectedPlacementType", Enum.Parse(GetNestedType("PlacementEntityType"), "Entrance"));
+        SetMenuCategory(script, "Interior");
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, "PlacementType"));
+
+        InvokeInstance(script, "ChangeMainMenuValue", 1, entries);
+        Assert.AreEqual("Exit", GetFieldValue<object>(script, "_selectedPlacementType").ToString());
 
         entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
-        CollectionAssert.Contains(ActionNames(entries), "VehicleModel");
+        InvokeInstance(script, "ChangeMainMenuValue", -1, entries);
+        Assert.AreEqual("Entrance", GetFieldValue<object>(script, "_selectedPlacementType").ToString());
+    }
 
-        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, "SectionVehicle"));
-        InvokeInstance(script, "ChangeMainMenuValue", -1);
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_DangerConfirmationCancelsThroughEveryBackKeyAndF10()
+    {
+        AssertDangerCancellationKey(Keys.Escape);
+        AssertDangerCancellationKey(Keys.Back);
+        AssertDangerCancellationKey(Keys.NumPad0);
 
-        entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
-        CollectionAssert.DoesNotContain(ActionNames(entries), "VehicleModel");
+        object script = CreateInitializedHeadlessScript();
+        ArmDangerConfirmation(script, "CleanVehicles");
+        SetFieldValue(script, "_menuVisible", true);
+        KeyEventArgs f10 = new KeyEventArgs(Keys.F10);
+
+        InvokeInstance(script, "OnKeyDown", null, f10);
+
+        Assert.IsTrue(f10.Handled);
+        Assert.IsFalse(GetFieldValue<bool>(script, "_menuVisible"));
+        Assert.IsNull(GetFieldValue<object>(script, "_pendingDangerAction"));
+    }
+
+    [TestMethod]
+    public void HeadlessMainMenuSimulation_UiPoolsStabilizeAfterStubWarmup()
+    {
+        PropertyInfo screenResolution = typeof(GTA.Game).GetProperty("ScreenResolution", BindingFlags.Public | BindingFlags.Static);
+        PropertyInfo gameTime = typeof(GTA.Game).GetProperty("GameTime", BindingFlags.Public | BindingFlags.Static);
+        PropertyInfo lastFrameTime = typeof(GTA.Game).GetProperty("LastFrameTime", BindingFlags.Public | BindingFlags.Static);
+
+        if (screenResolution == null || !screenResolution.CanWrite ||
+            gameTime == null || !gameTime.CanWrite ||
+            lastFrameTime == null || !lastFrameTime.CanWrite)
+        {
+            // Avec l'API NIB reelle je n'appelle jamais Draw hors du jeu.
+            // La suite -UseStubApi execute le parcours complet ci-dessous.
+            return;
+        }
+
+        object previousResolution = screenResolution.GetValue(null, null);
+
+        try
+        {
+            screenResolution.SetValue(null, new Size(1920, 1200), null);
+            object script = CreateInitializedHeadlessScript();
+            InitializeEmptyCollectionField(script, "_menuRectanglePool");
+            InitializeEmptyCollectionField(script, "_menuTextPool");
+            InitializeEmptyCollectionField(script, "_justiceHudRectanglePool");
+            InitializeEmptyCollectionField(script, "_justiceHudTextPool");
+            SetFieldValue(script, "_menuOpenProgress", 1.0f);
+            SetFieldValue(script, "_menuVisible", true);
+            InvokeInstance(script, "PrewarmMenuUiPools");
+
+            int rectangleCountAfterWarmup = GetCollectionCount(script, "_menuRectanglePool");
+            int textCountAfterWarmup = GetCollectionCount(script, "_menuTextPool");
+            Assert.AreEqual(GetStaticFieldValue<int>("MenuRectanglePoolWarmSize"), rectangleCountAfterWarmup);
+            Assert.AreEqual(GetStaticFieldValue<int>("MenuTextPoolWarmSize"), textCountAfterWarmup);
+            int justiceRectangleCount = GetCollectionCount(script, "_justiceHudRectanglePool");
+            int justiceTextCount = GetCollectionCount(script, "_justiceHudTextPool");
+            Assert.AreEqual(GetStaticFieldValue<int>("JusticeHudRectanglePoolSize"), justiceRectangleCount);
+            Assert.AreEqual(GetStaticFieldValue<int>("JusticeHudTextPoolSize"), justiceTextCount);
+            InvokeInstance(script, "PrewarmJusticeHudPools");
+            Assert.AreEqual(justiceRectangleCount, GetCollectionCount(script, "_justiceHudRectanglePool"));
+            Assert.AreEqual(justiceTextCount, GetCollectionCount(script, "_justiceHudTextPool"));
+
+            string[] categories = { "Npc", "Vehicle", "Object", "Interior", "Scene", "Justice", "Tools" };
+
+            for (int index = 0; index < categories.Length; index++)
+            {
+                SetMenuCategory(script, categories[index]);
+                InvokeInstance(script, "DrawObsidianMainMenu");
+                AssertMenuPoolsKeepWarmSize(script, rectangleCountAfterWarmup, textCountAfterWarmup, categories[index]);
+            }
+
+            SetFieldValue(script, "_menuPage", Enum.Parse(GetNestedType("MenuPage"), "WeaponEditor"));
+            InvokeInstance(script, "DrawObsidianWeaponEditorMenu");
+            AssertMenuPoolsKeepWarmSize(script, rectangleCountAfterWarmup, textCountAfterWarmup, "Atelier");
+
+            JusticeCaseState justiceCase = new JusticeCaseState { Enabled = true };
+            JusticeRecordState justiceRecord = new JusticeRecordState();
+            JusticeConviction conviction = new JusticeConviction
+            {
+                ConvictionId = "conviction:pool-ledger",
+                JudgedAtUtc = new DateTime(2026, 8, 26, 0, 0, 0, DateTimeKind.Utc),
+                Severity = JusticeSeverity.Critical
+            };
+            for (int index = 0; index < 20; index++)
+            {
+                JusticeCharge charge = new JusticeCharge
+                {
+                    ChargeId = "charge:pool:" + index,
+                    IncidentId = "incident:pool:" + index,
+                    EpisodeId = "episode:pool",
+                    Kind = JusticeCrimeKind.SimpleAssault,
+                    DisplayName = "Délit consultable " + index,
+                    Points = 18,
+                    Fine = 1000L,
+                    SentenceSeconds = 90,
+                    Circumstances = JusticeCircumstances.Armed
+                };
+                justiceCase.Charges.Add(charge);
+                conviction.Charges.Add(new JusticeConvictionChargeSummary
+                {
+                    Kind = charge.Kind,
+                    DisplayName = charge.DisplayName,
+                    Points = charge.Points,
+                    Fine = charge.Fine,
+                    SentenceSeconds = charge.SentenceSeconds,
+                    Circumstances = charge.Circumstances
+                });
+            }
+            justiceCase.RecalculateTotals();
+            conviction.Score = justiceCase.ActiveScore;
+            conviction.Fine = justiceCase.FineDue;
+            conviction.SentenceSeconds = justiceCase.SentenceSeconds;
+            justiceRecord.Convictions.Add(conviction);
+            SetFieldValue(script, "_justiceCaseState", justiceCase);
+            SetFieldValue(script, "_justiceRecordState", justiceRecord);
+            SetFieldValue(script, "_justiceEnabled", true);
+
+            InvokeInstance(script, "OpenJusticeLedger", false);
+            InvokeInstance(script, "DrawObsidianJusticeLedgerMenu", false);
+            InvokeInstance(script, "DrawObsidianJusticeLedgerMenu", false);
+            AssertMenuPoolsKeepWarmSize(script, rectangleCountAfterWarmup, textCountAfterWarmup, "Délits du dossier");
+            InvokeInstance(script, "OpenJusticeLedger", true);
+            InvokeInstance(script, "DrawObsidianJusticeLedgerMenu", true);
+            InvokeInstance(script, "DrawObsidianJusticeLedgerMenu", true);
+            AssertMenuPoolsKeepWarmSize(script, rectangleCountAfterWarmup, textCountAfterWarmup, "Casier judiciaire");
+
+            ArmDangerConfirmation(script, "CleanNpcs");
+            InvokeInstance(script, "DrawObsidianMainMenu");
+            AssertMenuPoolsKeepWarmSize(script, rectangleCountAfterWarmup, textCountAfterWarmup, "Modale");
+        }
+        finally
+        {
+            screenResolution.SetValue(null, previousResolution, null);
+        }
     }
 
     [TestMethod]
@@ -300,9 +741,21 @@ public class SafetySimulationTests
         SetFieldValue(script, "_selectedAutoRespawn", false);
         SetFieldValue(script, "_selectedWeaponLoadout", CreateStandardWeaponLoadout());
         SetFieldValue(script, "_lastSaveFileName", "maison.xml");
-        SetFieldValue(script, "_mainMenuNpcExpanded", true);
+        int categoryCount = Enum.GetValues(GetNestedType("MenuCategory")).Length;
+        SetFieldValue(script, "_mainMenuRememberedActions", Array.CreateInstance(GetNestedType("MainMenuAction"), categoryCount));
+        InitializeEmptyCollectionField(script, "_spawnedNpcs");
+        InitializeEmptyCollectionField(script, "_placedVehicles");
+        InitializeEmptyCollectionField(script, "_placedObjects");
+        InitializeEmptyCollectionField(script, "_placedInteriorPortals");
 
         return script;
+    }
+
+    private static void InitializeEmptyCollectionField(object target, string fieldName)
+    {
+        FieldInfo field = target.GetType().GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(field, $"Le champ collection '{fieldName}' est introuvable sur '{target.GetType().FullName}'.");
+        field.SetValue(target, Activator.CreateInstance(field.FieldType, true));
     }
 
     private static object CreateStandardWeaponLoadout()
@@ -317,13 +770,277 @@ public class SafetySimulationTests
         return loadout;
     }
 
-    private static void AssertEntry(object entry, string label, string value, string kind, int level, bool enabled)
+    private static void AssertCategoryActions(object script, string categoryName, params string[] expectedActions)
     {
-        Assert.AreEqual(label, GetFieldValue<string>(entry, "Label"));
-        Assert.AreEqual(value, GetFieldValue<string>(entry, "Value"));
-        Assert.AreEqual(kind, GetFieldValue<object>(entry, "Kind").ToString());
-        Assert.AreEqual(level, GetFieldValue<int>(entry, "Level"));
-        Assert.AreEqual(enabled, GetFieldValue<bool>(entry, "Enabled"));
+        SetMenuCategory(script, categoryName);
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+
+        CollectionAssert.AreEqual(
+            expectedActions,
+            ActionNames(entries),
+            "La categorie '" + categoryName + "' doit exposer exactement ses actions dans l'ordre de navigation.");
+    }
+
+    private static void AssertCategoryMapsPlacementType(object script, string categoryName, string placementTypeName)
+    {
+        SetMenuCategory(script, categoryName);
+
+        Assert.AreEqual(categoryName, GetFieldValue<object>(script, "_mainMenuCategory").ToString());
+        Assert.AreEqual(
+            placementTypeName,
+            GetFieldValue<object>(script, "_selectedPlacementType").ToString(),
+            "La categorie doit selectionner automatiquement le bon type de placement.");
+    }
+
+    private static void SetMenuCategory(object script, string categoryName)
+    {
+        object category = Enum.Parse(GetNestedType("MenuCategory"), categoryName);
+        InvokeInstance(script, "SetMainMenuCategory", category);
+    }
+
+    private static object AssertResponsiveLayout(int screenWidth, int screenHeight, float safeZone)
+    {
+        object layout = InvokeStatic("CalculateMenuLayout", screenWidth, screenHeight, safeZone);
+        object safeBounds = GetMemberValue(layout, "SafeBounds");
+        object canvas = GetMemberValue(layout, "Canvas");
+        object rail = GetMemberValue(layout, "Rail");
+        object content = GetMemberValue(layout, "Content");
+        object details = GetMemberValue(layout, "Details");
+        object footer = GetMemberValue(layout, "Footer");
+
+        AssertPositiveRectangle(safeBounds, "SafeBounds");
+        AssertPositiveRectangle(canvas, "Canvas");
+        AssertPositiveRectangle(rail, "Rail");
+        AssertPositiveRectangle(content, "Content");
+        AssertPositiveRectangle(details, "Details");
+        AssertPositiveRectangle(footer, "Footer");
+
+        AssertRectangleInside(canvas, safeBounds, "Canvas");
+        AssertRectangleInside(rail, canvas, "Rail");
+        AssertRectangleInside(content, canvas, "Content");
+        AssertRectangleInside(details, canvas, "Details");
+        AssertRectangleInside(footer, canvas, "Footer");
+
+        Assert.IsTrue(
+            RectangleRight(rail) <= RectangleX(content) + 0.01f,
+            "Le rail et le contenu ne doivent pas se chevaucher.");
+        Assert.IsTrue(
+            RectangleRight(content) <= RectangleX(details) + 0.01f,
+            "Le contenu et le panneau de details ne doivent pas se chevaucher.");
+        float uiToLogical = Convert.ToSingle(GetMemberValue(layout, "LogicalWidth")) / 1280.0f;
+        Assert.IsTrue(RectangleWidth(rail) * uiToLogical >= 100.0f, "Le rail logique doit garder une largeur utile.");
+        Assert.IsTrue(RectangleWidth(content) * uiToLogical >= 400.0f, "Le contenu logique doit garder une largeur utile.");
+        Assert.IsTrue(RectangleWidth(details) * uiToLogical >= 200.0f, "Les details logiques doivent garder une largeur utile.");
+        Assert.AreEqual(RectangleX(content), RectangleX(footer), 1.0f, "Le footer doit commencer sous le contenu.");
+        Assert.AreEqual(RectangleRight(details), RectangleRight(footer), 1.0f, "Le footer doit finir sous les details.");
+
+        return layout;
+    }
+
+    private static void AssertCompactThreshold(string methodName, int threshold)
+    {
+        Assert.IsTrue((bool)InvokeStatic(methodName, threshold - 1), methodName + " doit activer le mode compact sous le seuil.");
+        Assert.IsFalse((bool)InvokeStatic(methodName, threshold), methodName + " ne doit pas activer le mode compact au seuil.");
+        Assert.IsFalse((bool)InvokeStatic(methodName, threshold + 1), methodName + " doit rester non compact au-dessus du seuil.");
+    }
+
+    private static void AssertMainMenuKeyAlias(
+        Keys keyboardKey,
+        Keys numpadKey,
+        string categoryName,
+        string actionName,
+        bool menuVisible = false)
+    {
+        object keyboardScript = CreateInitializedHeadlessScript();
+        object numpadScript = CreateInitializedHeadlessScript();
+        PrepareMainMenuSelection(keyboardScript, categoryName, actionName, menuVisible);
+        PrepareMainMenuSelection(numpadScript, categoryName, actionName, menuVisible);
+
+        KeyEventArgs keyboardEvent = InvokeMainMenuKey(keyboardScript, keyboardKey);
+        KeyEventArgs numpadEvent = InvokeMainMenuKey(numpadScript, numpadKey);
+
+        Assert.IsTrue(keyboardEvent.Handled, keyboardKey + " doit etre consommee par le menu.");
+        Assert.IsTrue(numpadEvent.Handled, numpadKey + " doit etre consommee par le menu.");
+        Assert.AreEqual(
+            MainMenuStateSnapshot(keyboardScript),
+            MainMenuStateSnapshot(numpadScript),
+            keyboardKey + " et " + numpadKey + " doivent produire le meme etat.");
+    }
+
+    private static void AssertWeaponEditorKeyAlias(
+        Keys keyboardKey,
+        Keys numpadKey,
+        int selectedIndex,
+        int startingTint = 0)
+    {
+        object keyboardScript = CreateInitializedHeadlessScript();
+        object numpadScript = CreateInitializedHeadlessScript();
+        PrepareWeaponEditor(keyboardScript, selectedIndex, startingTint);
+        PrepareWeaponEditor(numpadScript, selectedIndex, startingTint);
+
+        KeyEventArgs keyboardEvent = new KeyEventArgs(keyboardKey);
+        KeyEventArgs numpadEvent = new KeyEventArgs(numpadKey);
+        InvokeInstance(keyboardScript, "HandleWeaponEditorKey", keyboardEvent);
+        InvokeInstance(numpadScript, "HandleWeaponEditorKey", numpadEvent);
+
+        Assert.IsTrue(keyboardEvent.Handled, keyboardKey + " doit etre consommee par l'atelier.");
+        Assert.IsTrue(numpadEvent.Handled, numpadKey + " doit etre consommee par l'atelier.");
+        Assert.AreEqual(WeaponEditorStateSnapshot(keyboardScript), WeaponEditorStateSnapshot(numpadScript));
+    }
+
+    private static void PrepareWeaponEditor(object script, int selectedIndex, int startingTint)
+    {
+        SetFieldValue(script, "_menuPage", Enum.Parse(GetNestedType("MenuPage"), "WeaponEditor"));
+        SetFieldValue(script, "_weaponEditorIndex", selectedIndex);
+        SetFieldValue(GetFieldValue<object>(script, "_selectedWeaponLoadout"), "Tint", startingTint);
+    }
+
+    private static string WeaponEditorStateSnapshot(object script)
+    {
+        object loadout = GetFieldValue<object>(script, "_selectedWeaponLoadout");
+
+        return string.Join(
+            "|",
+            GetFieldValue<object>(script, "_menuPage"),
+            GetFieldValue<int>(script, "_weaponEditorIndex"),
+            GetFieldValue<int>(loadout, "Tint"),
+            InvokeObjectInstance(loadout, "Summary"));
+    }
+
+    private static void ArmDangerConfirmation(object script, string actionName)
+    {
+        SetMenuCategory(script, "Tools");
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, actionName));
+        InvokeInstance(script, "ActivateMainMenuItem", entries);
+        Assert.AreEqual(actionName, GetFieldValue<object>(script, "_pendingDangerAction").ToString());
+    }
+
+    private static void AssertDangerCancellationKey(Keys key)
+    {
+        object script = CreateInitializedHeadlessScript();
+        ArmDangerConfirmation(script, "CleanInteriorPortals");
+
+        KeyEventArgs keyEvent = InvokeMainMenuKey(script, key);
+
+        Assert.IsTrue(keyEvent.Handled);
+        Assert.IsNull(GetFieldValue<object>(script, "_pendingDangerAction"));
+        Assert.AreEqual("Action sensible annulée.", GetFieldValue<string>(script, "_statusText"));
+    }
+
+    private static void AssertMenuPoolsKeepWarmSize(
+        object script,
+        int expectedRectangleCount,
+        int expectedTextCount,
+        string renderedPage)
+    {
+        Assert.AreEqual(
+            expectedRectangleCount,
+            GetCollectionCount(script, "_menuRectanglePool"),
+            renderedPage + " ne doit pas agrandir le pool de rectangles apres prechauffage.");
+        Assert.AreEqual(
+            expectedTextCount,
+            GetCollectionCount(script, "_menuTextPool"),
+            renderedPage + " ne doit pas agrandir le pool de textes apres prechauffage.");
+    }
+
+    private static int GetCollectionCount(object script, string fieldName)
+    {
+        ICollection collection = GetFieldValue<ICollection>(script, fieldName);
+        Assert.IsNotNull(collection);
+        return collection.Count;
+    }
+
+    private static void PrepareMainMenuSelection(object script, string categoryName, string actionName, bool menuVisible)
+    {
+        SetMenuCategory(script, categoryName);
+        IList entries = (IList)InvokeInstance(script, "BuildMainMenuEntries");
+        SetFieldValue(script, "_mainMenuIndex", FindActionIndex(entries, actionName));
+        SetFieldValue(script, "_menuVisible", menuVisible);
+    }
+
+    private static KeyEventArgs InvokeMainMenuKey(object script, Keys key)
+    {
+        KeyEventArgs keyEvent = new KeyEventArgs(key);
+        InvokeInstance(script, "HandleMainMenuKey", keyEvent);
+        return keyEvent;
+    }
+
+    private static string MainMenuStateSnapshot(object script)
+    {
+        object pendingAction = GetFieldValue<object>(script, "_pendingDangerAction");
+
+        return string.Join(
+            "|",
+            GetFieldValue<object>(script, "_mainMenuCategory"),
+            GetFieldValue<int>(script, "_mainMenuIndex"),
+            GetFieldValue<int>(script, "_mainMenuScrollOffset"),
+            GetFieldValue<int>(script, "_selectedDistance"),
+            GetFieldValue<bool>(script, "_selectedAutoRespawn"),
+            GetFieldValue<bool>(script, "_menuVisible"),
+            GetFieldValue<bool>(script, "_dangerConfirmationRequiresEnterRelease"),
+            pendingAction == null ? "none" : pendingAction.ToString());
+    }
+
+    private static void AssertPositiveRectangle(object rectangle, string name)
+    {
+        Assert.IsTrue(RectangleWidth(rectangle) > 0.0f, name + " doit avoir une largeur positive.");
+        Assert.IsTrue(RectangleHeight(rectangle) > 0.0f, name + " doit avoir une hauteur positive.");
+    }
+
+    private static void AssertRectangleInside(object rectangle, object container, string name)
+    {
+        const float tolerance = 0.01f;
+
+        Assert.IsTrue(RectangleX(rectangle) + tolerance >= RectangleX(container), name + " depasse a gauche.");
+        Assert.IsTrue(RectangleY(rectangle) + tolerance >= RectangleY(container), name + " depasse en haut.");
+        Assert.IsTrue(RectangleRight(rectangle) <= RectangleRight(container) + tolerance, name + " depasse a droite.");
+        Assert.IsTrue(RectangleBottom(rectangle) <= RectangleBottom(container) + tolerance, name + " depasse en bas.");
+    }
+
+    private static float RectangleX(object rectangle)
+    {
+        return Convert.ToSingle(GetMemberValue(rectangle, "X"));
+    }
+
+    private static float RectangleY(object rectangle)
+    {
+        return Convert.ToSingle(GetMemberValue(rectangle, "Y"));
+    }
+
+    private static float RectangleWidth(object rectangle)
+    {
+        return Convert.ToSingle(GetMemberValue(rectangle, "Width"));
+    }
+
+    private static float RectangleHeight(object rectangle)
+    {
+        return Convert.ToSingle(GetMemberValue(rectangle, "Height"));
+    }
+
+    private static float RectangleRight(object rectangle)
+    {
+        return RectangleX(rectangle) + RectangleWidth(rectangle);
+    }
+
+    private static float RectangleBottom(object rectangle)
+    {
+        return RectangleY(rectangle) + RectangleHeight(rectangle);
+    }
+
+    private static object GetMemberValue(object target, string memberName)
+    {
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        FieldInfo field = target.GetType().GetField(memberName, flags);
+
+        if (field != null)
+        {
+            return field.GetValue(target);
+        }
+
+        PropertyInfo property = target.GetType().GetProperty(memberName, flags);
+        Assert.IsNotNull(property, $"Le membre '{memberName}' est introuvable sur '{target.GetType().FullName}'.");
+        return property.GetValue(target, null);
     }
 
     private static void AssertSelectedAction(object script, IList entries, string expectedAction)
@@ -374,6 +1091,18 @@ public class SafetySimulationTests
         MethodInfo method = matches[0];
 
         return method.Invoke(target, args);
+    }
+
+    private static object InvokeObjectInstance(object target, string methodName, params object[] args)
+    {
+        MethodInfo[] matches = target
+            .GetType()
+            .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Where(method => method.Name == methodName && method.GetParameters().Length == args.Length)
+            .ToArray();
+
+        Assert.AreEqual(1, matches.Length, $"La methode privee d'instance '{methodName}' doit avoir une seule surcharge avec {args.Length} argument(s).");
+        return matches[0].Invoke(target, args);
     }
 
     private static T GetStaticFieldValue<T>(string fieldName)
