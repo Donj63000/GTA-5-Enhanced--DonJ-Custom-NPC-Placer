@@ -1747,3 +1747,23 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: `CreateVerifiedPackage` remplace désormais explicitement `sourceDirty=true|false` par la valeur demandée pour chaque scénario, vérifie la présence du champ puis redécode le manifest pour confirmer la politique. Les tests de package sale et publiable deviennent indépendants de l'état Git réel.
 - Vérification: `PackagingSafetyTests` réussit `12/12`; `tools\run-safety-checks.ps1 -UseStubApi` réussit `477/477` dans `TestResults\safety-20260829-040723`, avec build zéro avertissement/zéro erreur et package local vérifié. La build Release standard termine aussi à zéro avertissement/zéro erreur et la suite standard réussit `467/467`. Le workflow GitHub `Safety` n° `33228416152` valide le checkout propre, la suite complète et la publication du package prêt pour le jeu.
 - Résolution: Incident clos après validation CI; aucun déploiement GTA live ni donnée joueur affecté, et la correction reste limitée au déterminisme des tests.
+
+## 2026-08-29 04:40:56 +02:00 - F10 inactif après déploiement du package CI
+- Statut: Cause corrigée et validations locales réussies; CI, redéploiement et preuve GTA en attente.
+- Contexte: GTA V Enhanced lancé après installation du package `DonJCustomNpcPlacer-game-ready` du workflow `Safety` n° `33228580705`, commit `d6de9d20e01181156acc812c3a28d043a050bf88`.
+- Symptôme: La touche F10 n'ouvre plus le menu et aucune nouvelle ligne de chargement DonJ n'apparaît dans le log runtime.
+- Sources vérifiées:
+  - `bug-reports\20260829-044041-f10-menu-ne-souvre-plus`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\NIBScriptHookVDotNet.log`;
+  - ENdll/PDB/manifest installés sous `Grand Theft Auto V Enhanced\Scripts`;
+  - identité de l'API live `NIBScriptHookVDotNet2.dll` et références d'assembly des builds local/CI;
+  - `.github\workflows\safety.yml`, `tools\run-safety-checks.ps1`, `tools\package-game-ready.ps1` et projet du stub v2.
+- Extraits utiles:
+  - NIB à `04:38:45`: `Failed to load assembly DonJCustomNpcPlacer.ENdll: System.Collections.Generic.KeyNotFoundException` dans `RegisterScriptTypesInAssembly`;
+  - binaire CI installé: référence `NIBScriptHookVDotNet2, Version=1.0.0.0`, SHA-256 `DD45213F95F89E45F644A2C3408D4D321E3FE87CA4BCE7BFD45B29351AA5018F`;
+  - API live: `NIBScriptHookVDotNet2, Version=2.11.6.0`, SHA-256 `DBF8FC318730D7101E945D0F4B6552E34C8559BEEE6978826D5067329358CB71`;
+  - Ironman et NIBMods sont instanciés normalement, ce qui exclut une panne générale du loader.
+- Analyse / hypothèse: Le workflow publiait le binaire compilé avec `-UseStubApi`, mais le projet du stub ne fixait aucune `AssemblyVersion` et produisait donc implicitement `1.0.0.0`. Le chargeur NIB indexe les types GTA par version majeure de l'API référencée; la clé `1` n'existe pas lorsque seules les API `2` et `3` sont chargées. Le script est rejeté avant constructeur, `OnTick` et handler F10. Les hashes du manifest prouvaient uniquement que ce mauvais binaire avait été copié intact.
+- Action menée: Le stub porte désormais l'identité `2.11.6.0`. Packaging, suite de sécurité et déploiement inspectent indépendamment la référence NIB/SHVDN, exigent exactement une API de version majeure `2` et publient son identité dans le manifest. Deux tests couvrent l'identité du stub, les métadonnées du binaire et le refus d'un manifest API incompatible.
+- Vérification: Build du stub réussi sans avertissement ni erreur et identité relue `2.11.6.0`; build Release stub réussi sans avertissement ni erreur; `PackagingSafetyTests` réussit `14/14`. Une première exécution ciblée à `13/14` a révélé un double chargement ReflectionOnly limité au test; la lecture a été fusionnée puis la suite ciblée a été relancée avec succès. `tools\run-safety-checks.ps1 -UseStubApi` réussit `479/479` dans `TestResults\safety-20260829-045037` et relit l'API `2.11.6.0`. La build Release contre l'API GTA réelle réussit à zéro avertissement/zéro erreur, son ENdll référence `2.11.6.0`, puis la suite standard réussit `469/469`.
+- Résolution: À finaliser après suite complète locale, workflow GitHub propre, redéploiement du triplet et nouveau lancement GTA prouvant l'instanciation du script et l'ouverture F10.

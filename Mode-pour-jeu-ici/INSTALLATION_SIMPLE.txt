@@ -23,9 +23,10 @@ Fichiers inclus
   Vous pouvez le copier aussi, ca ne gene pas.
 
 - manifest.json
-  Il indique le commit, les versions, les tailles et les SHA-256 exacts du
-  binaire et du PDB issus du meme build teste. Copiez-le dans Scripts en le
-  renommant DonJCustomNpcPlacer.manifest.json pour le diagnostic du mod.
+  Il indique le commit, la version de l'API ScriptHookVDotNet ciblee, les autres
+  versions, les tailles et les SHA-256 exacts du binaire et du PDB issus du meme
+  build teste. Copiez-le dans Scripts en le renommant
+  DonJCustomNpcPlacer.manifest.json pour le diagnostic du mod.
 
 Ou mettre les fichiers
 ----------------------

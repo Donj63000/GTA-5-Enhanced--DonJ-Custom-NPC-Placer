@@ -5,6 +5,11 @@
     <OutputType>Library</OutputType>
     <AssemblyName>NIBScriptHookVDotNet2</AssemblyName>
     <RootNamespace>GTA</RootNamespace>
+    <!-- Je reproduis l'identité binaire de l'API v2 réellement chargée par NIB.
+         Le chargeur sélectionne ses types GTA avec la version majeure référencée. -->
+    <Version>2.11.6</Version>
+    <AssemblyVersion>2.11.6.0</AssemblyVersion>
+    <FileVersion>2.11.6.0</FileVersion>
     <UseWindowsForms>true</UseWindowsForms>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>

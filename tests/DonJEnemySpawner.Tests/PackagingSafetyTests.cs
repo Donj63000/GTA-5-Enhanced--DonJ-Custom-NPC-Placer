@@ -75,9 +75,16 @@ public class PackagingSafetyTests
             Assert.AreEqual((int)schemaField.GetRawConstantValue(), manifest.JusticeSchemaVersion);
 
             CollectionAssert.AreEquivalent(RequiredJusticeTypes, manifest.ExpectedTypes);
-            CollectionAssert.AreEquivalent(
-                RequiredJusticeTypes,
-                ReadExpectedTypesFromExactPackage(packageEndll));
+            AssemblyName scriptApiReference;
+            string[] packagedTypes = ReadExpectedTypesFromExactPackage(
+                packageEndll,
+                out scriptApiReference);
+            CollectionAssert.AreEquivalent(RequiredJusticeTypes, packagedTypes);
+            Assert.IsNotNull(manifest.ScriptApi, "Le manifest doit publier l'identité de l'API de script.");
+            Assert.AreEqual(scriptApiReference.Name, manifest.ScriptApi.Name);
+            Assert.AreEqual(scriptApiReference.Version.ToString(), manifest.ScriptApi.Version);
+            Assert.AreEqual(2, scriptApiReference.Version.Major);
+            Assert.AreEqual(scriptApiReference.Version.Major, manifest.ScriptApi.Major);
 
             CollectionAssert.AreEquivalent(
                 new[]
@@ -146,6 +153,33 @@ public class PackagingSafetyTests
         {
             StringAssert.Contains(script, "\"" + requiredType + "\"");
         }
+    }
+
+    [TestMethod]
+    public void StubApiAndDeliveryPipeline_RequireTheRuntimeCompatibleV2Identity()
+    {
+        string repositoryRoot = GetRepositoryRoot();
+        string stubProject = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "tools",
+            "Stubs",
+            "NIBScriptHookVDotNet2",
+            "NIBScriptHookVDotNet2.csproj"));
+        string packageScript = File.ReadAllText(GetPackageScriptPath());
+        string deployScript = File.ReadAllText(GetDeployScriptPath());
+        string safetyScript = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "tools",
+            "run-safety-checks.ps1"));
+
+        StringAssert.Contains(stubProject, "<AssemblyVersion>2.11.6.0</AssemblyVersion>");
+        StringAssert.Contains(stubProject, "<FileVersion>2.11.6.0</FileVersion>");
+        StringAssert.Contains(packageScript, "$reference.Version.Major -ne 2");
+        StringAssert.Contains(deployScript, "$reference.Version.Major -ne 2");
+        StringAssert.Contains(safetyScript, "$reference.Version.Major -ne 2");
+        StringAssert.Contains(packageScript, "scriptApi = [ordered]@{");
+        StringAssert.Contains(deployScript, "$scriptApi.version");
+        StringAssert.Contains(safetyScript, "$manifest.scriptApi.version");
     }
 
     [TestMethod]
@@ -290,6 +324,40 @@ public class PackagingSafetyTests
                 "-GtaScriptsDir", scriptsDirectory);
 
             Assert.AreNotEqual(0, result.ExitCode);
+            Assert.AreEqual("version-conservée", File.ReadAllText(installed));
+            StringAssert.Contains(result.CombinedOutput, "Manifest game-ready invalide");
+        });
+    }
+
+    [TestMethod]
+    public void GameReadyDeployment_RejectsAnIncompatibleScriptApiManifestWithoutTouchingTheGame()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string packageDirectory = CreateVerifiedPackage(tempRoot, true);
+            string manifestPath = Path.Combine(packageDirectory, "manifest.json");
+            string manifest = File.ReadAllText(manifestPath);
+            string incompatibleManifest = Regex.Replace(
+                manifest,
+                "(\"major\"\\s*:\\s*)2",
+                "${1}1",
+                RegexOptions.CultureInvariant);
+            Assert.AreNotEqual(manifest, incompatibleManifest, "Le fixture doit modifier la version majeure API.");
+            File.WriteAllText(manifestPath, incompatibleManifest);
+
+            string gtaRoot = CreateFakeGtaRoot(tempRoot);
+            string scriptsDirectory = Path.Combine(gtaRoot, "Scripts");
+            Directory.CreateDirectory(scriptsDirectory);
+            string installed = Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.ENdll");
+            File.WriteAllText(installed, "version-conservée");
+
+            ProcessResult result = RunPowerShell(
+                GetDeployScriptPath(),
+                "-PackageDirectory", packageDirectory,
+                "-GtaRoot", gtaRoot,
+                "-GtaScriptsDir", scriptsDirectory);
+
+            Assert.AreNotEqual(0, result.ExitCode, "Une API de mauvaise version majeure devait être refusée.");
             Assert.AreEqual("version-conservée", File.ReadAllText(installed));
             StringAssert.Contains(result.CombinedOutput, "Manifest game-ready invalide");
         });
@@ -598,7 +666,9 @@ public class PackagingSafetyTests
         };
     }
 
-    private static string[] ReadExpectedTypesFromExactPackage(string packageEndll)
+    private static string[] ReadExpectedTypesFromExactPackage(
+        string packageEndll,
+        out AssemblyName scriptApiReference)
     {
         string dependencyDirectory = Path.GetDirectoryName(typeof(DonJEnemySpawner).Assembly.Location);
         ResolveEventHandler resolver = (sender, eventArgs) =>
@@ -617,6 +687,7 @@ public class PackagingSafetyTests
         try
         {
             Assembly packageAssembly = Assembly.ReflectionOnlyLoad(File.ReadAllBytes(packageEndll));
+            scriptApiReference = ReadScriptApiReference(packageAssembly);
             return RequiredJusticeTypes
                 .Where(typeName => packageAssembly.GetType(typeName, false) != null)
                 .ToArray();
@@ -625,6 +696,26 @@ public class PackagingSafetyTests
         {
             AppDomain.CurrentDomain.ReflectionOnlyAssemblyResolve -= resolver;
         }
+    }
+
+    private static AssemblyName ReadScriptApiReference(Assembly packageAssembly)
+    {
+        AssemblyName[] references = packageAssembly.GetReferencedAssemblies()
+            .Where(reference =>
+                string.Equals(
+                    reference.Name,
+                    "NIBScriptHookVDotNet2",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    reference.Name,
+                    "ScriptHookVDotNet2",
+                    StringComparison.Ordinal))
+            .ToArray();
+        Assert.AreEqual(
+            1,
+            references.Length,
+            "Le package doit cibler exactement une API ScriptHookVDotNet v2.");
+        return references[0];
     }
 
     private static PackageManifest ReadManifest(string path)
@@ -854,6 +945,9 @@ public class PackagingSafetyTests
         [DataMember(Name = "justiceSchemaVersion")]
         internal int JusticeSchemaVersion { get; set; }
 
+        [DataMember(Name = "scriptApi")]
+        internal PackageScriptApi ScriptApi { get; set; }
+
         [DataMember(Name = "sourceDirty")]
         internal bool SourceDirty { get; set; }
 
@@ -862,6 +956,19 @@ public class PackagingSafetyTests
 
         [DataMember(Name = "files")]
         internal PackageFiles Files { get; set; }
+    }
+
+    [DataContract]
+    private sealed class PackageScriptApi
+    {
+        [DataMember(Name = "name")]
+        internal string Name { get; set; }
+
+        [DataMember(Name = "version")]
+        internal string Version { get; set; }
+
+        [DataMember(Name = "major")]
+        internal int Major { get; set; }
     }
 
     [DataContract]

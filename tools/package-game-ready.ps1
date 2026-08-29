@@ -83,6 +83,41 @@ function Get-JusticeSchemaVersion {
     return [int]$legacySchemaField.GetRawConstantValue()
 }
 
+function Get-ScriptApiReferenceMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Reflection.Assembly]$Assembly
+    )
+
+    $references = @(
+        $Assembly.GetReferencedAssemblies() |
+            Where-Object {
+                $_.Name -eq "NIBScriptHookVDotNet2" -or
+                $_.Name -eq "ScriptHookVDotNet2"
+            }
+    )
+    if ($references.Count -ne 1) {
+        throw "Le binaire doit referencer exactement une API ScriptHookVDotNet v2."
+    }
+
+    $reference = $references[0]
+    if ($null -eq $reference.Version -or $reference.Version.Major -ne 2) {
+        $detectedVersion = if ($null -eq $reference.Version) {
+            "inconnue"
+        }
+        else {
+            $reference.Version.ToString()
+        }
+        throw "Reference ScriptHookVDotNet incompatible: version majeure 2 attendue, $detectedVersion detectee."
+    }
+
+    return [pscustomobject]@{
+        Name = $reference.Name
+        Version = $reference.Version.ToString()
+        Major = $reference.Version.Major
+    }
+}
+
 function Get-JusticeAssemblyMetadata {
     param(
         [Parameter(Mandatory = $true)]
@@ -132,6 +167,7 @@ function Get-JusticeAssemblyMetadata {
                 [System.IO.File]::ReadAllBytes($BinaryPath))
             [void]$assembly.GetType("DonJEnemySpawner", $true)
             $justiceSchemaVersion = Get-JusticeSchemaVersion -Assembly $assembly
+            $scriptApiReference = Get-ScriptApiReferenceMetadata -Assembly $assembly
 
             foreach ($typeName in $expectedTypes) {
                 if ($null -eq $assembly.GetType($typeName, $false)) {
@@ -142,6 +178,9 @@ function Get-JusticeAssemblyMetadata {
             return [pscustomobject]@{
                 AssemblyVersion = $assembly.GetName().Version.ToString()
                 JusticeSchemaVersion = $justiceSchemaVersion
+                ScriptApiName = $scriptApiReference.Name
+                ScriptApiVersion = $scriptApiReference.Version
+                ScriptApiMajor = $scriptApiReference.Major
                 ExpectedTypes = $expectedTypes
             }
         }
@@ -170,6 +209,7 @@ function Get-JusticeAssemblyMetadata {
             [System.IO.File]::ReadAllBytes($BinaryPath))
         [void]$assembly.GetType("DonJEnemySpawner", $true)
         $justiceSchemaVersion = Get-JusticeSchemaVersion -Assembly $assembly
+        $scriptApiReference = Get-ScriptApiReferenceMetadata -Assembly $assembly
 
         foreach ($typeName in $expectedTypes) {
             if ($null -eq $assembly.GetType($typeName, $false)) {
@@ -180,6 +220,9 @@ function Get-JusticeAssemblyMetadata {
         return [pscustomobject]@{
             AssemblyVersion = $assembly.GetName().Version.ToString()
             JusticeSchemaVersion = $justiceSchemaVersion
+            ScriptApiName = $scriptApiReference.Name
+            ScriptApiVersion = $scriptApiReference.Version
+            ScriptApiMajor = $scriptApiReference.Major
             ExpectedTypes = $expectedTypes
         }
     }
@@ -337,6 +380,11 @@ try {
         assemblyVersion = $assemblyMetadata.AssemblyVersion
         informationalVersion = $informationalVersion
         justiceSchemaVersion = $assemblyMetadata.JusticeSchemaVersion
+        scriptApi = [ordered]@{
+            name = $assemblyMetadata.ScriptApiName
+            version = $assemblyMetadata.ScriptApiVersion
+            major = $assemblyMetadata.ScriptApiMajor
+        }
         expectedTypes = $assemblyMetadata.ExpectedTypes
         files = [ordered]@{
             binary = [ordered]@{
@@ -400,6 +448,7 @@ try {
     Write-Host "SHA-256 ENdll: $buildEndllHash"
     Write-Host "Commit: $Commit"
     Write-Host "Schema Justice: $($assemblyMetadata.JusticeSchemaVersion)"
+    Write-Host "API ScriptHookVDotNet: $($assemblyMetadata.ScriptApiName) $($assemblyMetadata.ScriptApiVersion)"
 }
 finally {
     if (Test-Path -LiteralPath $stagingDirectory) {

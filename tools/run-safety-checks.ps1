@@ -103,6 +103,43 @@ function Invoke-LoggedCommand {
     }
 }
 
+function Get-ScriptApiReferenceMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BinaryPath
+    )
+
+    $assembly = [System.Reflection.Assembly]::Load(
+        [System.IO.File]::ReadAllBytes($BinaryPath))
+    $references = @(
+        $assembly.GetReferencedAssemblies() |
+            Where-Object {
+                $_.Name -eq "NIBScriptHookVDotNet2" -or
+                $_.Name -eq "ScriptHookVDotNet2"
+            }
+    )
+    if ($references.Count -ne 1) {
+        throw "Le binaire doit referencer exactement une API ScriptHookVDotNet v2."
+    }
+
+    $reference = $references[0]
+    if ($null -eq $reference.Version -or $reference.Version.Major -ne 2) {
+        $detectedVersion = if ($null -eq $reference.Version) {
+            "inconnue"
+        }
+        else {
+            $reference.Version.ToString()
+        }
+        throw "Reference ScriptHookVDotNet incompatible: version majeure 2 attendue, $detectedVersion detectee."
+    }
+
+    return [pscustomobject]@{
+        Name = $reference.Name
+        Version = $reference.Version.ToString()
+        Major = $reference.Version.Major
+    }
+}
+
 if ($UseStubApi) {
     $stubProject = Join-Path $repoRoot "tools\Stubs\NIBScriptHookVDotNet2\NIBScriptHookVDotNet2.csproj"
     $stubOutput = Join-Path $runRoot "stub-api"
@@ -318,6 +355,9 @@ $assemblyVersion = [System.Reflection.AssemblyName]::GetAssemblyName(
     (Join-Path $packageRoot "DonJCustomNpcPlacer.ENdll")).Version.ToString()
 $informationalVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(
     (Join-Path $packageRoot "DonJCustomNpcPlacer.ENdll")).ProductVersion
+$scriptApiReference = Get-ScriptApiReferenceMetadata `
+    -BinaryPath (Join-Path $packageRoot "DonJCustomNpcPlacer.ENdll")
+$scriptApiProperty = $manifest.PSObject.Properties["scriptApi"]
 
 if ($manifest.product -ne "DonJCustomNpcPlacer" -or
     [int]$manifest.manifestVersion -ne 1 -or
@@ -327,6 +367,10 @@ if ($manifest.product -ne "DonJCustomNpcPlacer" -or
     [string]$manifest.assemblyVersion -ne $assemblyVersion -or
     [string]$manifest.informationalVersion -ne $informationalVersion -or
     [int]$manifest.justiceSchemaVersion -ne 2 -or
+    $null -eq $scriptApiProperty -or
+    [string]$manifest.scriptApi.name -ne $scriptApiReference.Name -or
+    [string]$manifest.scriptApi.version -ne $scriptApiReference.Version -or
+    [int]$manifest.scriptApi.major -ne $scriptApiReference.Major -or
     $informationalVersion.IndexOf([string]$manifest.commit, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
     throw "Le manifest du package ne correspond pas au binaire teste."
 }
@@ -363,6 +407,7 @@ $summaryPath = Join-Path $runRoot "summary.txt"
     "Dossier deploiement temporaire: $deployRoot",
     "SHA-256 ENdll: $packageEndllHash",
     "SHA-256 manifest: $packageManifestHash",
+    "API ScriptHookVDotNet: $($scriptApiReference.Name) $($scriptApiReference.Version)",
     "Package publiable: $packageIsPublishable",
     "Verification: restore + build sans déploiement + tests + package + contrat strict de déploiement ENdll/PDB/manifest"
 ) | Set-Content -LiteralPath $summaryPath -Encoding UTF8

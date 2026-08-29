@@ -366,13 +366,19 @@ Le package canonique contient exactement :
 - `DonJCustomNpcPlacer.ENdll` ;
 - `DonJCustomNpcPlacer.pdb` ;
 - `INSTALLATION_SIMPLE.txt` ;
-- `manifest.json` avec commit, versions, schéma Justice, tailles et SHA-256.
+- `manifest.json` avec commit, identité exacte de la référence API v2, versions,
+  schéma Justice, tailles et SHA-256.
 
 Par défaut, `tools\package-game-ready.ps1` refuse une source Git modifiée. Le
 commutateur `-AllowDirtySource` sert uniquement à produire localement un artefact
 de contrôle portant `sourceDirty=true`; cet artefact est explicitement non
 publiable et `tools\deploy-game-ready.ps1` le refuse. Un manifest déployable doit
 porter `sourceDirty=false` et une version de schéma Justice exactement égale à 2.
+Le package, la suite de sécurité et le déploiement relisent aussi les références
+de l'assembly : exactement une référence `NIBScriptHookVDotNet2` ou
+`ScriptHookVDotNet2` doit exister et sa version majeure doit être `2`. Le stub CI
+porte l'identité `2.11.6.0` de l'API NIB live afin que son binaire reste chargeable
+par le dictionnaire de versions du runtime.
 
 `tools\run-safety-checks.ps1` vérifie la chaîne de hashes build → package →
 installation temporaire pour une source propre. Sur une source locale modifiée,

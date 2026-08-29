@@ -39,6 +39,50 @@ function Get-Sha256 {
     }
 }
 
+function Get-ScriptApiReferenceMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BinaryPath
+    )
+
+    if ($PSVersionTable.PSEdition -eq "Desktop") {
+        $assembly = [System.Reflection.Assembly]::ReflectionOnlyLoad(
+            [System.IO.File]::ReadAllBytes($BinaryPath))
+    }
+    else {
+        $assembly = [System.Reflection.Assembly]::Load(
+            [System.IO.File]::ReadAllBytes($BinaryPath))
+    }
+
+    $references = @(
+        $assembly.GetReferencedAssemblies() |
+            Where-Object {
+                $_.Name -eq "NIBScriptHookVDotNet2" -or
+                $_.Name -eq "ScriptHookVDotNet2"
+            }
+    )
+    if ($references.Count -ne 1) {
+        throw "Le binaire doit referencer exactement une API ScriptHookVDotNet v2."
+    }
+
+    $reference = $references[0]
+    if ($null -eq $reference.Version -or $reference.Version.Major -ne 2) {
+        $detectedVersion = if ($null -eq $reference.Version) {
+            "inconnue"
+        }
+        else {
+            $reference.Version.ToString()
+        }
+        throw "Reference ScriptHookVDotNet incompatible: version majeure 2 attendue, $detectedVersion detectee."
+    }
+
+    return [pscustomobject]@{
+        Name = $reference.Name
+        Version = $reference.Version.ToString()
+        Major = $reference.Version.Major
+    }
+}
+
 function Assert-ManifestFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -159,11 +203,25 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 $manifestHash = Get-Sha256 -Path $manifestPath
 
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+$scriptApiProperty = if ($null -eq $manifest) {
+    $null
+}
+else {
+    $manifest.PSObject.Properties["scriptApi"]
+}
+$scriptApi = if ($null -eq $scriptApiProperty) {
+    $null
+}
+else {
+    $scriptApiProperty.Value
+}
 if ($null -eq $manifest -or
     [int]$manifest.manifestVersion -ne 1 -or
     $manifest.product -ne "DonJCustomNpcPlacer" -or
     ([string]$manifest.commit) -notmatch '^[0-9a-fA-F]{40}$' -or
     [int]$manifest.justiceSchemaVersion -ne 2 -or
+    $null -eq $scriptApi -or
+    [int]$scriptApi.major -ne 2 -or
     [bool]$manifest.sourceDirty) {
     throw "Manifest game-ready invalide: $manifestPath"
 }
@@ -183,9 +241,13 @@ $symbols = Assert-ManifestFile `
 
 $assemblyVersion = [System.Reflection.AssemblyName]::GetAssemblyName($binary.Path).Version.ToString()
 $informationalVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($binary.Path).ProductVersion
+$scriptApiReference = Get-ScriptApiReferenceMetadata -BinaryPath $binary.Path
 if ($assemblyVersion -ne [string]$manifest.assemblyVersion -or
     $informationalVersion -ne [string]$manifest.informationalVersion -or
-    $informationalVersion.IndexOf([string]$manifest.commit, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    $informationalVersion.IndexOf([string]$manifest.commit, [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+    $scriptApiReference.Name -ne [string]$scriptApi.name -or
+    $scriptApiReference.Version -ne [string]$scriptApi.version -or
+    $scriptApiReference.Major -ne [int]$scriptApi.major) {
     throw "Metadonnees d'assembly incompatibles avec le manifest."
 }
 
@@ -372,6 +434,7 @@ try {
     Write-Host "Package deploye et verifie vers: $targetBinary"
     Write-Host "SHA-256 ENdll: $($binary.Hash)"
     Write-Host "Manifest deploye: $targetManifest"
+    Write-Host "API ScriptHookVDotNet: $($scriptApiReference.Name) $($scriptApiReference.Version)"
 }
 finally {
     foreach ($temporaryPath in @($stagedBinary, $stagedPdb, $stagedManifest)) {

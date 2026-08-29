@@ -635,7 +635,7 @@ You can change it from the mod menu.
 
 > [!TIP]
 > For the simplest and safest setup, download the verified **`DonJCustomNpcPlacer-game-ready`** artifact produced by the latest successful `Safety` workflow.
-> The package is generated only after the Release build and tests pass. Its `manifest.json` records the exact commit, assembly version, Justice schema, sizes, and SHA-256 hashes.
+> The package is generated only after the Release build and tests pass. Its `manifest.json` records the exact commit, assembly version, ScriptHookVDotNet API identity, Justice schema, sizes, and SHA-256 hashes.
 
 ### Before You Start
 

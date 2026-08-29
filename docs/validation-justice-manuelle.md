@@ -24,7 +24,7 @@ Valeurs autorisées dans la colonne **Résultat** : `PASS`, `FAIL`, `BLOQUÉ`, `
 1. Je ferme GTA et ses loaders.
 2. Je conserve une copie du dossier `DonJEnemySpawnerSaves`, notamment `_justice_state.xml`, son `.bak`, `_justice_state.wal` et `_justice_state.v1.bak` s'il existe.
 3. Je pars d'une source Git propre et je génère le package avec `tools/run-safety-checks.ps1`; je n'utilise aucun binaire maintenu manuellement. Un contrôle local lancé depuis une source modifiée produit uniquement un package `sourceDirty=true`, non publiable.
-4. Je vérifie le commit, `sourceDirty=false`, le schéma Justice exactement égal à 2, les versions, les tailles et les SHA-256 du `manifest.json`.
+4. Je vérifie le commit, `sourceDirty=false`, le schéma Justice exactement égal à 2, la référence `NIBScriptHookVDotNet2`/`ScriptHookVDotNet2` de version majeure 2, les autres versions, les tailles et les SHA-256 du `manifest.json`.
 5. J'installe uniquement ce package propre par le chemin de déploiement explicite, puis je recalcule le SHA-256 sous `Scripts`. `deploy-game-ready.ps1` doit refuser tout manifest `sourceDirty=true`.
 6. J'active un enregistrement de frametime et je conserve `DonJCustomNpcPlacer.log`, `NIBScriptHookVDotNet.log` et `ScriptHookV.log` après chaque anomalie.
 7. Pour les scénarios destructifs, je travaille sur une copie dédiée des sauvegardes et un profil de test GTA.
@@ -35,7 +35,7 @@ Valeurs autorisées dans la colonne **Résultat** : `PASS`, `FAIL`, `BLOQUÉ`, `
 |---|---|---|---|---|
 | PKG-01 | Build Release ordinaire | Compiler sans `DeployToGta`; aucun fichier sous le vrai dossier GTA ne change. | NON EXÉCUTÉ | Horodatages et hashes avant/après |
 | PKG-02 | Package canonique | Le package contient uniquement ENdll, PDB, guide et manifest; ENdll/PDB correspondent au build testé. | NON EXÉCUTÉ | Log safety + hashes |
-| PKG-03 | Métadonnées | Commit, `sourceDirty=false`, version d'assembly, version informative et schéma exact 2 du manifest correspondent au binaire chargé. | NON EXÉCUTÉ | Manifest + réflexion/diagnostic |
+| PKG-03 | Métadonnées | Commit, `sourceDirty=false`, version d'assembly, version informative, référence unique API majeure 2 et schéma exact 2 du manifest correspondent au binaire chargé. | NON EXÉCUTÉ | Manifest + réflexion/diagnostic |
 | PKG-04 | Installation explicite | ENdll, PDB et manifest sont publiés puis relus avant le retrait des alias historiques. Le binaire précédent n'est jamais supprimé avant validation du nouveau; un échec restaure les alias déjà déplacés puis rollback les trois fichiers. Le manifest installé porte le nom stable `DonJCustomNpcPlacer.manifest.json`. | NON EXÉCUTÉ | Log de déploiement + hashes des trois fichiers |
 | PKG-05 | Package corrompu | Altérer une copie du package; le déploiement échoue et conserve intégralement le binaire installé. | NON EXÉCUTÉ | Hash avant/après + sortie PowerShell |
 | PKG-06 | Alias historiques | Après validation du nouveau triplet seulement, aucun `DonJEnemySpawner.dll`, `.ENdll` ou `.pdb` obsolète ne subsiste. Simuler un alias verrouillé : le triplet et tous les alias reviennent à leur état initial, sans fenêtre volontairement dépourvue d'ENdll. | NON EXÉCUTÉ | Listing `Scripts` + hashes avant/après |
