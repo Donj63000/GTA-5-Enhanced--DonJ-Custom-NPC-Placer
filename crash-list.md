@@ -1878,3 +1878,18 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Les dix comparaisons sont remplacées par `object.ReferenceEquals`, ce qui conserve la détection des états de placement partiels sans appeler un opérateur GTA. Le test de régression vérifie explicitement ce garde-fou pour la caméra de placement.
 - Vérification: `tools\run-safety-checks.ps1` réussit dans `TestResults\safety-20260829-231422` avec `481/481`; `dotnet build GTA5modDEV.sln -c Release` termine avec zéro avertissement/zéro erreur; `dotnet test GTA5modDEV.sln -c Release` réussit `481/481`. Le validateur ABI contrôle le livrable installé contre `NIBScriptHookVDotNet2.dll` avec `runtimeValidated=true`, `32` références de types et `189` références de membres.
 - Résolution: Le correctif d'immortalité reste appliqué et le livrable de test valide a remplacé l'ENdll, le PDB et le manifest GTA. Le manifest installé indique volontairement `sourceDirty=true`; la version précédente reste sauvegardée dans `TestResults\safety-20260829-231422\gta-predeploy-backup-20260829-231422`.
+
+## 2026-08-30 01:18:02 +02:00 - Assertion de contrat Justice sensible au retour à la ligne C#
+- Statut: Corrigé et validation complète réussie.
+- Contexte: Première exécution ciblée de `JusticeRuntimeContractTests` juste après l'application de `DonJ_GTA5_Justice_Prison_Respawn_Escape.patch`.
+- Symptôme: `RuntimeJustice_PoliceCustodyMaterializesExactlyOneMinimalCaseBeforeCapture` échouait car son assertion cherchait l'expression `HasJusticePoliceCustodyEvidence(...) || liveArrestEvidence` sur une seule ligne, alors que le code C# la met volontairement en forme sur deux lignes.
+- Sources vérifiées:
+  - `bug-reports\20260830-011749-echec-test-justice-prison-respawn-escape`;
+  - sortie de `dotnet test GTA5modDEV.sln -c Release --no-build --filter "FullyQualifiedName~JusticeRuntimeContractTests"`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.cs`;
+  - `tests\DonJEnemySpawner.Tests\JusticeRuntimeContractTests.cs`.
+- Extraits utiles: la première exécution signalait uniquement l'absence de la chaîne contiguë attendue; l'expression réellement présente est `HasJusticePoliceCustodyEvidence(wantedLevel, player, dead) ||` suivie de `liveArrestEvidence` à la ligne suivante.
+- Analyse / hypothèse: Défaut limité au test d'inspection source; la logique de preuve de capture policière et le code gameplay du patch ne sont pas en cause.
+- Action menée: L'assertion textuelle fragile est remplacée par une expression régulière qui accepte les espaces et retours à la ligne autour de l'opérateur `||`, sans relâcher le contrat fonctionnel contrôlé.
+- Vérification: Test ciblé réussi `72/72`; `dotnet build GTA5modDEV.sln -c Release` réussi sans avertissement ni erreur; `dotnet test GTA5modDEV.sln -c Release --no-build` réussi `483/483`; `tools\run-safety-checks.ps1` réussi `483/483` avec ABI NIB v2 valide.
+- Résolution: Le contrat reste strict sur la preuve policière et n'échoue plus à cause d'un formatage C# équivalent.

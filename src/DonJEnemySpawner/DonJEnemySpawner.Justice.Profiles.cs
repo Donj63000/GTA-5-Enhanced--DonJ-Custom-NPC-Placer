@@ -1636,12 +1636,20 @@ public sealed partial class DonJEnemySpawner
             return pendingSlot == -1 && pendingModel == 0;
         }
 
-        return caseState != null && caseState.Enabled &&
-               IsLoadedJusticeCaseActive(caseState) &&
-               (IsJusticeCustodyPhase(caseState.Phase) ||
-                caseState.Phase == JusticePhase.Wanted ||
-                caseState.Phase == JusticePhase.Surrendering ||
-                caseState.Phase == JusticePhase.Fugitive);
+        if (caseState == null || !caseState.Enabled)
+        {
+            return false;
+        }
+
+        bool materializedCase = IsLoadedJusticeCaseActive(caseState) &&
+            (IsJusticeCustodyPhase(caseState.Phase) ||
+             caseState.Phase == JusticePhase.Wanted ||
+             caseState.Phase == JusticePhase.Surrendering ||
+             caseState.Phase == JusticePhase.Fugitive);
+        bool rawPoliceDeathAwaitingMaterialization =
+            !IsLoadedJusticeCaseActive(caseState) &&
+            caseState.Phase == JusticePhase.AtLarge;
+        return materializedCase || rawPoliceDeathAwaitingMaterialization;
     }
 
     private static bool IsJusticePendingLegalReleaseValid(

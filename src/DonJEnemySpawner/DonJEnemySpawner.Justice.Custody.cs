@@ -54,7 +54,7 @@ public sealed partial class DonJEnemySpawner
     private const int JusticeCustodyReleaseTeleportTimeoutMs = 30000;
     private const int JusticeCustodyDeferredRestoreDelayMs = 15000;
     private const int JusticeCustodyDeferredRestoreRetryMs = 5000;
-    private const int JusticeCustodyEscapeGraceMs = 3000;
+    private const int JusticeCustodyEscapeGraceMs = 6000;
     private const int JusticeCustodyActivityScenarioGraceMs = 1500;
     private const int JusticeCustodyActivityScenarioCheckMs = 120;
     private const int JusticeCustodyMaxFrameElapsedMs = 2000;
@@ -270,6 +270,7 @@ public sealed partial class DonJEnemySpawner
         internal Vector3 ReleasePosition;
         internal float ReleaseHeading;
         internal JusticeCustodyVolume[] AllowedVolumes;
+        internal JusticeCustodyVolume[] ContainmentVolumes;
         internal Vector3[] GuardPositions;
         internal float[] GuardHeadings;
         internal Vector3[] InmatePositions;
@@ -366,6 +367,7 @@ public sealed partial class DonJEnemySpawner
     private bool _justiceCustodyTransferRollbackPrecommitRedundant;
     private bool _justiceCustodyResumePending;
     private bool _justiceCustodyWaitingForRespawn;
+    private bool _justiceCustodyRespawnTransferPending;
     private bool _justiceCustodyDeathRebindPending;
     private bool _justiceCustodyDeathStatePersistencePending;
     private int _justiceNextCustodyDeathPersistenceRetryAt;
@@ -384,6 +386,7 @@ public sealed partial class DonJEnemySpawner
     private int _justiceNextCustodyModelRetryAt;
     private int _justiceNextDisciplineScanAt;
     private int _justiceOutsideCustodySinceAt;
+    private bool _justiceCustodyContainmentEstablished;
     private int _justiceNextPoliceSuppressionAt;
     private bool _justicePoliceSuppressionActive;
     private bool _justicePoliceIgnoreApplied;
@@ -481,6 +484,15 @@ public sealed partial class DonJEnemySpawner
                     new Vector3(438.0f, -1005.0f, 20.0f),
                     new Vector3(482.0f, -974.0f, 34.5f))
             },
+            ContainmentVolumes = new[]
+            {
+                // Le volume de jeu reste précis, mais l'évasion utilise une
+                // enveloppe extérieure tolérante aux portes, escaliers et petits
+                // décalages de streaming du commissariat.
+                new JusticeCustodyVolume(
+                    new Vector3(432.0f, -1012.0f, 15.0f),
+                    new Vector3(490.0f, -966.0f, 45.0f))
+            },
             GuardPositions = new[]
             {
                 new Vector3(457.10f, -991.08f, 24.91f),
@@ -541,6 +553,26 @@ public sealed partial class DonJEnemySpawner
                         1580.0f, 2725.0f,
                         1500.0f, 2640.0f,
                         1500.0f, 2500.0f
+                    })
+            },
+            ContainmentVolumes = new[]
+            {
+                // L'évasion ne s'arme qu'après franchissement clair de l'enceinte.
+                // Cette seconde enveloppe couvre les murs, tours, cours, bâtiments
+                // et les imprécisions de coordonnées sans englober la sortie légale.
+                new JusticeCustodyVolume(
+                    new Vector3(1465.0f, 2345.0f, 0.0f),
+                    new Vector3(1840.0f, 2760.0f, 120.0f),
+                    new[]
+                    {
+                        1580.0f, 2350.0f,
+                        1760.0f, 2385.0f,
+                        1840.0f, 2480.0f,
+                        1840.0f, 2660.0f,
+                        1760.0f, 2755.0f,
+                        1555.0f, 2755.0f,
+                        1470.0f, 2660.0f,
+                        1470.0f, 2480.0f
                     })
             },
             GuardPositions = new[]
@@ -697,9 +729,11 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyRuntimeActive = true;
         _justiceCustodyTransferPending = true;
         _justiceCustodyResumePending = false;
+        _justiceCustodyRespawnTransferPending = false;
         ResetJusticeCustodyTransferRetryState();
         _justiceCustodyWaitingForRespawn = waitForRespawn;
         _justiceOutsideCustodySinceAt = 0;
+        _justiceCustodyContainmentEstablished = false;
         _justiceCaseState.Phase = JusticePhase.Transporting;
         JusticeMarkStateDirty();
 
@@ -886,6 +920,10 @@ public sealed partial class DonJEnemySpawner
                 ResetJusticeCustodyClock(now);
                 return;
             }
+
+            // Ce flag est purement runtime : il masque la frame de respawn GTA
+            // seulement quand le transfert durable est réellement prêt à partir.
+            _justiceCustodyRespawnTransferPending = true;
         }
 
         if (_justiceCustodyTransferPending || _justiceCustodyResumePending)
@@ -934,7 +972,7 @@ public sealed partial class DonJEnemySpawner
         MaintainJusticeCustodyPoliceSuppression(player, now);
         RetryJusticeInventoryConfiscationIfDue(player, now);
 
-        // Je qualifie une faute avant de confirmer l'évasion. Les trois secondes
+        // Je qualifie une faute avant de confirmer l'évasion. Les six secondes
         // hors volume restent donc surveillées : tuer un garde à la dernière
         // frame ne peut pas faire disparaître la victime avec la scène.
         UpdateJusticeCustodyDiscipline(player, now);
@@ -946,7 +984,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         // Je traite la sortie avant le gate Incarcerated : la phase Escaping
-        // doit continuer à accumuler ses trois secondes de grâce.
+        // doit continuer à accumuler ses six secondes de grâce.
         UpdateJusticeCustodyEscape(player, now);
         if (!JusticeIsCustodyActive ||
             _justiceCaseState.Phase != JusticePhase.Incarcerated)
@@ -970,6 +1008,8 @@ public sealed partial class DonJEnemySpawner
 
     private void ObserveJusticeCustodyDeath(Ped player, int now)
     {
+        _justiceCustodyContainmentEstablished = false;
+        _justiceCustodyRespawnTransferPending = false;
         bool stateChanged = false;
         if (IsJusticeCustodyDeathIdentityCompatible(player) &&
             !_justiceCustodyDeathRebindPending)
@@ -1000,6 +1040,8 @@ public sealed partial class DonJEnemySpawner
 
     private void ObserveJusticeCustodyDeathDuringSuspension(Ped player)
     {
+        _justiceCustodyContainmentEstablished = false;
+        _justiceCustodyRespawnTransferPending = false;
         if (!IsJusticeCustodyDeathIdentityCompatible(player))
         {
             return;
@@ -1132,8 +1174,13 @@ public sealed partial class DonJEnemySpawner
         }
 
         bool transferred = false;
+        bool maskRespawnOrigin = _justiceCustodyRespawnTransferPending;
         try
         {
+            if (maskRespawnOrigin)
+            {
+                BeginJusticeCustodyRespawnTransferMask();
+            }
             _activeInteriorSession = null;
             ClearInteriorRenderingFocusSafe(player);
             TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading);
@@ -1141,6 +1188,10 @@ public sealed partial class DonJEnemySpawner
         }
         catch (Exception ex)
         {
+            if (maskRespawnOrigin)
+            {
+                RestoreJusticeCustodyRespawnTransferMask();
+            }
             LogException("Justice.Transfert", ex);
         }
 
@@ -1152,6 +1203,12 @@ public sealed partial class DonJEnemySpawner
                 player,
                 transferPosition,
                 transferHeading);
+        }
+        if (transferred && !IsInsideJusticeCustodyLayout(layout, player.Position))
+        {
+            // Une native peut annoncer le déplacement alors qu'un autre script a
+            // replacé le ped dans la même frame. Je refuse alors d'armer l'évasion.
+            transferred = false;
         }
         if (transferred && !EnsureJusticeCustodyPlayerMobility(player))
         {
@@ -1169,6 +1226,10 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
+        // Le masque de respawn reste armé à travers les retries et n'est consommé
+        // qu'après un transfert physiquement vérifié. Un premier téléport refusé
+        // par le moteur ne peut donc pas révéler l'hôpital au passage suivant.
+        _justiceCustodyRespawnTransferPending = false;
         _justiceCustodyPlayerHandle = player.Handle;
         _justiceCustodyPlayerModelHash = GetJusticePedModelHashSafe(player);
         RememberJusticeCustodyPlayerSlot();
@@ -1185,6 +1246,7 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyLastTickAt = now;
         _justiceCustodyElapsedRemainderMs = 0;
         _justiceOutsideCustodySinceAt = 0;
+        _justiceCustodyContainmentEstablished = true;
         ApplyJusticeTransition(
             transferTimedOut ? JusticeSignal.TransferTimedOut : JusticeSignal.TransferCompleted,
             _justiceCaseState.CustodyEpisodeId);
@@ -1216,11 +1278,37 @@ public sealed partial class DonJEnemySpawner
         LogInfo("Justice.Detention", "Entrée dans " + layout.DisplayName + ".");
     }
 
+    private static void BeginJusticeCustodyRespawnTransferMask()
+    {
+        try
+        {
+            // Le fade immédiat empêche l'hôpital GTA d'apparaître pendant les
+            // 250 ms de fondu normal du téléport sécurisé.
+            Function.Call(Hash.DO_SCREEN_FADE_OUT, 0);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void RestoreJusticeCustodyRespawnTransferMask()
+    {
+        try
+        {
+            Function.Call(Hash.DO_SCREEN_FADE_IN, 350);
+        }
+        catch
+        {
+        }
+    }
+
     private void RestoreJusticeCustodyRuntimeFromCase()
     {
         _justiceCustodyRuntimeActive = true;
         _justiceCustodyResumePending = true;
         _justiceCustodyTransferPending = false;
+        _justiceCustodyRespawnTransferPending = false;
+        _justiceCustodyContainmentEstablished = false;
         ResetJusticeCustodyTransferRetryState();
 
         if (_justiceCustodySite == JusticeCustodySite.None)
@@ -1265,7 +1353,9 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodySite = JusticeCustodySite.Bolingbroke;
         _justiceCustodyTransferPending = true;
         _justiceCustodyResumePending = false;
+        _justiceCustodyRespawnTransferPending = false;
         _justiceOutsideCustodySinceAt = 0;
+        _justiceCustodyContainmentEstablished = false;
         _justiceCaseState.Phase = JusticePhase.Transporting;
         ResetJusticeCustodyTransferRetryState();
         JusticeMarkStateDirty();
@@ -2996,14 +3086,21 @@ public sealed partial class DonJEnemySpawner
         JusticeCustodyLayout layout,
         Vector3 position)
     {
-        if (layout == null || layout.AllowedVolumes == null)
+        if (layout == null)
         {
             return false;
         }
 
-        for (int index = 0; index < layout.AllowedVolumes.Length; index++)
+        JusticeCustodyVolume[] containmentVolumes =
+            layout.ContainmentVolumes ?? layout.AllowedVolumes;
+        if (containmentVolumes == null)
         {
-            JusticeCustodyVolume volume = layout.AllowedVolumes[index];
+            return false;
+        }
+
+        for (int index = 0; index < containmentVolumes.Length; index++)
+        {
+            JusticeCustodyVolume volume = containmentVolumes[index];
             if (volume != null && volume.Contains(position))
             {
                 return true;
@@ -3020,7 +3117,21 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        if (IsInsideJusticeCustody(player.Position))
+        bool insideContainment = IsInsideJusticeCustody(player.Position);
+        if (!_justiceCustodyContainmentEstablished)
+        {
+            // Aucune évasion ne peut être créée avant qu'un transfert vérifié ait
+            // placé ce protagoniste dans l'enceinte. Cela neutralise les spawns,
+            // changements de héros et reprises de sauvegarde encore hors site.
+            _justiceOutsideCustodySinceAt = 0;
+            if (!insideContainment)
+            {
+                return;
+            }
+            _justiceCustodyContainmentEstablished = true;
+        }
+
+        if (insideContainment)
         {
             _justiceOutsideCustodySinceAt = 0;
             if (_justiceCaseState.Phase == JusticePhase.Escaping)
@@ -3156,7 +3267,7 @@ public sealed partial class DonJEnemySpawner
             // le commit du dossier fugitif et possède son propre WAL at-most-once.
             RetryJusticeEscapeWantedMinimum(GetJusticeWantedLevelSafe());
         }
-        LogInfo("Justice.Evasion", "Évasion confirmée après sortie continue de la zone autorisée.");
+        LogInfo("Justice.Evasion", "Évasion confirmée après sortie continue de l'enceinte extérieure.");
     }
 
     private bool RegisterJusticeEscapeInventoryRemovalFailure(int now)
@@ -8479,6 +8590,8 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyTransferPending = false;
         _justiceCustodyResumePending = false;
         _justiceCustodyWaitingForRespawn = false;
+        _justiceCustodyRespawnTransferPending = false;
+        _justiceCustodyContainmentEstablished = false;
         _justiceCustodyDeathRebindPending = false;
         _justiceCustodyDeathStatePersistencePending = false;
         _justiceNextCustodyDeathPersistenceRetryAt = 0;
@@ -8598,6 +8711,8 @@ public sealed partial class DonJEnemySpawner
             _justiceCustodyRuntimeActive = false;
             _justiceCustodyTransferPending = false;
             _justiceCustodyResumePending = false;
+            _justiceCustodyRespawnTransferPending = false;
+            _justiceCustodyContainmentEstablished = false;
             ResetJusticeCustodyTransferRetryState();
         }
     }

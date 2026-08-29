@@ -437,7 +437,12 @@ public sealed partial class DonJEnemySpawner
             // Je synchronise seulement les fronts bruts pendant une mission, un
             // chargement, une cinématique ou un changement de personnage. Ainsi
             // la reprise ne fabrique ni mandat, ni arrestation, ni hausse wanted.
-            if (dead && !_justiceWasDead && _justiceEnabled && HasActiveJusticeCase())
+            bool suspendedPoliceCustodyEvidence =
+                HasJusticePoliceCustodyEvidence(wantedLevel, player, dead);
+            bool suspendedPoliceDeath = dead && !_justiceWasDead && _justiceEnabled &&
+                (HasActiveJusticeCase() ||
+                 (!JusticeIsCustodyActive && suspendedPoliceCustodyEvidence));
+            if (suspendedPoliceDeath)
             {
                 if (JusticeIsCustodyActive && IsJusticeCustodyDeathIdentityCompatible(player))
                 {
@@ -447,9 +452,14 @@ public sealed partial class DonJEnemySpawner
                     ObserveJusticeCustodyDeathDuringSuspension(player);
                 }
                 else if (!JusticeIsCustodyActive &&
-                         (_justicePursuitActive || _justiceLastWantedLevel > 0))
+                         suspendedPoliceCustodyEvidence)
                 {
-                    if (_justiceCaseState.Phase == JusticePhase.AtLarge)
+                    // Pendant une suspension je n'invente encore aucune charge :
+                    // je durcis seulement le front brut. Au retour en gameplay,
+                    // l'identité canonique sera revalidée avant sa matérialisation.
+                    _justiceCaseState.Enabled = true;
+                    if (HasActiveJusticeCase() &&
+                        _justiceCaseState.Phase == JusticePhase.AtLarge)
                     {
                         _justiceCaseState.Phase = JusticePhase.Wanted;
                     }
@@ -568,6 +578,21 @@ public sealed partial class DonJEnemySpawner
         {
             if (IsPendingJusticeDeathCaptureIdentityCompatible(player))
             {
+                if (!EnsureJusticeCaseForPoliceCustody(
+                        true,
+                        "mort policière différée pendant une suspension"))
+                {
+                    // Le latch reste durable et sera retenté. Je ne le transforme
+                    // jamais en capture sans dossier ni sur une identité ambiguë.
+                    if (arrestStateValid)
+                    {
+                        _justiceWasBeingArrested = arrested;
+                    }
+                    _justiceWasDead = dead;
+                    _justiceLastWantedLevel = wantedLevel;
+                    return;
+                }
+
                 if (_justiceCaseState.Phase == JusticePhase.AtLarge)
                 {
                     _justiceCaseState.Phase = JusticePhase.Wanted;
@@ -624,9 +649,24 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
+        bool liveArrestEvidence = arrestStateValid && arrested;
+        bool policeCustodyEvidence =
+            HasJusticePoliceCustodyEvidence(wantedLevel, player, dead) ||
+            liveArrestEvidence;
+        bool livePoliceCustodyFront =
+            (dead && !_justiceWasDead) || liveArrestEvidence;
+        if (_justiceEnabled && !JusticeIsCustodyActive &&
+            livePoliceCustodyFront && policeCustodyEvidence)
+        {
+            EnsureJusticeCaseForPoliceCustody(
+                true,
+                dead && !_justiceWasDead
+                    ? "mort pendant une recherche policière"
+                    : "interpellation policière confirmée");
+        }
+
         bool policePursuitDeath = _justiceEnabled && HasActiveJusticeCase() && !JusticeIsCustodyActive &&
-                                  dead && !_justiceWasDead &&
-                                  (_justicePursuitActive || _justiceLastWantedLevel > 0);
+                                  dead && !_justiceWasDead && policeCustodyEvidence;
 
         if (!policePursuitDeath &&
             TryResolveJusticeMaskedArrestOnWantedLoss(
@@ -780,7 +820,9 @@ public sealed partial class DonJEnemySpawner
             }
             _justiceDeferredRuntimeFronts |= observed;
             _justiceDeferredRuntimeFrontHadPursuit |=
-                _justicePursuitActive || _justiceLastWantedLevel > 0;
+                _justicePursuitActive || _justiceLastWantedLevel > 0 ||
+                (dead && WasJusticePlayerKilledByPoliceSafe(player)) ||
+                (arrestStateValid && arrested);
         }
 
         if (arrestStateValid)
@@ -815,43 +857,62 @@ public sealed partial class DonJEnemySpawner
             currentModel != 0 &&
             currentModel == _justiceDeferredRuntimeFrontPlayerModelHash;
 
-        if (identityCompatible && _justiceEnabled && HasActiveJusticeCase() &&
-            !JusticeIsCustodyActive)
+        if (identityCompatible && _justiceEnabled && !JusticeIsCustodyActive)
         {
-            if ((fronts & JusticeDeferredRuntimeFront.DeathStarted) != 0 &&
-                _justiceDeferredRuntimeFrontHadPursuit)
-            {
-                if (_justiceCaseState.Phase == JusticePhase.AtLarge)
-                {
-                    _justiceCaseState.Phase = JusticePhase.Wanted;
-                }
-                _justicePursuitDeathObservedDuringSuspension = true;
-                _justiceSuspendedPursuitDeathPlayerSlot = currentSlot;
-                _justiceSuspendedPursuitDeathPlayerModelHash = currentModel;
-                JusticeMarkStateDirty();
-            }
-
+            bool deathWasObserved =
+                (fronts & JusticeDeferredRuntimeFront.DeathStarted) != 0;
             bool arrestWasObserved =
                 (fronts & (JusticeDeferredRuntimeFront.ArrestStarted |
                            JusticeDeferredRuntimeFront.ArrestEnded)) != 0;
-            if (arrestWasObserved)
+            if (_justiceDeferredRuntimeFrontHadPursuit &&
+                (deathWasObserved || arrestWasObserved))
             {
-                // Je demande une preuve BUSTED avant toute capture. Si elle reste
-                // illisible, le chemin borné existant conservera seulement le mandat.
-                _justiceArrestCompletionProbePending = true;
-                _justiceArrestCompletionProbeStartedAtMs = _justiceMonotonicTimeMs;
+                EnsureJusticeCaseForPoliceCustody(
+                    true,
+                    deathWasObserved
+                        ? "mort policière conservée pendant une réparation de sauvegarde"
+                        : "arrestation conservée pendant une réparation de sauvegarde");
             }
-            if ((fronts & JusticeDeferredRuntimeFront.WantedLost) != 0 ||
-                (fronts & JusticeDeferredRuntimeFront.ArrestEnded) != 0)
+
+            if (HasActiveJusticeCase())
             {
-                _justiceWantedLossPending = true;
+                if (deathWasObserved && _justiceDeferredRuntimeFrontHadPursuit)
+                {
+                    if (_justiceCaseState.Phase == JusticePhase.AtLarge)
+                    {
+                        _justiceCaseState.Phase = JusticePhase.Wanted;
+                    }
+                    _justicePursuitDeathObservedDuringSuspension = true;
+                    _justiceSuspendedPursuitDeathPlayerSlot = currentSlot;
+                    _justiceSuspendedPursuitDeathPlayerModelHash = currentModel;
+                    JusticeMarkStateDirty();
+                }
+
+                if (arrestWasObserved)
+                {
+                    // Je demande une preuve BUSTED avant toute capture. Si elle reste
+                    // illisible, le chemin borné existant conservera seulement le mandat.
+                    _justiceArrestCompletionProbePending = true;
+                    _justiceArrestCompletionProbeStartedAtMs = _justiceMonotonicTimeMs;
+                }
+                if ((fronts & JusticeDeferredRuntimeFront.WantedLost) != 0 ||
+                    (fronts & JusticeDeferredRuntimeFront.ArrestEnded) != 0)
+                {
+                    _justiceWantedLossPending = true;
+                }
+            }
+            else
+            {
+                LogWarning(
+                    "Justice.Reparation",
+                    "Fronts différés sans preuve de capture policière exploitable; aucune charge créée.");
             }
         }
         else
         {
             LogWarning(
                 "Justice.Reparation",
-                "Fronts différés ignorés : identité du protagoniste ambiguë ou dossier inactif.");
+                "Fronts différés ignorés : identité du protagoniste ambiguë ou détention déjà active.");
         }
 
         _justiceDeferredRuntimeFronts = JusticeDeferredRuntimeFront.None;
@@ -1716,6 +1777,129 @@ public sealed partial class DonJEnemySpawner
                 _justiceCaseState.FineDue > 0L ||
                 _justiceCaseState.SentenceSeconds > 0 ||
                 _justiceCaseState.HasWarrant);
+    }
+
+    private bool HasJusticePoliceCustodyEvidence(
+        int wantedLevel,
+        Ped player,
+        bool playerDead)
+    {
+        // GTA peut retirer les étoiles dans la même frame que WASTED/BUSTED.
+        // Le niveau courant, le niveau du scan précédent et notre latch de
+        // poursuite sont donc trois preuves équivalentes du même front policier.
+        if (wantedLevel > 0 || _justiceLastWantedLevel > 0 || _justicePursuitActive)
+        {
+            return true;
+        }
+
+        // Dernier filet : la source de mort peut encore identifier un agent alors
+        // que GTA a déjà remis le wanted à zéro avant notre scan de cette frame.
+        return playerDead && WasJusticePlayerKilledByPoliceSafe(player);
+    }
+
+    private bool WasJusticePlayerKilledByPoliceSafe(Ped player)
+    {
+        if (!Entity.Exists(player) || !IsJusticePlayerDeadSafe(player))
+        {
+            return false;
+        }
+
+        try
+        {
+            Entity killer = player.GetKiller();
+            Ped killerPed = killer as Ped;
+            return Entity.Exists(killerPed) && IsJusticePolicePed(killerPed);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool EnsureJusticeCaseForPoliceCustody(
+        bool policeCustodyEvidence,
+        string source)
+    {
+        if (!_justiceEnabled || JusticeIsCustodyActive || _justiceCaseState == null ||
+            _justiceRecordState == null)
+        {
+            return false;
+        }
+        // Un dossier peut être actif sans contenir la moindre seconde de
+        // détention (tir dangereux, menace armée, dégâts matériels, etc.).
+        // Dans ce cas, laisser BeginJusticeCapture poursuivre provoquerait une
+        // remise en liberté immédiate au lieu d'un réveil au poste. Je ne
+        // considère donc le dossier suffisant que s'il porte déjà une peine
+        // privative de liberté.
+        if (HasActiveJusticeCase() && _justiceCaseState.SentenceSeconds > 0)
+        {
+            return true;
+        }
+        if (!policeCustodyEvidence)
+        {
+            return false;
+        }
+
+        // Une étoile seule ne crée toujours aucun dossier. Cette matérialisation
+        // n'arrive qu'après un vrai front de mort/arrestation, afin que le respawn
+        // GTA à l'hôpital ne puisse pas court-circuiter la justice avancée.
+        _justiceCaseState.Enabled = true;
+        string episode = GetJusticeDetectionEpisodeId();
+        JusticeIncident incident = new JusticeIncident
+        {
+            IncidentId = BuildJusticeIncidentId(
+                JusticeCrimeKind.EvadingPolice,
+                episode,
+                0,
+                0,
+                0),
+            EpisodeId = episode,
+            DetectionBatchId = BuildJusticeDetectionBatchId(),
+            Kind = JusticeCrimeKind.EvadingPolice,
+            CreatedAtMs = _justiceMonotonicTimeMs,
+            ExpiresAtMs = _justiceMonotonicTimeMs + JusticePolicy.PendingIncidentLifetimeMs,
+            Circumstances = GetJusticeBaseCircumstances(),
+            Evidence = new JusticeEvidence
+            {
+                Kind = JusticeEvidenceKind.DirectGameReport,
+                HasPlausibleObserver = true,
+                ObservedAtMs = _justiceMonotonicTimeMs,
+                ReportDueAtMs = _justiceMonotonicTimeMs,
+                ReportCompleted = true
+            },
+            IsConfirmed = true
+        };
+
+        JusticeCharge charge = JusticePolicy.ApplyConfirmedIncident(
+            _justiceCaseState,
+            incident,
+            _justiceRecordState);
+        if (charge != null)
+        {
+            OnJusticeChargeConfirmed(charge);
+            StartJusticePursuitEpisodeIfNeeded(episode);
+            if (_justiceCaseState.Phase == JusticePhase.AtLarge)
+            {
+                _justiceCaseState.Phase = JusticePhase.Wanted;
+            }
+            JusticeMarkStateDirty();
+            LogInfo(
+                "Justice.Capture",
+                "Dossier minimal matérialisé avant " +
+                ((source ?? string.Empty).Trim().Length == 0
+                    ? "une capture policière"
+                    : source.Trim()) + ".");
+        }
+
+        if (HasActiveJusticeCase() && _justiceCaseState.SentenceSeconds > 0)
+        {
+            return true;
+        }
+
+        LogWarning(
+            "Justice.Capture",
+            "Capture policière différée : impossible de matérialiser un dossier minimal idempotent.");
+        return false;
     }
 
     private void DetectJusticeEventFronts(Ped player)
@@ -6390,22 +6574,14 @@ public sealed partial class DonJEnemySpawner
                 return false;
             }
 
-            bool custodyPhase = IsJusticeCustodyPhase(caseState.Phase);
-            if (pendingDeathCapture)
+            if (!IsJusticeProfilePendingDeathValid(
+                    caseState,
+                    pendingDeathCapture,
+                    pendingDeathCaptureSlot,
+                    pendingDeathCaptureModel))
             {
-                // Je rends durable le front de mort même pendant les quelques frames où GTA
-                // ne fournit encore ni slot canonique ni modèle. Les mutations restent bloquées
-                // ensuite tant que l'identité du protagoniste n'est pas prouvée.
-                if (!rootEnabled || !IsLoadedJusticeCaseActive(caseState) ||
-                    (!custodyPhase && caseState.Phase != JusticePhase.Wanted &&
-                     caseState.Phase != JusticePhase.Surrendering &&
-                     caseState.Phase != JusticePhase.Fugitive))
-                {
-                    return false;
-                }
-            }
-            else if (pendingDeathCaptureSlot != -1 || pendingDeathCaptureModel != 0)
-            {
+                // Le front brut peut précéder sa charge minimale, mais il reste
+                // obligatoirement lié à un profil Justice activé et cohérent.
                 return false;
             }
             if (lastCanonicalPlayerSlot < 0 && lastCanonicalPlayerModel != 0)
@@ -7230,25 +7406,14 @@ public sealed partial class DonJEnemySpawner
             {
                 return false;
             }
-            bool loadedCustodyPhase = loadedCase.Phase == JusticePhase.Captured ||
-                loadedCase.Phase == JusticePhase.Transporting ||
-                loadedCase.Phase == JusticePhase.Incarcerated ||
-                loadedCase.Phase == JusticePhase.Escaping;
-            if (loadedPendingDeathCapture)
+            if (!IsJusticeProfilePendingDeathValid(
+                    loadedCase,
+                    loadedPendingDeathCapture,
+                    loadedPendingDeathCaptureSlot,
+                    loadedPendingDeathCaptureModel))
             {
-                // Je recharge aussi ce latch sans identité : le prochain héros canonique ne sera
-                // jamais adopté implicitement et convertira l'affaire inconnue en mandat.
-                if (!loadedEnabled || !IsLoadedJusticeCaseActive(loadedCase) ||
-                    (!loadedCustodyPhase &&
-                     loadedCase.Phase != JusticePhase.Wanted &&
-                     loadedCase.Phase != JusticePhase.Surrendering &&
-                     loadedCase.Phase != JusticePhase.Fugitive))
-                {
-                    return false;
-                }
-            }
-            else if (loadedPendingDeathCaptureSlot != -1 || loadedPendingDeathCaptureModel != 0)
-            {
+                // Un front de mort sous recherche peut être rechargé avant sa
+                // charge de secours; l'identité canonique reste toutefois requise.
                 return false;
             }
             if (!IsJusticePendingLegalReleaseValid(

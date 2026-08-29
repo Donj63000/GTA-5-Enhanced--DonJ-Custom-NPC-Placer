@@ -873,6 +873,148 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
+    public void RuntimeJustice_PoliceCustodyMaterializesExactlyOneMinimalCaseBeforeCapture()
+    {
+        object script = CreateJusticeHeadlessScript();
+        JusticeCaseState state = GetFieldValue<JusticeCaseState>(script, "_justiceCaseState");
+        state.Enabled = true;
+        SetFieldValue(script, "_justiceEnabled", true);
+        SetFieldValue(script, "_justiceSessionId", "custody-test");
+        SetFieldValue(script, "_justiceMonotonicTimeMs", 5000L);
+
+        Assert.IsTrue((bool)InvokeInstance(
+            script,
+            "EnsureJusticeCaseForPoliceCustody",
+            true,
+            "test de capture"));
+        Assert.AreEqual(1, state.Charges.Count);
+        Assert.AreEqual(JusticeCrimeKind.EvadingPolice, state.Charges[0].Kind);
+        Assert.AreEqual(120, state.SentenceSeconds);
+        Assert.AreEqual(JusticePhase.Wanted, state.Phase);
+        Assert.IsTrue(GetFieldValue<bool>(script, "_justicePursuitActive"));
+
+        Assert.IsTrue((bool)InvokeInstance(
+            script,
+            "EnsureJusticeCaseForPoliceCustody",
+            true,
+            "second passage idempotent"));
+        Assert.AreEqual(1, state.Charges.Count,
+            "Un retry de la même capture ne doit jamais doubler la peine.");
+
+        object fineOnlyScript = CreateJusticeHeadlessScript();
+        JusticeCaseState fineOnlyState = GetFieldValue<JusticeCaseState>(
+            fineOnlyScript,
+            "_justiceCaseState");
+        fineOnlyState.Enabled = true;
+        fineOnlyState.Charges.Add(new JusticeCharge
+        {
+            ChargeId = "charge:fine-only",
+            IncidentId = "incident:fine-only",
+            EpisodeId = "wanted:fine-only",
+            Kind = JusticeCrimeKind.RecklessDischarge,
+            DisplayName = "Tir dangereux sans victime",
+            Points = 6,
+            Fine = 300L,
+            SentenceSeconds = 0
+        });
+        fineOnlyState.RecalculateTotals();
+        SetFieldValue(fineOnlyScript, "_justiceEnabled", true);
+        SetFieldValue(fineOnlyScript, "_justiceSessionId", "custody-fine-only");
+        SetFieldValue(fineOnlyScript, "_justiceMonotonicTimeMs", 6000L);
+
+        Assert.IsTrue((bool)InvokeInstance(
+            fineOnlyScript,
+            "EnsureJusticeCaseForPoliceCustody",
+            true,
+            "capture avec dossier sans détention"));
+        Assert.AreEqual(2, fineOnlyState.Charges.Count,
+            "Un dossier limité à une amende doit recevoir la peine minimale de capture.");
+        Assert.AreEqual(120, fineOnlyState.SentenceSeconds,
+            "Une arrestation réelle ne doit jamais déboucher sur une libération immédiate.");
+        Assert.AreEqual(
+            1,
+            fineOnlyState.Charges.Count(charge => charge.Kind == JusticeCrimeKind.EvadingPolice),
+            "La peine minimale doit rester idempotente même avec un dossier préexistant.");
+
+        object custodialScript = CreateJusticeHeadlessScript();
+        JusticeCaseState custodialState = GetFieldValue<JusticeCaseState>(
+            custodialScript,
+            "_justiceCaseState");
+        custodialState.Enabled = true;
+        custodialState.Charges.Add(new JusticeCharge
+        {
+            ChargeId = "charge:custodial",
+            IncidentId = "incident:custodial",
+            EpisodeId = "wanted:custodial",
+            Kind = JusticeCrimeKind.SimpleAssault,
+            DisplayName = "Agression simple",
+            Points = 18,
+            Fine = 1000L,
+            SentenceSeconds = 90
+        });
+        custodialState.RecalculateTotals();
+        SetFieldValue(custodialScript, "_justiceEnabled", true);
+        SetFieldValue(custodialScript, "_justiceSessionId", "custody-existing");
+        SetFieldValue(custodialScript, "_justiceMonotonicTimeMs", 7000L);
+
+        Assert.IsTrue((bool)InvokeInstance(
+            custodialScript,
+            "EnsureJusticeCaseForPoliceCustody",
+            true,
+            "capture avec peine existante"));
+        Assert.AreEqual(1, custodialState.Charges.Count,
+            "Une peine de détention existante ne doit recevoir aucune charge artificielle.");
+        Assert.AreEqual(90, custodialState.SentenceSeconds);
+
+        string runtime = ReadRuntimeSource();
+        string earlyTick = ExecutableMethodBody(runtime, "UpdateJusticeEarly");
+        AssertOrdered(
+            earlyTick,
+            "bool liveArrestEvidence",
+            "bool policeCustodyEvidence",
+            "bool livePoliceCustodyFront",
+            "EnsureJusticeCaseForPoliceCustody(",
+            "bool policePursuitDeath",
+            "TryResolveJusticeMaskedArrestOnWantedLoss");
+        Assert.IsTrue(
+            Regex.IsMatch(
+                earlyTick,
+                @"HasJusticePoliceCustodyEvidence\(wantedLevel,\s*player,\s*dead\)\s*\|\|\s*liveArrestEvidence",
+                RegexOptions.CultureInvariant),
+            "La preuve de capture policière doit accepter la mise en forme C# sans perdre l'opérateur OU.");
+        StringAssert.Contains(
+            ExecutableMethodBody(runtime, "HasJusticePoliceCustodyEvidence"),
+            "WasJusticePlayerKilledByPoliceSafe(player)");
+    }
+
+    [TestMethod]
+    public void RuntimeJustice_RawPoliceDeathLatchCanPersistBeforeItsFallbackCharge()
+    {
+        JusticeCaseState state = new JusticeCaseState
+        {
+            Enabled = true,
+            Phase = JusticePhase.AtLarge
+        };
+
+        Assert.IsTrue((bool)InvokeStatic(
+            "IsJusticeProfilePendingDeathValid",
+            state,
+            true,
+            -1,
+            0),
+            "Le front de mort doit survivre au redémarrage avant la matérialisation de sa charge minimale.");
+
+        state.Enabled = false;
+        Assert.IsFalse((bool)InvokeStatic(
+            "IsJusticeProfilePendingDeathValid",
+            state,
+            true,
+            -1,
+            0),
+            "Un profil Justice désactivé ne doit jamais adopter un front de mort brut.");
+    }
+
+    [TestMethod]
     public void RuntimeJustice_MaskedArrestUsesRecentTimerBeforeCreatingAWarrant()
     {
         Assert.AreEqual(12000, GetStaticFieldValue<int>("JusticeMaskedArrestProbeMaximumMs"));
@@ -2042,16 +2184,17 @@ public sealed class JusticeRuntimeContractTests
                 Tuple.Create("prison_rassemblement", 30, 30)
             });
 
-        Assert.AreEqual(3000, GetStaticFieldValue<int>("JusticeCustodyEscapeGraceMs"));
+        Assert.AreEqual(6000, GetStaticFieldValue<int>("JusticeCustodyEscapeGraceMs"));
         Assert.AreEqual(1800, GetStaticFieldValue<int>("JusticeCustodyMaximumSentenceSeconds"));
     }
 
     [TestMethod]
-    public void BolingbrokeEscapeVolume_FollowsTheEnclosureAndExcludesOutsideCorners()
+    public void BolingbrokeEscapeVolume_FollowsTheEnclosureAndRequiresAClearExit()
     {
         object prison = GetStaticFieldValue<object>("JusticeBolingbrokeLayout");
-        Array volumes = (Array)GetMemberValue(prison, "AllowedVolumes");
-        Vector3[] insidePerimeter =
+        Array playableVolumes = (Array)GetMemberValue(prison, "AllowedVolumes");
+        Array containmentVolumes = (Array)GetMemberValue(prison, "ContainmentVolumes");
+        Vector3[] insidePlayablePerimeter =
         {
             new Vector3(1510.0f, 2550.0f, 45.0f),
             new Vector3(1805.0f, 2550.0f, 45.0f),
@@ -2059,34 +2202,64 @@ public sealed class JusticeRuntimeContractTests
             new Vector3(1650.0f, 2715.0f, 45.0f)
         };
 
-        foreach (Vector3 position in insidePerimeter)
+        foreach (Vector3 position in insidePlayablePerimeter)
         {
             Assert.IsTrue(
-                volumes.Cast<object>().Any(
+                playableVolumes.Cast<object>().Any(
                     volume => (bool)InvokeObjectInstance(volume, "Contains", position)),
-                "Le périmètre intérieur de Bolingbroke ne doit pas déclencher l'évasion.");
+                "Le périmètre intérieur de Bolingbroke doit rester jouable.");
         }
 
-        Vector3[] outsideCorners =
+        Vector3[] outsidePlayableCorners =
         {
             new Vector3(1505.0f, 2390.0f, 45.0f),
             new Vector3(1805.0f, 2390.0f, 45.0f),
             new Vector3(1505.0f, 2710.0f, 45.0f),
             new Vector3(1805.0f, 2710.0f, 45.0f)
         };
-        foreach (Vector3 position in outsideCorners)
+        foreach (Vector3 position in outsidePlayableCorners)
         {
             Assert.IsFalse(
-                volumes.Cast<object>().Any(
+                playableVolumes.Cast<object>().Any(
                     volume => (bool)InvokeObjectInstance(volume, "Contains", position)),
-                "Un coin situé au-delà des murs ne doit plus prolonger artificiellement la prison.");
+                "Un coin au-delà des murs ne doit pas devenir une zone d'activité artificielle.");
+        }
+
+        Vector3[] insideOuterEnclosure =
+        {
+            new Vector3(1490.0f, 2550.0f, 45.0f),
+            new Vector3(1828.0f, 2550.0f, 45.0f),
+            new Vector3(1650.0f, 2370.0f, 45.0f),
+            new Vector3(1650.0f, 2740.0f, 45.0f)
+        };
+        foreach (Vector3 position in insideOuterEnclosure)
+        {
+            Assert.IsTrue(
+                containmentVolumes.Cast<object>().Any(
+                    volume => (bool)InvokeObjectInstance(volume, "Contains", position)),
+                "Les murs, portes, tours et marges de streaming doivent rester dans l'enceinte de détention.");
+        }
+
+        Vector3[] clearOutsidePositions =
+        {
+            new Vector3(1450.0f, 2550.0f, 45.0f),
+            new Vector3(1850.0f, 2550.0f, 45.0f),
+            new Vector3(1650.0f, 2330.0f, 45.0f),
+            new Vector3(1650.0f, 2770.0f, 45.0f)
+        };
+        foreach (Vector3 position in clearOutsidePositions)
+        {
+            Assert.IsFalse(
+                containmentVolumes.Cast<object>().Any(
+                    volume => (bool)InvokeObjectInstance(volume, "Contains", position)),
+                "L'évasion ne doit être possible qu'après une sortie claire de l'enceinte extérieure.");
         }
 
         Vector3 release = (Vector3)GetMemberValue(prison, "ReleasePosition");
         Assert.IsFalse(
-            volumes.Cast<object>().Any(
+            containmentVolumes.Cast<object>().Any(
                 volume => (bool)InvokeObjectInstance(volume, "Contains", release)),
-            "Le point de libération doit rester hors de l'enceinte.");
+            "Le point de libération légale doit rester hors de l'enceinte.");
     }
 
     [TestMethod]
@@ -3106,6 +3279,24 @@ public sealed class JusticeRuntimeContractTests
             ExecutableMethodBody(custodySource, "JusticeWriteCustodyXml"),
             "waitingForRespawn",
             "WriteJusticeDisciplineIntentXml(writer)");
+
+        string custodyUpdate = ExecutableMethodBody(custodySource, "JusticeUpdateCustody");
+        AssertOrdered(
+            custodyUpdate,
+            "_justiceCustodyWaitingForRespawn = false",
+            "JusticeFlushStateNow()",
+            "_justiceCustodyRespawnTransferPending = true",
+            "CompleteJusticeCustodyTransfer(player, now)");
+
+        string transfer = ExecutableMethodBody(custodySource, "CompleteJusticeCustodyTransfer");
+        AssertOrdered(
+            transfer,
+            "bool maskRespawnOrigin = _justiceCustodyRespawnTransferPending",
+            "BeginJusticeCustodyRespawnTransferMask()",
+            "TeleportPlayerWithFadeSafe",
+            "IsInsideJusticeCustodyLayout(layout, player.Position)",
+            "_justiceCustodyRespawnTransferPending = false",
+            "_justiceCustodyContainmentEstablished = true");
     }
 
     [TestMethod]
@@ -3167,10 +3358,20 @@ public sealed class JusticeRuntimeContractTests
         string escape = ExecutableMethodBody(custodySource, "UpdateJusticeCustodyEscape");
         AssertOrdered(
             escape,
+            "bool insideContainment",
+            "if (!_justiceCustodyContainmentEstablished)",
+            "if (!insideContainment)",
+            "return",
+            "_justiceCustodyContainmentEstablished = true",
+            "if (insideContainment)",
+            "_justiceOutsideCustodySinceAt = 0",
             "_justiceCaseState.Phase = JusticePhase.Escaping",
             "elapsed < JusticeCustodyEscapeGraceMs",
             "return",
             "CompleteJusticeCustodyEscape(player)");
+        StringAssert.Contains(
+            ExecutableMethodBody(custodySource, "IsInsideJusticeCustodyLayout"),
+            "layout.ContainmentVolumes ?? layout.AllowedVolumes");
 
         string discipline = ExecutableMethodBody(custodySource, "CompleteJusticeCustodyDiscipline");
         AssertOrdered(
@@ -4097,10 +4298,12 @@ public sealed class JusticeRuntimeContractTests
     {
         Assert.AreEqual(expectedSite, GetMemberValue(layout, "Site").ToString());
         Array volumes = (Array)GetMemberValue(layout, "AllowedVolumes");
+        Array containmentVolumes = (Array)GetMemberValue(layout, "ContainmentVolumes");
         Array guards = (Array)GetMemberValue(layout, "GuardPositions");
         Array inmates = (Array)GetMemberValue(layout, "InmatePositions");
         Array activities = (Array)GetMemberValue(layout, "Activities");
         Assert.IsTrue(volumes.Length >= 1);
+        Assert.IsTrue(containmentVolumes.Length >= 1);
         Assert.AreEqual(expectedGuards, guards.Length);
         Assert.AreEqual(expectedInmates, inmates.Length);
         Assert.AreEqual(expectedMaximumReduction, GetMemberValue(layout, "MaximumActivityReductionSeconds"));
@@ -4108,8 +4311,15 @@ public sealed class JusticeRuntimeContractTests
 
         Vector3 arrival = (Vector3)GetMemberValue(layout, "ArrivalPosition");
         Vector3 cell = (Vector3)GetMemberValue(layout, "CellPosition");
+        Vector3 release = (Vector3)GetMemberValue(layout, "ReleasePosition");
         Assert.IsTrue(volumes.Cast<object>().Any(volume => (bool)InvokeObjectInstance(volume, "Contains", arrival)));
         Assert.IsTrue(volumes.Cast<object>().Any(volume => (bool)InvokeObjectInstance(volume, "Contains", cell)));
+        Assert.IsTrue(containmentVolumes.Cast<object>().Any(
+            volume => (bool)InvokeObjectInstance(volume, "Contains", arrival)));
+        Assert.IsTrue(containmentVolumes.Cast<object>().Any(
+            volume => (bool)InvokeObjectInstance(volume, "Contains", cell)));
+        Assert.IsFalse(containmentVolumes.Cast<object>().Any(
+            volume => (bool)InvokeObjectInstance(volume, "Contains", release)));
 
         for (int index = 0; index < expectedActivities.Length; index++)
         {
