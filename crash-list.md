@@ -1843,3 +1843,22 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: L'endpoint GitHub Actions dédié a servi à sélectionner et télécharger l'artefact exact. Les résultats PowerShell ont été capturés avant leur mise en forme et les diagnostics DateTime ont été abandonnés au profit des journaux horodatés. Les relances GTA ont cessé; l'état des fenêtres a été rafraîchi jusqu'à l'apparition de l'unique processus du jeu.
 - Vérification: L'artefact exact a été téléchargé, son manifest et son contrat ABI ont été validés, puis ses hashes ont été relus après déploiement. `launcher.log` confirme que le lancement initial a produit `GTA5_Enhanced.exe` six secondes après le rejet du doublon. La session réelle a ensuite chargé DonJ et validé le cycle F10 complet.
 - Résolution: Incidents d'outillage clos; les commandes fautives étaient read-only et le faux échec de lancement n'a interrompu ni le jeu ni la validation.
+
+## 2026-08-29 21:13:46 +02:00 - Joueur signalé immortel pendant la validation en jeu
+- Statut: Ouvert; analyse interrompue à la demande de l'utilisateur, aucun correctif appliqué.
+- Contexte: Session GTA V Enhanced utilisée pour valider le correctif F10 après chargement réussi du mod. Après le cycle ouvrir, fermer et rouvrir du menu, l'utilisateur signale que le personnage ne peut plus mourir.
+- Symptôme: Le joueur paraît immortel en jeu. La nature exacte reste à confirmer entre un drapeau d'invincibilité, une santé anormalement élevée, une régénération ou l'effet d'un autre mod chargé.
+- Sources vérifiées:
+  - `bug-reports\20260829-211336-joueur-immortel-pendant-validation-f10`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.log`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts\DonJEnemySpawnerSaves\_justice_state.xml`;
+  - recherches read-only des mutations d'invincibilité et de santé dans `src\DonJEnemySpawner` et des contrats associés dans `tests\DonJEnemySpawner.Tests`.
+- Extraits utiles:
+  - log DonJ à `21:05:38.900`: `Justice.Transfert - Transfert annulé après timeout; inventaire rendu et dossier conservé sous mandat.`;
+  - log DonJ à `21:14:09`: deux récupérations manuelles des contrôles et de la police;
+  - snapshot Justice relu à `21:14:25`: profil actif hors détention, `playerStateStored="false"` et `storedInvincible="false"`;
+  - le projet contient plusieurs protections temporaires distinctes qui doivent encore être départagées: placement, discipline de détention, téléportation d'intérieur et mode Terminator.
+- Analyse / hypothèse: Les données persistées Justice ne revendiquent plus d'invincibilité au moment de la collecte, mais elles ne prouvent pas la valeur runtime du ped ni l'état d'un autre système. L'analyse a été arrêtée avant attribution certaine de la cause.
+- Action menée: Les logs ont été collectés avec `tools\collect-bug-logs.ps1`; le snapshot live et les chemins de code susceptibles de modifier l'invincibilité ont été inspectés en lecture seule. Aucun fichier source, binaire installé, état de sauvegarde GTA ou réglage en jeu n'a été modifié.
+- Vérification: Aucune suite de tests ni reproduction supplémentaire n'est lancée, conformément à la demande d'arrêt et de publication de l'état actuel sans test.
+- Résolution: Non résolu. L'incident est conservé pour reprise manuelle ultérieure depuis l'état publié sur `main`.
