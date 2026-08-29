@@ -22,6 +22,9 @@
     <RepositoryRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))</RepositoryRoot>
     <PackageGameReadyScript>$(RepositoryRoot)\tools\package-game-ready.ps1</PackageGameReadyScript>
     <DeployGameReadyScript>$(RepositoryRoot)\tools\deploy-game-ready.ps1</DeployGameReadyScript>
+    <NibAbiValidatorProject>$(RepositoryRoot)\tools\NibAbiValidator\DonJ.NibAbiValidator.csproj</NibAbiValidatorProject>
+    <NibAbiValidatorPath>$(RepositoryRoot)\tools\NibAbiValidator\bin\$(Configuration)\DonJ.NibAbiValidator.exe</NibAbiValidatorPath>
+    <NibAbiContractPath>$(RepositoryRoot)\tools\NibAbiValidator\contracts\NIBScriptHookVDotNet2-2.11.6.abi.xml</NibAbiContractPath>
 
     <!-- API v2 cible : NIBScriptHookVDotNet2.dll en priorité, sinon ScriptHookVDotNet2.dll. -->
     <ShvdnApiReferenceName Condition="Exists('$(GtaRoot)\NIBScriptHookVDotNet2.dll')">NIBScriptHookVDotNet2</ShvdnApiReferenceName>
@@ -73,24 +76,39 @@
            Text="Script de packaging introuvable : $(PackageGameReadyScript)" />
     <Error Condition="!Exists('$(DeployGameReadyScript)')"
            Text="Script de deploiement introuvable : $(DeployGameReadyScript)" />
+    <Error Condition="!Exists('$(NibAbiValidatorProject)')"
+           Text="Projet du validateur ABI introuvable : $(NibAbiValidatorProject)" />
+    <Error Condition="!Exists('$(NibAbiContractPath)')"
+           Text="Contrat ABI NIB introuvable : $(NibAbiContractPath)" />
+  </Target>
+
+  <Target Name="BuildNibAbiValidator"
+          DependsOnTargets="ValidateDeployTarget"
+          Condition="'$(Configuration)' == 'Release' and '$(DeployToGta)' == 'true'">
+    <!-- Je restaure puis construis le garde-fou pour garder aussi le build direct autonome. -->
+    <MSBuild Projects="$(NibAbiValidatorProject)"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration)" />
+    <Error Condition="!Exists('$(NibAbiValidatorPath)')"
+           Text="Validateur ABI non produit : $(NibAbiValidatorPath)" />
   </Target>
 
   <Target Name="CreateGtaDeployPackage"
-          DependsOnTargets="ValidateDeployTarget"
+          DependsOnTargets="BuildNibAbiValidator"
           Condition="'$(Configuration)' == 'Release' and '$(DeployToGta)' == 'true'">
     <PropertyGroup>
       <!-- Je normalise les chemins sans séparateur final avant de les citer pour PowerShell. -->
       <GtaDeployBuildDirectory>$([System.IO.Path]::GetFullPath('$(TargetDir).'))</GtaDeployBuildDirectory>
       <GtaDeployPackageDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(IntermediateOutputPath)game-ready'))</GtaDeployPackageDirectory>
     </PropertyGroup>
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(PackageGameReadyScript)&quot; -Configuration &quot;$(Configuration)&quot; -RepositoryRoot &quot;$(RepositoryRoot)&quot; -BuildDirectory &quot;$(GtaDeployBuildDirectory)&quot; -OutputDirectory &quot;$(GtaDeployPackageDirectory)&quot; -DependencyDirectory &quot;$(GtaRoot)&quot; -Force" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(PackageGameReadyScript)&quot; -Configuration &quot;$(Configuration)&quot; -RepositoryRoot &quot;$(RepositoryRoot)&quot; -BuildDirectory &quot;$(GtaDeployBuildDirectory)&quot; -OutputDirectory &quot;$(GtaDeployPackageDirectory)&quot; -DependencyDirectory &quot;$(GtaRoot)&quot; -AbiValidatorPath &quot;$(NibAbiValidatorPath)&quot; -AbiContractPath &quot;$(NibAbiContractPath)&quot; -Force" />
   </Target>
 
   <Target Name="DeployAsEndll"
           AfterTargets="CreateLocalEndll"
           DependsOnTargets="CreateGtaDeployPackage"
           Condition="'$(Configuration)' == 'Release' and '$(DeployToGta)' == 'true'">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(DeployGameReadyScript)&quot; -PackageDirectory &quot;$(GtaDeployPackageDirectory)&quot; -GtaRoot &quot;$(GtaRoot)&quot; -GtaScriptsDir &quot;$(GtaScriptsDir)&quot;" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(DeployGameReadyScript)&quot; -PackageDirectory &quot;$(GtaDeployPackageDirectory)&quot; -GtaRoot &quot;$(GtaRoot)&quot; -GtaScriptsDir &quot;$(GtaScriptsDir)&quot; -AbiValidatorPath &quot;$(NibAbiValidatorPath)&quot; -AbiContractPath &quot;$(NibAbiContractPath)&quot;" />
     <Message Importance="High"
               Text="DonJ Custom NPC Placer deploye vers : $(GtaScriptsDir)\$(AssemblyName).ENdll" />
   </Target>

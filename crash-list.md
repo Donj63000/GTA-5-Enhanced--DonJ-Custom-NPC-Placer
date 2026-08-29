@@ -1767,3 +1767,33 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Le stub porte désormais l'identité `2.11.6.0`. Packaging, suite de sécurité et déploiement inspectent indépendamment la référence NIB/SHVDN, exigent exactement une API de version majeure `2` et publient son identité dans le manifest. Deux tests couvrent l'identité du stub, les métadonnées du binaire et le refus d'un manifest API incompatible.
 - Vérification: Build du stub réussi sans avertissement ni erreur et identité relue `2.11.6.0`; build Release stub réussi sans avertissement ni erreur; `PackagingSafetyTests` réussit `14/14`. Une première exécution ciblée à `13/14` a révélé un double chargement ReflectionOnly limité au test; la lecture a été fusionnée puis la suite ciblée a été relancée avec succès. `tools\run-safety-checks.ps1 -UseStubApi` réussit `479/479` dans `TestResults\safety-20260829-045037` et relit l'API `2.11.6.0`. La build Release contre l'API GTA réelle réussit à zéro avertissement/zéro erreur, son ENdll référence `2.11.6.0`, puis la suite standard réussit `469/469`. Le workflow GitHub `Safety` n° `33230266514` du commit `894459172a32bb678e7d71fe702eb7d7325d1264` réussit et publie un package propre. L'artefact relu référence une unique API `NIBScriptHookVDotNet2 2.11.6.0`; son ENdll de SHA-256 `9AEF6FD659F3B3760E04DACE4C13DEC7EDD984ED6C70E4163B3C748B2A886A1E` est déployé avec son PDB et son manifest pendant que GTA est fermé. Les hashes installés correspondent au manifest; aucun alias obsolète ni fichier de transaction ne subsiste.
 - Résolution: Le binaire incompatible `1.0.0.0` a été remplacé par l'artefact CI compatible v2 et les pipelines refusent désormais cette régression avant publication ou copie. La preuve finale dépend du prochain lancement GTA: le log NIB doit instancier `DonJEnemySpawner` et F10 doit rouvrir le menu.
+
+## 2026-08-29 05:14:14 +02:00 - Assertion documentaire sensible au retour à la ligne Markdown
+- Statut: Corrigé et test ciblé validé.
+- Contexte: Première exécution de `PackagingSafetyTests` après ajout du contrat qui verrouille les instructions d'installation et la publication du package uniquement depuis un push sur `main`.
+- Symptôme: La suite ciblée termine à `14/15`; `InstallationGuides_RequireTheVerifiedMainPackageAndSafeReplacement` cherche la chaîne `` `scriptApi.major` is `2` `` sur une seule ligne alors que le README coupe volontairement la phrase entre les deux lignes Markdown.
+- Sources vérifiées:
+  - `bug-reports\20260829-051355-test-guide-scriptapi-linebreak`;
+  - sortie de `dotnet test tests\DonJEnemySpawner.Tests\DonJEnemySpawner.Tests.csproj -c Release --filter FullyQualifiedName~PackagingSafetyTests`;
+  - `README.md` et `tests\DonJEnemySpawner.Tests\PackagingSafetyTests.cs`.
+- Extraits utiles: `échec : 1, réussite : 14, total : 15`; l'assertion signale uniquement l'absence de la chaîne contiguë alors que les deux fragments et la valeur correcte sont présents dans le guide.
+- Analyse / hypothèse: Défaut limité au test source: la conformité documentaire ne doit pas dépendre de la mise en forme ou d'un retour à la ligne entre les mots.
+- Action menée: L'assertion utilise une expression régulière bornée avec `\s+` entre `` `scriptApi.major` ``, `is` et `` `2` ``; aucun comportement du mod ni fichier GTA n'a été modifié.
+- Vérification: La classe `PackagingSafetyTests` est relancée avec `--no-restore` et réussit `15/15`.
+- Résolution: Contrat documentaire conservé et test rendu robuste aux retours à la ligne Markdown.
+
+## 2026-08-29 20:32:45 +02:00 - Premières passes du contrat ABI complet
+- Statut: Corrigé et validation globale locale réussie.
+- Contexte: Deux premières exécutions de `tools\run-safety-checks.ps1 -UseStubApi` pendant l'alignement du stub et l'enrichissement atomique du contrat ABI NIB.
+- Symptôme: La passe `safety-20260829-202239` termine à `483/487` avec quatre échecs: deux liés aux formes CLR encore inexactes dans le stub et son déploiement simulé, plus deux attentes source/documentaires devenues obsolètes. La passe `safety-20260829-203054` croise ensuite le remplacement concurrent du validateur schema 1 par le schema 2 avant la régénération du XML et termine à `477/490`; les treize échecs packaging portent tous `Version de schema ABI non prise en charge : 1`.
+- Sources vérifiées:
+  - `TestResults\safety-20260829-202239\safety-tests.trx` et `bug-reports\20260829-202508-safety-failure`;
+  - `TestResults\safety-20260829-203054\safety-tests.trx` et `bug-reports\20260829-203245-safety-failure`;
+  - `tools\Stubs\NIBScriptHookVDotNet2\StubApi.cs`;
+  - `tools\NibAbiValidator\AbiContract.cs`, `AbiSignatures.cs`, `AbiValidator.cs` et le contrat XML canonique;
+  - `README.md`, `Mode-pour-jeu-ici\INSTALLATION_SIMPLE.txt` et les tests source concernés.
+- Extraits utiles: Première passe: `échec : 4, réussite : 483, total : 487`; le validateur détaillait notamment `GTA.IHandleable` absent et plusieurs écarts `virtual/final/newslot`. Seconde passe: `échec : 13, réussite : 477, total : 490`; chaque échec packaging provenait uniquement du court intervalle schema-code `2` / contrat-XML `1`.
+- Analyse / hypothèse: La première passe a correctement révélé que l'égalité de version d'assembly ne suffit pas: héritages, interfaces et attributs CLR devaient aussi correspondre. La seconde panne était limitée à l'orchestration de développement, un exécutable reconstruit pendant une suite déjà lancée ayant lu l'ancien XML; aucun binaire GTA ni sauvegarde joueur n'a été touché.
+- Action menée: Le stub a été aligné sur les types, héritages, interfaces, accesseurs, visibilités et types sous-jacents d'enums réellement consommés. Le contrat schema 2 capture aussi ces invariants; les tests source ont été adaptés au dispatcher de démarrage et les guides conservent leurs exigences exactes. Les builds et tests ont ensuite été relancés sans écriture concurrente.
+- Vérification: `TestResults\safety-20260829-203725` réussit `493/493`, build stub et solution à zéro avertissement/zéro erreur, package local conforme et refus attendu de `sourceDirty=true`. La build Release réelle réussit à zéro avertissement/zéro erreur; `dotnet test GTA5modDEV.sln -c Release` réussit `479/479`. Le validateur relit enfin 32 références de types et 189 références de membres contre la DLL NIB 2.11.6 live avec zéro incompatibilité.
+- Résolution: Les écarts détectés et le défaut transitoire de schema sont clos; la chaîne locale stable est entièrement verte.

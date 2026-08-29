@@ -78,7 +78,7 @@ DirectStorageFix.asi
 NIBMods.net.ENdll
 IronmanV3EG.ENdll
 Superman V2.ENdll
-DonJEnemySpawner.ENdll
+DonJCustomNpcPlacer.ENdll
 
 Logs utiles :
 
@@ -344,8 +344,9 @@ Une build `Release` ordinaire ne modifie jamais GTA. Le déploiement n'est exéc
 `/p:DeployToGta=true`
 
 Le chemin explicite valide d'abord `GTA5_Enhanced.exe`, fabrique un package avec
-`tools\package-game-ready.ps1`, vérifie ses hashes, stage les fichiers sur le volume
-de destination, puis remplace transactionnellement l'ENdll, le PDB et le manifest
+`tools\package-game-ready.ps1`, vérifie ses hashes et toutes ses références ABI
+avec `tools\NibAbiValidator`, puis stage les fichiers sur le volume de destination
+et remplace transactionnellement l'ENdll, le PDB et le manifest
 avec `tools\deploy-game-ready.ps1`. Dans `Scripts`, le manifest prend le nom stable
 `DonJCustomNpcPlacer.manifest.json`; il alimente le diagnostic runtime de la build.
 Le nouveau triplet est publié puis relu avant que les anciens alias soient déplacés
@@ -355,6 +356,7 @@ déjà déplacés, puis déclenche le rollback inverse du triplet. Les backups n
 supprimés qu'après validation globale. Après un remplacement réussi seulement, le
 déploiement retire les anciens noms pour éviter un double chargement :
 
+DonJCustomNpcPlacer.dll
 DonJEnemySpawner.dll
 DonJEnemySpawner.ENdll
 DonJEnemySpawner.pdb
@@ -366,8 +368,9 @@ Le package canonique contient exactement :
 - `DonJCustomNpcPlacer.ENdll` ;
 - `DonJCustomNpcPlacer.pdb` ;
 - `INSTALLATION_SIMPLE.txt` ;
-- `manifest.json` avec commit, identité exacte de la référence API v2, versions,
-  schéma Justice, tailles et SHA-256.
+- `manifest.json` de version 2 avec commit, identité exacte de la référence API
+  v2, identifiant/version/SHA-256 du contrat ABI, versions, schéma Justice,
+  tailles et SHA-256.
 
 Par défaut, `tools\package-game-ready.ps1` refuse une source Git modifiée. Le
 commutateur `-AllowDirtySource` sert uniquement à produire localement un artefact
@@ -376,15 +379,22 @@ publiable et `tools\deploy-game-ready.ps1` le refuse. Un manifest déployable do
 porter `sourceDirty=false` et une version de schéma Justice exactement égale à 2.
 Le package, la suite de sécurité et le déploiement relisent aussi les références
 de l'assembly : exactement une référence `NIBScriptHookVDotNet2` ou
-`ScriptHookVDotNet2` doit exister et sa version majeure doit être `2`. Le stub CI
-porte l'identité `2.11.6.0` de l'API NIB live afin que son binaire reste chargeable
-par le dictionnaire de versions du runtime.
+`ScriptHookVDotNet2` doit exister et sa version majeure doit être `2`.
+`DonJ.NibAbiValidator` compare ensuite les types et membres IL du livrable au
+contrat canonique schema 2 capturé depuis NIB 2.11.6 : nature valeur/référence,
+héritages, interfaces, types sous-jacents des enums, visibilité CLR, paramètres,
+retours et attributs de dispatch des membres. Le déploiement recommence cette
+résolution contre la DLL réellement installée sous `GtaRoot` avant toute écriture
+dans `Scripts`. Le stub CI porte l'identité et les signatures utilisées de l'API
+live; une simple égalité de version ne suffit jamais à rendre un package publiable.
 
 `tools\run-safety-checks.ps1` vérifie la chaîne de hashes build → package →
 installation temporaire pour une source propre. Sur une source locale modifiée,
 il génère le package non publiable puis prouve que le déploiement le rejette. La CI
-reste stricte et ne publie le package que si toute la suite réussit sur une source
-propre.
+reste stricte et ne publie le package installable que si toute la suite réussit sur
+une source propre lors d'un événement `push` visant la branche `main`. Les pull
+requests et les autres branches restent testées, mais ne publient pas d'artefact à
+installer.
 
 ## 5. Architecture runtime
 
@@ -399,6 +409,11 @@ Le runtime repose sur :
 Tick += OnTick;
 KeyDown += OnKeyDown;
 Aborted += OnAborted;
+
+Le constructeur crée d'abord l'état essentiel du menu et abonne ces événements.
+Les initialisations persistante, Justice et Relations passent ensuite par des
+`RuntimeStartupStage` isolés : une panne native secondaire est journalisée et peut
+désactiver son seul domaine, mais ne doit plus empêcher l'instance de recevoir F10.
 
 OnTick est le cœur vivant du mod. Il doit rester léger. Toute logique coûteuse doit être cadencée. Les domaines sont isolés par `RuntimeTickStage` : une exception est journalisée avec un cooldown de dix secondes et n'empêche pas les étapes indépendantes suivantes. Si `JusticeEarly` échoue, `JusticeLate` ne progresse pas et seule `UpdateJusticeFailSafeMaintenance` peut restaurer les contrôles, la police, un inventaire différé et persister un état déjà préparé.
 
@@ -1743,7 +1758,7 @@ Avant de livrer un patch :
 - Pas de refactor hors sujet.
 - Pas de fichier généré modifié inutilement.
 - Pas de binaire modifié sauf demande explicite.
-- Pas de vieux DonJEnemySpawner.ENdll réintroduit.
+- Aucun alias obsolète `DonJCustomNpcPlacer.dll` ou `DonJEnemySpawner.*` réintroduit.
 - Le build produit DonJCustomNpcPlacer.ENdll.
 - Les tests passent ou l'échec est expliqué.
 - Les limites sont honnêtement indiquées.

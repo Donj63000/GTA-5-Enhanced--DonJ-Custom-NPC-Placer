@@ -1,0 +1,2 @@
+# Je garde les octets du contrat ABI canoniques sur tous les postes et runners.
+tools/NibAbiValidator/contracts/*.abi.xml text eol=lf

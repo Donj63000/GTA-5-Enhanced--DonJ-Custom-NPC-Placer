@@ -27,10 +27,12 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="MSTest.TestAdapter" Version="3.6.4" />
     <PackageReference Include="MSTest.TestFramework" Version="3.6.4" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\\..\\src\\DonJEnemySpawner\\DonJEnemySpawner.csproj" />
+    <ProjectReference Include="..\\..\\tools\\NibAbiValidator\\DonJ.NibAbiValidator.csproj" />
   </ItemGroup>
 
   <ItemGroup>

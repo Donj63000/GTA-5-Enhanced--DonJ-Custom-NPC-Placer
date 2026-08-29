@@ -6,6 +6,27 @@ using GTA.Native;
 
 namespace GTA
 {
+    public interface IHandleable
+    {
+        int Handle { get; }
+        bool Exists();
+    }
+
+    public interface ISpatial
+    {
+        Math.Vector3 Position { get; set; }
+        Math.Vector3 Rotation { get; set; }
+    }
+
+    public interface UIElement
+    {
+        bool Enabled { get; set; }
+        Point Position { get; set; }
+        Color Color { get; set; }
+        void Draw();
+        void Draw(Size offset);
+    }
+
     public sealed class StubNativeInvocation
     {
         public StubNativeInvocation(ulong hash, object[] arguments)
@@ -85,9 +106,13 @@ namespace GTA
         }
     }
 
-    public class Script
+    public abstract class Script : IDisposable
     {
-        public int Interval { get; set; }
+        public Script()
+        {
+        }
+
+        protected int Interval { get; set; }
         public event EventHandler Tick;
         public event KeyEventHandler KeyDown;
         public event KeyEventHandler KeyUp;
@@ -97,29 +122,41 @@ namespace GTA
         protected void RaiseKeyDown(KeyEventArgs e) => KeyDown?.Invoke(this, e);
         protected void RaiseKeyUp(KeyEventArgs e) => KeyUp?.Invoke(this, e);
         protected void RaiseAborted() => Aborted?.Invoke(this, EventArgs.Empty);
+        public void Dispose() { }
         public static void Wait(int ms) { }
     }
 
-    public unsafe class Entity
+    public abstract unsafe class Entity : IHandleable, ISpatial, IEquatable<Entity>
     {
-        public int Handle { get; set; } = 1;
+        public virtual int Handle { get; set; } = 1;
         public int* MemoryAddress { get; set; }
-        public Math.Vector3 Position { get; set; }
-        public Math.Vector3 Rotation { get; set; }
+        public virtual Math.Vector3 Position { get; set; }
+        public virtual Math.Vector3 Rotation { get; set; }
         public Math.Vector3 ForwardVector { get; set; } = new Math.Vector3(0.0f, 1.0f, 0.0f);
         public float Heading { get; set; }
-        public float Speed { get; set; }
+        public int Health { get; set; } = 100;
+        public virtual int MaxHealth { get; set; } = 100;
+        public Model Model { get; set; }
         public bool IsDead { get; set; }
         public bool IsPersistent { get; set; }
         public bool FreezePosition { get; set; }
         public bool IsInvincible { get; set; }
         public int Alpha { get; set; } = 255;
 
+        protected Entity()
+        {
+        }
+
+        public Entity(int handle)
+        {
+            Handle = handle;
+        }
+
         public static bool Exists(Entity entity) => entity != null && entity.Handle != 0;
-        public virtual bool Exists() => Exists(this);
-        public virtual void Delete() => Handle = 0;
-        public virtual void MarkAsNoLongerNeeded() { }
-        public virtual Blip AddBlip() => new Blip();
+        public bool Exists() => Exists(this);
+        public void Delete() => Handle = 0;
+        public void MarkAsNoLongerNeeded() { }
+        public Blip AddBlip() => new Blip();
         public bool IsTouching(Entity entity) => false;
         public bool HasBeenDamagedBy(Entity entity)
         {
@@ -128,12 +165,33 @@ namespace GTA
         }
         public void ClearLastWeaponDamage() { }
         public void SetNoCollision(Entity entity, bool toggle) { }
+
+        public static bool operator ==(Entity left, Entity right) => ReferenceEquals(left, right);
+        public static bool operator !=(Entity left, Entity right) => !ReferenceEquals(left, right);
+        public bool Equals(Entity other) => ReferenceEquals(this, other);
+        public override bool Equals(object obj) => ReferenceEquals(this, obj);
+        public override int GetHashCode() => Handle;
     }
 
-    public class Ped : Entity
+    public sealed class Ped : Entity
     {
-        public int Health { get; set; } = 100;
-        public int MaxHealth { get; set; } = 100;
+        public Ped()
+        {
+            Weapons = new WeaponCollection(this);
+        }
+
+        public Ped(int handle)
+            : base(handle)
+        {
+            Weapons = new WeaponCollection(this);
+        }
+
+        public override int MaxHealth
+        {
+            get => base.MaxHealth;
+            set => base.MaxHealth = value;
+        }
+
         public int Armor { get; set; }
         public int Accuracy { get; set; }
         public int ShootRate { get; set; }
@@ -152,12 +210,11 @@ namespace GTA
         public bool IsJacking { get; set; }
         public bool IsBeingJacked { get; set; }
         public bool IsCuffed { get; set; }
-        public Model Model { get; set; }
         public Vehicle CurrentVehicle { get; set; }
         public Vehicle LastVehicle { get; set; }
         public Vehicle VehicleTryingToEnter { get; set; }
         public VehicleSeat SeatIndex { get; set; } = VehicleSeat.Driver;
-        public WeaponCollection Weapons { get; } = new WeaponCollection();
+        public WeaponCollection Weapons { get; }
         public TaskInvoker Tasks { get; } = new TaskInvoker();
 
         public bool IsInVehicle() => CurrentVehicle != null;
@@ -177,11 +234,21 @@ namespace GTA
         public Relationship GetRelationshipWithPed(Ped ped) => Relationship.Neutral;
     }
 
-    public class Vehicle : Entity
+    public sealed class Vehicle : Entity
     {
+        public Vehicle()
+        {
+        }
+
+        public Vehicle(int handle)
+            : base(handle)
+        {
+        }
+
         public float BodyHealth { get; set; } = 1000.0f;
         public float EngineHealth { get; set; } = 1000.0f;
         public float PetrolTankHealth { get; set; } = 1000.0f;
+        public float Speed { get; set; }
         public Ped Driver { get; set; }
         public bool IsDriveable { get; set; } = true;
 
@@ -190,12 +257,21 @@ namespace GTA
         public Ped GetPedOnSeat(VehicleSeat seat) => null;
     }
 
-    public class Prop : Entity
+    public sealed class Prop : Entity
     {
+        public Prop()
+        {
+        }
+
+        public Prop(int handle)
+            : base(handle)
+        {
+        }
     }
 
-    public class Blip
+    public sealed class Blip : IHandleable, IEquatable<Blip>
     {
+        public int Handle { get; set; } = 1;
         public float Scale { get; set; }
         public bool IsShortRange { get; set; }
         public BlipSprite Sprite { get; set; }
@@ -206,20 +282,31 @@ namespace GTA
 
         public bool Exists() => true;
         public void Remove() { }
+
+        public static bool operator ==(Blip left, Blip right) => ReferenceEquals(left, right);
+        public static bool operator !=(Blip left, Blip right) => !ReferenceEquals(left, right);
+        public bool Equals(Blip other) => ReferenceEquals(this, other);
+        public override bool Equals(object obj) => ReferenceEquals(this, obj);
+        public override int GetHashCode() => base.GetHashCode();
     }
 
-    public class Camera
+    public sealed class Camera : IHandleable, ISpatial, IEquatable<Camera>
     {
+        public int Handle { get; set; } = 1;
         public Math.Vector3 Position { get; set; }
         public Math.Vector3 Rotation { get; set; }
         public Math.Vector3 Direction { get; set; } = new Math.Vector3(0.0f, 1.0f, 0.0f);
         public float FarClip { get; set; }
 
         public static bool Exists(Camera camera) => camera != null;
+        public bool Exists() => Exists(this);
         public void Destroy() { }
+        public bool Equals(Camera other) => ReferenceEquals(this, other);
+        public override bool Equals(object obj) => ReferenceEquals(this, obj);
+        public override int GetHashCode() => Handle;
     }
 
-    public struct Model
+    public struct Model : IEquatable<Model>
     {
         private readonly int _hash;
         private readonly string _name;
@@ -245,12 +332,21 @@ namespace GTA
 
         public bool Request(int timeout) => true;
         public void MarkAsNoLongerNeeded() { }
+        public bool Equals(Model other) => _hash == other._hash;
+        public override bool Equals(object obj) => obj is Model && Equals((Model)obj);
+        public override int GetHashCode() => _hash;
         public override string ToString() => _name ?? _hash.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     public sealed class WeaponCollection
     {
+        private readonly Ped _owner;
         private readonly HashSet<int> _weapons = new HashSet<int>();
+
+        public WeaponCollection(Ped owner)
+        {
+            _owner = owner;
+        }
 
         public int RemoveAllCount { get; private set; }
         public WeaponHash SelectedWeapon { get; private set; } = WeaponHash.Unarmed;
@@ -262,29 +358,57 @@ namespace GTA
             SelectedWeapon = WeaponHash.Unarmed;
         }
 
-        public void Give(WeaponHash weapon, int ammo, bool equipNow, bool isAmmoLoaded)
+        public Weapon Give(WeaponHash weapon, int ammo, bool equipNow, bool isAmmoLoaded)
         {
             _weapons.Add((int)weapon);
             if (equipNow)
             {
                 SelectedWeapon = weapon;
             }
+
+            return new Weapon(_owner, weapon)
+            {
+                Ammo = ammo
+            };
         }
 
-        public void Select(WeaponHash weapon)
+        public bool Select(WeaponHash weapon)
         {
             SelectedWeapon = weapon;
+            return true;
         }
 
-        public void Select(WeaponHash weapon, bool equipNow)
+        public bool Select(WeaponHash weapon, bool equipNow)
         {
             if (equipNow)
             {
                 SelectedWeapon = weapon;
             }
+
+            return true;
         }
 
         public bool HasWeapon(WeaponHash weapon) => _weapons.Contains((int)weapon);
+    }
+
+    public sealed class Weapon
+    {
+        private readonly Ped _owner;
+
+        public Weapon()
+        {
+        }
+
+        public Weapon(Ped owner, WeaponHash hash)
+        {
+            _owner = owner;
+            Hash = hash;
+        }
+
+        public int Ammo { get; set; }
+        public int AmmoInClip { get; set; }
+        public WeaponHash Hash { get; set; }
+        public bool IsPresent => _owner != null && _owner.Weapons.HasWeapon(Hash);
     }
 
     public sealed class TaskInvoker
@@ -301,7 +425,7 @@ namespace GTA
         public void WanderAround() { }
     }
 
-    public sealed class Player
+    public sealed class Player : IHandleable, IEquatable<Player>
     {
         public Ped Character { get; set; } = new Ped();
         public int Handle { get; set; } = 1;
@@ -311,11 +435,16 @@ namespace GTA
         public bool CanControlCharacter { get; set; } = true;
         public bool IsAiming { get; set; }
         public bool IsTargettingAnything { get; set; }
+        public bool Exists() => Handle != 0;
         public Entity GetTargetedEntity()
         {
             Func<Player, Entity> handler = StubRuntime.TargetedEntityHandler;
             return handler == null ? null : handler(this);
         }
+
+        public bool Equals(Player other) => ReferenceEquals(this, other);
+        public override bool Equals(object obj) => ReferenceEquals(this, obj);
+        public override int GetHashCode() => Handle;
     }
 
     public static class Game
@@ -357,14 +486,27 @@ namespace GTA
         public static void DrawMarker(MarkerType type, Math.Vector3 position, Math.Vector3 direction, Math.Vector3 rotation, Math.Vector3 scale, Color color) { }
     }
 
-    public sealed class RaycastResult
+    public struct RaycastResult
     {
-        public bool DitHitAnything { get; set; }
-        public Math.Vector3 HitCoords { get; set; }
-        public Math.Vector3 SurfaceNormal { get; set; } = new Math.Vector3(0.0f, 0.0f, 1.0f);
+        public RaycastResult(int result)
+        {
+            Result = result;
+            DitHitAnything = false;
+            DitHitEntity = false;
+            HitCoords = Math.Vector3.Zero;
+            HitEntity = null;
+            SurfaceNormal = new Math.Vector3(0.0f, 0.0f, 1.0f);
+        }
+
+        public int Result { get; }
+        public bool DitHitAnything { get; }
+        public bool DitHitEntity { get; }
+        public Math.Vector3 HitCoords { get; }
+        public Entity HitEntity { get; }
+        public Math.Vector3 SurfaceNormal { get; }
     }
 
-    public sealed class UIRectangle
+    public class UIRectangle : UIElement
     {
         public UIRectangle(Point position, Size size, Color color)
         {
@@ -373,15 +515,16 @@ namespace GTA
             Color = color;
         }
 
-        public Point Position { get; set; }
+        public virtual Point Position { get; set; }
         public Size Size { get; set; }
-        public Color Color { get; set; }
-        public bool Enabled { get; set; } = true;
+        public virtual Color Color { get; set; }
+        public virtual bool Enabled { get; set; } = true;
 
-        public void Draw() { }
+        public virtual void Draw() { }
+        public virtual void Draw(Size offset) { }
     }
 
-    public sealed class UIText
+    public class UIText : UIElement
     {
         public UIText(string caption, Point position, float scale, Color color, Font font, bool centered, bool shadow, bool outline)
         {
@@ -396,16 +539,17 @@ namespace GTA
         }
 
         public string Caption { get; set; }
-        public Point Position { get; set; }
+        public virtual Point Position { get; set; }
         public float Scale { get; set; }
-        public Color Color { get; set; }
+        public virtual Color Color { get; set; }
         public Font Font { get; set; }
         public bool Centered { get; set; }
         public bool Shadow { get; set; }
         public bool Outline { get; set; }
-        public bool Enabled { get; set; } = true;
+        public virtual bool Enabled { get; set; } = true;
 
-        public void Draw() { }
+        public virtual void Draw() { }
+        public virtual void Draw(Size offset) { }
     }
 
     public enum Control
@@ -473,7 +617,7 @@ namespace GTA
 
 namespace GTA.Math
 {
-    public struct Vector3
+    public struct Vector3 : IEquatable<Vector3>
     {
         public float X;
         public float Y;
@@ -496,57 +640,98 @@ namespace GTA.Math
         public static Vector3 operator *(Vector3 vector, float scale) => new Vector3(vector.X * scale, vector.Y * scale, vector.Z * scale);
         public static Vector3 operator *(float scale, Vector3 vector) => vector * scale;
         public static Vector3 operator /(Vector3 vector, float scale) => new Vector3(vector.X / scale, vector.Y / scale, vector.Z / scale);
+        public static bool operator ==(Vector3 left, Vector3 right) => left.Equals(right);
+        public static bool operator !=(Vector3 left, Vector3 right) => !left.Equals(right);
+        public bool Equals(Vector3 other) => X.Equals(other.X) && Y.Equals(other.Y) && Z.Equals(other.Z);
+        public override bool Equals(object obj) => obj is Vector3 && Equals((Vector3)obj);
+        public override int GetHashCode() => X.GetHashCode() ^ Y.GetHashCode() ^ Z.GetHashCode();
     }
 }
 
 namespace GTA.Native
 {
-    public sealed class InputArgument
+    public unsafe class InputArgument
     {
         public InputArgument(ulong value)
             : this((object)value)
         {
         }
 
-        private InputArgument(object value)
+        public InputArgument(object value)
         {
             Value = value;
         }
 
+        public InputArgument(bool value) : this((object)value) { }
+        public InputArgument(int value) : this((object)value) { }
+        public InputArgument(uint value) : this((object)value) { }
+        public InputArgument(float value) : this((object)value) { }
+        public InputArgument(double value) : this((object)value) { }
+        public InputArgument(string value) : this((object)value) { }
+        public InputArgument(Model value) : this((object)value) { }
+        public InputArgument(Blip value) : this((object)value) { }
+        public InputArgument(Camera value) : this((object)value) { }
+        public InputArgument(Entity value) : this((object)value) { }
+        public InputArgument(Ped value) : this((object)value) { }
+        public InputArgument(Player value) : this((object)value) { }
+        public InputArgument(Prop value) : this((object)value) { }
+        public InputArgument(Vehicle value) : this((object)value) { }
+
         internal object Value { get; private set; }
 
+        public static implicit operator InputArgument(byte value) => new InputArgument((int)value);
+        public static implicit operator InputArgument(sbyte value) => new InputArgument((int)value);
+        public static implicit operator InputArgument(short value) => new InputArgument((int)value);
+        public static implicit operator InputArgument(ushort value) => new InputArgument((uint)value);
         public static implicit operator InputArgument(int value) => new InputArgument(value);
+        public static implicit operator InputArgument(uint value) => new InputArgument(value);
+        public static implicit operator InputArgument(float value) => new InputArgument(value);
+        public static implicit operator InputArgument(double value) => new InputArgument(value);
+        public static implicit operator InputArgument(string value) => new InputArgument(value);
         public static implicit operator InputArgument(bool value) => new InputArgument(value);
+        public static implicit operator InputArgument(Model value) => new InputArgument(value);
+        public static implicit operator InputArgument(Blip value) => new InputArgument(value);
+        public static implicit operator InputArgument(Camera value) => new InputArgument(value);
+        public static implicit operator InputArgument(Entity value) => new InputArgument(value);
+        public static implicit operator InputArgument(Ped value) => new InputArgument(value);
+        public static implicit operator InputArgument(Player value) => new InputArgument(value);
+        public static implicit operator InputArgument(Prop value) => new InputArgument(value);
+        public static implicit operator InputArgument(Vehicle value) => new InputArgument(value);
+        public static implicit operator InputArgument(bool* value) => new InputArgument(unchecked((ulong)value));
+        public static implicit operator InputArgument(int* value) => new InputArgument(unchecked((ulong)value));
+        public static implicit operator InputArgument(uint* value) => new InputArgument(unchecked((ulong)value));
+        public static implicit operator InputArgument(float* value) => new InputArgument(unchecked((ulong)value));
+        public static implicit operator InputArgument(sbyte* value) => new InputArgument(unchecked((ulong)value));
     }
 
-    public enum WeaponHash
+    public enum WeaponHash : uint
     {
-        Unarmed = unchecked((int)0xA2719263),
-        Knife = unchecked((int)0x99B507EA),
-        Pistol = unchecked((int)0x1B06D571),
-        MicroSMG = unchecked((int)0x13532244),
-        SMG = unchecked((int)0x2BE6766B),
-        MachinePistol = unchecked((int)0xDB1AA450),
-        CarbineRifle = unchecked((int)0x83BF0278),
-        ServiceCarbine = unchecked((int)0xD1D5F52B)
+        Unarmed = 0xA2719263u,
+        Knife = 0x99B507EAu,
+        Pistol = 0x1B06D571u,
+        MicroSMG = 0x13532244u,
+        SMG = 0x2BE6766Bu,
+        MachinePistol = 0xDB1AA450u,
+        CarbineRifle = 0x83BF0278u,
+        ServiceCarbine = 0xD1D5F52Bu
     }
 
-    public enum VehicleHash
+    public enum VehicleHash : uint
     {
-        Adder = unchecked((int)0xB779A091),
-        Baller6 = unchecked((int)0x27B4E6B0)
+        Adder = 0xB779A091u,
+        Baller6 = 0x27B4E6B0u
     }
 
-    public enum PedHash
+    public enum PedHash : uint
     {
-        Swat01SMY = unchecked((int)0x8D8F1B10),
-        Cop01SMY = unchecked((int)0x5E3DA4A4),
-        Sheriff01SMY = unchecked((int)0xB144F9B9),
-        Marine01SMY = unchecked((int)0xF2DAA2ED),
-        BallaEast01GMY = unchecked((int)0xF42EE883),
-        Business01AMM = unchecked((int)0x7E6A64B7),
-        Business01AFY = unchecked((int)0x2799EFD8),
-        Michael = unchecked((int)0x0D7114C9)
+        Swat01SMY = 0x8D8F1B10u,
+        Cop01SMY = 0x5E3DA4A4u,
+        Sheriff01SMY = 0xB144F9B9u,
+        Marine01SMY = 0xF2DAA2EDu,
+        BallaEast01GMY = 0xF42EE883u,
+        Business01AMM = 0x7E6A64B7u,
+        Business01AFY = 0x2799EFD8u,
+        Michael = 0x0D7114C9u
     }
 
     public enum WeaponComponentHash
@@ -688,11 +873,36 @@ namespace GTA.Native
         TOGGLE_VEHICLE_MOD = 0x2A1F4F37F95BAD08
     }
 
-    public sealed class OutputArgument
+    public class OutputArgument : InputArgument, IDisposable
     {
         private object _value;
 
-        public void SetResult<T>(T value)
+        public OutputArgument()
+            : base((object)null)
+        {
+        }
+
+        public OutputArgument(object value) : base(value) { }
+        public OutputArgument(bool value) : base(value) { }
+        public OutputArgument(byte value) : base((int)value) { }
+        public OutputArgument(sbyte value) : base((int)value) { }
+        public OutputArgument(short value) : base((int)value) { }
+        public OutputArgument(ushort value) : base((uint)value) { }
+        public OutputArgument(int value) : base(value) { }
+        public OutputArgument(uint value) : base(value) { }
+        public OutputArgument(float value) : base(value) { }
+        public OutputArgument(double value) : base(value) { }
+        public OutputArgument(string value) : base(value) { }
+        public OutputArgument(Model value) : base(value) { }
+        public OutputArgument(Blip value) : base(value) { }
+        public OutputArgument(Camera value) : base(value) { }
+        public OutputArgument(Entity value) : base(value) { }
+        public OutputArgument(Ped value) : base(value) { }
+        public OutputArgument(Player value) : base(value) { }
+        public OutputArgument(Prop value) : base(value) { }
+        public OutputArgument(Vehicle value) : base(value) { }
+
+        internal void SetResult<T>(T value)
         {
             _value = value;
         }
@@ -717,24 +927,56 @@ namespace GTA.Native
 
             return (T)Convert.ChangeType(_value, targetType);
         }
+
+        public void Dispose() { }
     }
 
     public static class Function
     {
-        public static T Call<T>(Hash hash, params object[] arguments) =>
+        public static T Call<T>(Hash hash) => Invoke<T>(hash, new InputArgument[0]);
+        public static T Call<T>(Hash hash, InputArgument arg0) => Invoke<T>(hash, new[] { arg0 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1) => Invoke<T>(hash, new[] { arg0, arg1 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2) => Invoke<T>(hash, new[] { arg0, arg1, arg2 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11, InputArgument arg12) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11, InputArgument arg12, InputArgument arg13) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11, InputArgument arg12, InputArgument arg13, InputArgument arg14) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14 });
+        public static T Call<T>(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11, InputArgument arg12, InputArgument arg13, InputArgument arg14, InputArgument arg15) => Invoke<T>(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15 });
+        public static T Call<T>(Hash hash, params InputArgument[] arguments) => Invoke<T>(hash, arguments);
+
+        public static void Call(Hash hash) => Invoke(hash, new InputArgument[0]);
+        public static void Call(Hash hash, InputArgument arg0) => Invoke(hash, new[] { arg0 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1) => Invoke(hash, new[] { arg0, arg1 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2) => Invoke(hash, new[] { arg0, arg1, arg2 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3) => Invoke(hash, new[] { arg0, arg1, arg2, arg3 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11, InputArgument arg12) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11, InputArgument arg12, InputArgument arg13) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11, InputArgument arg12, InputArgument arg13, InputArgument arg14) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14 });
+        public static void Call(Hash hash, InputArgument arg0, InputArgument arg1, InputArgument arg2, InputArgument arg3, InputArgument arg4, InputArgument arg5, InputArgument arg6, InputArgument arg7, InputArgument arg8, InputArgument arg9, InputArgument arg10, InputArgument arg11, InputArgument arg12, InputArgument arg13, InputArgument arg14, InputArgument arg15) => Invoke(hash, new[] { arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15 });
+        public static void Call(Hash hash, params InputArgument[] arguments) => Invoke(hash, arguments);
+
+        private static T Invoke<T>(Hash hash, InputArgument[] arguments) =>
             ConvertResult<T>(GTA.StubRuntime.InvokeNative((ulong)hash, arguments));
 
-        public static void Call(Hash hash, params object[] arguments)
+        private static void Invoke(Hash hash, InputArgument[] arguments)
         {
             GTA.StubRuntime.InvokeNative((ulong)hash, arguments);
-        }
-
-        public static T Call<T>(ulong hash, params object[] arguments) =>
-            ConvertResult<T>(GTA.StubRuntime.InvokeNative(hash, arguments));
-
-        public static void Call(ulong hash, params object[] arguments)
-        {
-            GTA.StubRuntime.InvokeNative(hash, arguments);
         }
 
         private static T ConvertResult<T>(object value)

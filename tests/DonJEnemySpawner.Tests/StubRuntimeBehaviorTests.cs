@@ -1,6 +1,7 @@
 #if DONJ_STUB_API
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
@@ -37,14 +38,144 @@ public class StubRuntimeBehaviorTests
         {
             Assert.AreEqual(0x1234UL, hash);
             Assert.AreEqual(2, arguments.Length);
+            Assert.AreEqual(7, ReadInputArgumentValue(arguments[0]));
+            Assert.AreEqual(false, ReadInputArgumentValue(arguments[1]));
             return true;
         };
 
-        bool result = Function.Call<bool>(0x1234UL, 7, false);
+        bool result = Function.Call<bool>((Hash)0x1234UL, 7, false);
 
         Assert.IsTrue(result);
         Assert.AreEqual(1, StubRuntime.NativeCalls.Count);
         Assert.AreEqual(0x1234UL, StubRuntime.NativeCalls[0].Hash);
+    }
+
+    [TestMethod]
+    public void StubApi_ExposeUniquementLesSignaturesNib2116Consommees()
+    {
+        MethodInfo[] calls = typeof(Function).GetMethods(
+                BindingFlags.Public | BindingFlags.Static)
+            .Where(method => method.Name == "Call")
+            .ToArray();
+
+        Assert.AreEqual(36, calls.Length, "NIB v2.11.6 expose 18 surcharges génériques et 18 void.");
+        Assert.IsFalse(
+            calls.Any(method => method.GetParameters().Any(parameter =>
+                parameter.ParameterType == typeof(object[]) ||
+                parameter.ParameterType == typeof(ulong))),
+            "Le stub ne doit jamais permettre une référence Function.Call absente de NIB.");
+        Assert.AreEqual(
+            2,
+            calls.Count(method =>
+            {
+                ParameterInfo[] parameters = method.GetParameters();
+                return parameters.Length == 2 &&
+                       parameters[0].ParameterType == typeof(Hash) &&
+                       parameters[1].ParameterType == typeof(InputArgument[]) &&
+                       parameters[1].GetCustomAttribute<ParamArrayAttribute>() != null;
+            }),
+            "Les variantes générique et void avec params InputArgument[] doivent exister.");
+
+        Assert.IsFalse(typeof(InputArgument).IsSealed);
+        Assert.AreEqual(typeof(InputArgument), typeof(OutputArgument).BaseType);
+        Assert.IsFalse(typeof(OutputArgument).IsSealed);
+        Assert.IsTrue(typeof(RaycastResult).IsValueType);
+        Assert.IsFalse(typeof(RaycastResult).GetProperty("HitCoords").CanWrite);
+
+        Assert.IsNull(typeof(Entity).GetProperty(
+            "Speed",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.IsNotNull(typeof(Vehicle).GetProperty(
+            "Speed",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.IsNotNull(typeof(Entity).GetProperty(
+            "Health",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.IsNotNull(typeof(Entity).GetProperty(
+            "Model",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.IsNotNull(typeof(Entity).GetMethod(
+            "op_Equality",
+            BindingFlags.Public | BindingFlags.Static));
+        Assert.IsNotNull(typeof(Blip).GetMethod(
+            "op_Equality",
+            BindingFlags.Public | BindingFlags.Static));
+
+        MethodInfo give = typeof(WeaponCollection).GetMethod(
+            "Give",
+            new[] { typeof(WeaponHash), typeof(int), typeof(bool), typeof(bool) });
+        MethodInfo select = typeof(WeaponCollection).GetMethod(
+            "Select",
+            new[] { typeof(WeaponHash), typeof(bool) });
+        Assert.IsNotNull(give);
+        Assert.AreEqual(typeof(Weapon), give.ReturnType);
+        Assert.IsNotNull(select);
+        Assert.AreEqual(typeof(bool), select.ReturnType);
+    }
+
+    [TestMethod]
+    public void StubApi_RespecteLesTypesSousJacentsEtLaFormeExacteDeScript()
+    {
+        Assert.AreEqual(typeof(ulong), Enum.GetUnderlyingType(typeof(Hash)));
+        Assert.AreEqual(typeof(uint), Enum.GetUnderlyingType(typeof(PedHash)));
+        Assert.AreEqual(typeof(uint), Enum.GetUnderlyingType(typeof(VehicleHash)));
+        Assert.AreEqual(typeof(uint), Enum.GetUnderlyingType(typeof(WeaponHash)));
+
+        ConstructorInfo constructor = typeof(Script).GetConstructor(
+            BindingFlags.Instance |
+            BindingFlags.Public |
+            BindingFlags.NonPublic |
+            BindingFlags.DeclaredOnly,
+            null,
+            Type.EmptyTypes,
+            null);
+        Assert.IsNotNull(constructor);
+        Assert.IsTrue(constructor.IsPublic, "Le chargeur NIB doit pouvoir appeler le constructeur public.");
+
+        PropertyInfo interval = typeof(Script).GetProperty(
+            "Interval",
+            BindingFlags.Instance |
+            BindingFlags.Public |
+            BindingFlags.NonPublic |
+            BindingFlags.DeclaredOnly);
+        Assert.IsNotNull(interval);
+        Assert.AreEqual(typeof(int), interval.PropertyType);
+
+        MethodInfo getter = interval.GetGetMethod(true);
+        MethodInfo setter = interval.GetSetMethod(true);
+        Assert.IsNotNull(getter);
+        Assert.IsNotNull(setter);
+
+        // Je verrouille les deux accesseurs family de NIB 2.11.6 : rendre
+        // seulement le setter protégé laisserait encore un getter public erroné.
+        Assert.IsTrue(getter.IsFamily);
+        Assert.IsFalse(getter.IsPublic);
+        Assert.IsFalse(getter.IsStatic);
+        Assert.AreEqual(typeof(int), getter.ReturnType);
+        Assert.AreEqual(0, getter.GetParameters().Length);
+
+        Assert.IsTrue(setter.IsFamily);
+        Assert.IsFalse(setter.IsPublic);
+        Assert.IsFalse(setter.IsStatic);
+        Assert.AreEqual(typeof(void), setter.ReturnType);
+        ParameterInfo[] setterParameters = setter.GetParameters();
+        Assert.AreEqual(1, setterParameters.Length);
+        Assert.AreEqual(typeof(int), setterParameters[0].ParameterType);
+    }
+
+    [TestMethod]
+    public void WeaponCollection_RetourneLesTypesEtResultatsDuContratNib()
+    {
+        Ped ped = new Ped();
+
+        Weapon weapon = ped.Weapons.Give(WeaponHash.Pistol, 42, true, true);
+
+        Assert.IsNotNull(weapon);
+        Assert.AreEqual(WeaponHash.Pistol, weapon.Hash);
+        Assert.AreEqual(42, weapon.Ammo);
+        Assert.IsTrue(weapon.IsPresent);
+        Assert.IsTrue(ped.Weapons.Select(WeaponHash.Pistol));
+        Assert.IsTrue(ped.Weapons.Select(WeaponHash.Pistol, true));
     }
 
     [TestMethod]
@@ -246,6 +377,16 @@ public class StubRuntimeBehaviorTests
             BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.IsNotNull(field, "Champ privé introuvable: " + name);
         return (T)field.GetValue(instance);
+    }
+
+    private static object ReadInputArgumentValue(object argument)
+    {
+        Assert.IsInstanceOfType(argument, typeof(InputArgument));
+        PropertyInfo valueProperty = typeof(InputArgument).GetProperty(
+            "Value",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.IsNotNull(valueProperty);
+        return valueProperty.GetValue(argument);
     }
 }
 #endif

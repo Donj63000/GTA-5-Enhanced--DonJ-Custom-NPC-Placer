@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DonJEnemySpawner", "src\Don
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DonJEnemySpawner.Tests", "tests\DonJEnemySpawner.Tests\DonJEnemySpawner.Tests.csproj", "{7021B81D-0388-45D5-AFF9-C104736B0AFC}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DonJ.NibAbiValidator", "tools\NibAbiValidator\DonJ.NibAbiValidator.csproj", "{D64666F4-BB14-4D69-A664-7BF1E0358381}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -43,6 +45,18 @@ Global
 		{7021B81D-0388-45D5-AFF9-C104736B0AFC}.Release|x64.Build.0 = Release|Any CPU
 		{7021B81D-0388-45D5-AFF9-C104736B0AFC}.Release|x86.ActiveCfg = Release|Any CPU
 		{7021B81D-0388-45D5-AFF9-C104736B0AFC}.Release|x86.Build.0 = Release|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Debug|x64.Build.0 = Debug|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Debug|x86.Build.0 = Debug|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Release|x64.ActiveCfg = Release|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Release|x64.Build.0 = Release|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Release|x86.ActiveCfg = Release|Any CPU
+		{D64666F4-BB14-4D69-A664-7BF1E0358381}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -50,5 +64,6 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{F2A367CE-1019-4DF0-B00F-D032FB308441} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{7021B81D-0388-45D5-AFF9-C104736B0AFC} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{D64666F4-BB14-4D69-A664-7BF1E0358381} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

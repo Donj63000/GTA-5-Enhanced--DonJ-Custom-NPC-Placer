@@ -3,6 +3,11 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.Serialization;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+#if DONJ_STUB_API
+using System.Windows.Forms;
+using GTA;
+using GTA.Native;
+#endif
 
 [TestClass]
 [DoNotParallelize]
@@ -11,6 +16,129 @@ public sealed class RuntimeStageIsolationTests
     private static readonly Type ScriptType = typeof(DonJEnemySpawner);
     private const BindingFlags PrivateInstance = BindingFlags.NonPublic | BindingFlags.Instance;
     private const BindingFlags PrivateStatic = BindingFlags.NonPublic | BindingFlags.Static;
+
+    [TestMethod]
+    public void Constructor_RegistersRuntimeEventsBeforeIsolatedOptionalStartup()
+    {
+        string constructor = ExtractMethodBody(
+            ReadSource("DonJEnemySpawner.cs"),
+            "DonJEnemySpawner");
+        string safetySource = ReadSource("DonJEnemySpawner.RuntimeSafety.cs");
+
+        AssertOrdered(
+            constructor,
+            "_selectedWeaponLoadout = new WeaponLoadout",
+            "Tick += OnTick;",
+            "KeyDown += OnKeyDown;",
+            "KeyUp += OnKeyUp;",
+            "Aborted += OnAborted;",
+            "RunRuntimeStartupStage(RuntimeStartupStage.MenuWarmup);",
+            "RunRuntimeStartupStage(RuntimeStartupStage.PersistentSaveState);",
+            "RunRuntimeStartupStage(RuntimeStartupStage.Justice);",
+            "RunRuntimeStartupStage(RuntimeStartupStage.Relationships);",
+            "RunRuntimeStartupStage(RuntimeStartupStage.Status);");
+
+        Assert.IsFalse(
+            constructor.IndexOf("InitializeJusticeSystem();", StringComparison.Ordinal) >= 0,
+            "Justice ne doit plus pouvoir interrompre le constructeur après l'état essentiel.");
+        Assert.IsFalse(
+            constructor.IndexOf("InitializeRelationshipGroups();", StringComparison.Ordinal) >= 0,
+            "Relations ne doit plus pouvoir empêcher l'abonnement de F10.");
+        StringAssert.Contains(safetySource, "private void RunRuntimeStartupStage(RuntimeStartupStage stage)");
+        StringAssert.Contains(safetySource, "ReportRuntimeStartupFailure(stage, exception);");
+        StringAssert.Contains(safetySource, "Startup.MenuWarmup");
+        StringAssert.Contains(safetySource, "Startup.Relationships");
+        StringAssert.Contains(safetySource, "Startup.Status");
+    }
+
+#if DONJ_STUB_API
+    [TestMethod]
+    public void Constructor_RelationshipFailureKeepsF10AliveAndTickRetriesRelationships()
+    {
+        string temporarySaveDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "DonJStartupIsolation_" + Guid.NewGuid().ToString("N"));
+        string previousSaveDirectory = Environment.GetEnvironmentVariable(
+            "DONJ_ENEMY_SPAWNER_SAVE_DIR");
+        DonJEnemySpawner script = null;
+        bool failRelationshipLookup = true;
+        int relationshipLookupFailures = 0;
+
+        try
+        {
+            Directory.CreateDirectory(temporarySaveDirectory);
+            Environment.SetEnvironmentVariable(
+                "DONJ_ENEMY_SPAWNER_SAVE_DIR",
+                temporarySaveDirectory);
+            StubRuntime.Reset();
+            StubRuntime.NativeCallHandler = (hash, arguments) =>
+            {
+                if (hash != (ulong)Hash.GET_PED_RELATIONSHIP_GROUP_HASH)
+                {
+                    return null;
+                }
+
+                if (failRelationshipLookup)
+                {
+                    relationshipLookupFailures++;
+                    throw new MissingMethodException(
+                        "Simulation de la signature native Relations indisponible.");
+                }
+
+                return 321;
+            };
+
+            script = new DonJEnemySpawner();
+
+            Assert.AreEqual(1, relationshipLookupFailures);
+            Assert.AreEqual(1, GetField<int>(script, "_runtimeStartupFailureCount"));
+
+            failRelationshipLookup = false;
+            Game.GameTime = 1;
+            RaiseStubScriptEvent(script, "RaiseTick");
+            Assert.AreEqual(
+                321,
+                GetField<int>(script, "_lastKnownPlayerGroupHash"),
+                "Le stage Relations du tick doit reprendre l'initialisation sans boucle immédiate.");
+
+            KeyEventArgs open = new KeyEventArgs(Keys.F10);
+            RaiseStubScriptEvent(script, "RaiseKeyDown", open);
+            Assert.IsTrue(open.Handled);
+            Assert.IsTrue(GetField<bool>(script, "_menuVisible"));
+
+            KeyEventArgs close = new KeyEventArgs(Keys.F10);
+            RaiseStubScriptEvent(script, "RaiseKeyDown", close);
+            Assert.IsTrue(close.Handled);
+            Assert.IsFalse(GetField<bool>(script, "_menuVisible"));
+
+            SetField(script, "_placementMode", true);
+            KeyEventArgs leavePlacement = new KeyEventArgs(Keys.F10);
+            RaiseStubScriptEvent(script, "RaiseKeyDown", leavePlacement);
+            Assert.IsTrue(leavePlacement.Handled);
+            Assert.IsFalse(GetField<bool>(script, "_placementMode"));
+            Assert.IsTrue(
+                GetField<bool>(script, "_menuVisible"),
+                "F10 doit quitter le placement puis rendre le menu immédiatement.");
+        }
+        finally
+        {
+            failRelationshipLookup = false;
+            if (script != null)
+            {
+                RaiseStubScriptEvent(script, "RaiseAborted");
+            }
+
+            StubRuntime.Reset();
+            Environment.SetEnvironmentVariable(
+                "DONJ_ENEMY_SPAWNER_SAVE_DIR",
+                previousSaveDirectory);
+            if (Directory.Exists(temporarySaveDirectory))
+            {
+                Directory.Delete(temporarySaveDirectory, true);
+            }
+        }
+    }
+#endif
 
     [TestMethod]
     public void OnTick_PreservesDomainOrderAndUsesJusticeFailSafeAfterEarlyFailure()
@@ -214,6 +342,27 @@ public sealed class RuntimeStageIsolationTests
         field.SetValue(target, value);
     }
 
+    private static T GetField<T>(object target, string fieldName)
+    {
+        FieldInfo field = ScriptType.GetField(fieldName, PrivateInstance);
+        Assert.IsNotNull(field, "Champ privé introuvable: " + fieldName);
+        return (T)field.GetValue(target);
+    }
+
+#if DONJ_STUB_API
+    private static void RaiseStubScriptEvent(
+        DonJEnemySpawner script,
+        string methodName,
+        params object[] arguments)
+    {
+        MethodInfo method = typeof(Script).GetMethod(
+            methodName,
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(method, "Événement du stub introuvable: " + methodName);
+        method.Invoke(script, arguments);
+    }
+#endif
+
     private static MethodInfo FindGeneratedLocalFunction(string namePrefix)
     {
         foreach (MethodInfo method in ScriptType.GetMethods(PrivateInstance))
@@ -259,6 +408,7 @@ public sealed class RuntimeStageIsolationTests
     {
         string[] declarationPrefixes =
         {
+            "public ",
             "private void ",
             "private static void ",
             "private bool ",

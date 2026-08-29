@@ -48,7 +48,7 @@ public class PackagingSafetyTests
             Assert.IsTrue(File.Exists(packageGuide));
 
             PackageManifest manifest = ReadManifest(manifestPath);
-            Assert.AreEqual(1, manifest.ManifestVersion);
+            Assert.AreEqual(2, manifest.ManifestVersion);
             Assert.AreEqual("DonJCustomNpcPlacer", manifest.Product);
             Assert.AreEqual("Release", manifest.Configuration);
             Assert.AreEqual(GetHeadCommit(), manifest.Commit);
@@ -85,6 +85,14 @@ public class PackagingSafetyTests
             Assert.AreEqual(scriptApiReference.Version.ToString(), manifest.ScriptApi.Version);
             Assert.AreEqual(2, scriptApiReference.Version.Major);
             Assert.AreEqual(scriptApiReference.Version.Major, manifest.ScriptApi.Major);
+            Assert.IsNotNull(
+                manifest.ScriptApi.AbiContract,
+                "Le manifest doit verrouiller le contrat ABI réellement vérifié.");
+            Assert.AreEqual("nib-shvdn-v2.11.6", manifest.ScriptApi.AbiContract.Id);
+            Assert.AreEqual("2.11.6", manifest.ScriptApi.AbiContract.Version);
+            Assert.AreEqual(
+                HashFile(GetAbiContractPath()),
+                manifest.ScriptApi.AbiContract.Sha256);
 
             CollectionAssert.AreEquivalent(
                 new[]
@@ -171,6 +179,7 @@ public class PackagingSafetyTests
             repositoryRoot,
             "tools",
             "run-safety-checks.ps1"));
+        string gitAttributes = File.ReadAllText(Path.Combine(repositoryRoot, ".gitattributes"));
 
         StringAssert.Contains(stubProject, "<AssemblyVersion>2.11.6.0</AssemblyVersion>");
         StringAssert.Contains(stubProject, "<FileVersion>2.11.6.0</FileVersion>");
@@ -178,8 +187,19 @@ public class PackagingSafetyTests
         StringAssert.Contains(deployScript, "$reference.Version.Major -ne 2");
         StringAssert.Contains(safetyScript, "$reference.Version.Major -ne 2");
         StringAssert.Contains(packageScript, "scriptApi = [ordered]@{");
+        StringAssert.Contains(packageScript, "manifestVersion = 2");
+        StringAssert.Contains(packageScript, "Invoke-AbiValidator");
+        StringAssert.Contains(packageScript, "--consumer\", $packageEndll");
+        StringAssert.Contains(packageScript, "$packageEndllHash -ne $validatedBuildEndllHash");
+        StringAssert.Contains(packageScript, "abiContract = [ordered]@{");
         StringAssert.Contains(deployScript, "$scriptApi.version");
+        StringAssert.Contains(deployScript, "--runtime-api");
+        StringAssert.Contains(deployScript, "avant toute ecriture");
         StringAssert.Contains(safetyScript, "$manifest.scriptApi.version");
+        StringAssert.Contains(safetyScript, "verify-nib-abi");
+        StringAssert.Contains(
+            gitAttributes,
+            "tools/NibAbiValidator/contracts/*.abi.xml text eol=lf");
     }
 
     [TestMethod]
@@ -210,6 +230,61 @@ public class PackagingSafetyTests
     }
 
     [TestMethod]
+    public void GameReadyPackage_RejectsInvalidAbiBeforeCreatingOrReplacingOutput()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string invalidBuildDirectory = Path.Combine(tempRoot, "invalid-build");
+            Directory.CreateDirectory(invalidBuildDirectory);
+            CreateConsumerWithForbiddenObjectArrayCall(
+                Path.Combine(GetReleaseBuildDirectory(), "DonJCustomNpcPlacer.ENdll"),
+                Path.Combine(invalidBuildDirectory, "DonJCustomNpcPlacer.ENdll"));
+            File.Copy(
+                Path.Combine(GetReleaseBuildDirectory(), "DonJCustomNpcPlacer.pdb"),
+                Path.Combine(invalidBuildDirectory, "DonJCustomNpcPlacer.pdb"));
+
+            string absentOutput = Path.Combine(tempRoot, "rejected-new-package");
+            ProcessResult createResult = RunPowerShellAllowDirtySource(
+                GetPackageScriptPath(),
+                "-Configuration", "Release",
+                "-RepositoryRoot", GetRepositoryRoot(),
+                "-BuildDirectory", invalidBuildDirectory,
+                "-OutputDirectory", absentOutput,
+                "-DependencyDirectory", Path.GetDirectoryName(typeof(DonJEnemySpawner).Assembly.Location));
+
+            Assert.AreNotEqual(0, createResult.ExitCode, createResult.CombinedOutput);
+            StringAssert.Contains(createResult.CombinedOutput, "System.Object[]");
+            StringAssert.Contains(createResult.CombinedOutput, "ABI04");
+            Assert.IsFalse(
+                Directory.Exists(absentOutput),
+                "Je ne dois pas créer la sortie quand le consommateur ABI est invalide.");
+            Assert.AreEqual(
+                0,
+                Directory.GetDirectories(tempRoot, ".rejected-new-package.*").Length,
+                "Je ne dois laisser aucun dossier transactionnel après le rejet ABI.");
+
+            string existingOutput = CreateVerifiedPackage(tempRoot, true);
+            Dictionary<string, string> originalPackage = SnapshotDirectoryHashes(existingOutput);
+            ProcessResult replaceResult = RunPowerShellWithForce(
+                GetPackageScriptPath(),
+                "-Configuration", "Release",
+                "-RepositoryRoot", GetRepositoryRoot(),
+                "-BuildDirectory", invalidBuildDirectory,
+                "-OutputDirectory", existingOutput,
+                "-DependencyDirectory", Path.GetDirectoryName(typeof(DonJEnemySpawner).Assembly.Location));
+
+            Assert.AreNotEqual(0, replaceResult.ExitCode, replaceResult.CombinedOutput);
+            StringAssert.Contains(replaceResult.CombinedOutput, "System.Object[]");
+            StringAssert.Contains(replaceResult.CombinedOutput, "ABI04");
+            AssertDirectorySnapshot(existingOutput, originalPackage);
+            Assert.AreEqual(
+                0,
+                Directory.GetDirectories(tempRoot, ".game-ready.*").Length,
+                "Le rejet ABI doit précéder tout remplacement transactionnel du package existant.");
+        });
+    }
+
+    [TestMethod]
     public void CiWorkflow_PublishesTheVerifiedGameReadyPackageOnlyAfterSuccess()
     {
         string workflow = File.ReadAllText(
@@ -217,13 +292,79 @@ public class PackagingSafetyTests
 
         StringAssert.Contains(workflow, ".\\tools\\run-safety-checks.ps1 -Ci -UseStubApi");
         StringAssert.Contains(workflow, "-PackageOutputDirectory .\\artifacts\\game-ready");
-        StringAssert.Contains(workflow, "if: success()");
+        StringAssert.Contains(
+            workflow,
+            "if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'");
         StringAssert.Contains(workflow, "name: DonJCustomNpcPlacer-game-ready");
         StringAssert.Contains(workflow, "path: artifacts/game-ready/**");
         StringAssert.Contains(workflow, "if-no-files-found: error");
         Assert.IsFalse(
             workflow.Contains("-AllowDirtySource"),
             "La CI ne doit jamais contourner le garde-fou des sources Git sales.");
+    }
+
+    [TestMethod]
+    public void InstallationGuides_RequireTheVerifiedMainPackageAndSafeReplacement()
+    {
+        string repositoryRoot = GetRepositoryRoot();
+        string readme = File.ReadAllText(Path.Combine(repositoryRoot, "README.md"));
+        string simpleGuide = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "Mode-pour-jeu-ici",
+            "INSTALLATION_SIMPLE.txt"));
+
+        foreach (string requiredFile in new[]
+                 {
+                     "DonJCustomNpcPlacer.ENdll",
+                     "DonJCustomNpcPlacer.pdb",
+                     "INSTALLATION_SIMPLE.txt",
+                     "manifest.json"
+                 })
+        {
+            StringAssert.Contains(readme, requiredFile);
+            StringAssert.Contains(simpleGuide, requiredFile);
+        }
+
+        StringAssert.Contains(readme, "branch is `main`");
+        StringAssert.Contains(readme, "event is `push`");
+        StringAssert.Contains(readme, "`manifestVersion` is `2`");
+        StringAssert.Contains(readme, "`sourceDirty` is `false`");
+        StringAssert.Matches(
+            readme,
+            new Regex("`scriptApi\\.major`\\s+is\\s+`2`", RegexOptions.CultureInvariant));
+        StringAssert.Contains(simpleGuide, "branche est main");
+        StringAssert.Contains(simpleGuide, "l'evenement push");
+        StringAssert.Contains(simpleGuide, "manifestVersion vaut 2");
+        StringAssert.Contains(simpleGuide, "sourceDirty vaut false");
+        StringAssert.Contains(simpleGuide, "scriptApi.major vaut 2");
+        StringAssert.Contains(simpleGuide, "scriptApi.abiContract.sha256");
+
+        StringAssert.Contains(
+            readme,
+            "Do not delete the installed `.ENdll` before the new");
+        StringAssert.Contains(
+            simpleGuide,
+            "Ne supprimez jamais l'ancien ENdll avant d'avoir valide le nouveau fichier a");
+        Assert.IsFalse(
+            readme.Contains("Delete the old file:"),
+            "Le README ne doit jamais demander de supprimer l'ENdll actif avant validation.");
+
+        foreach (string obsoleteAlias in new[]
+                 {
+                     "DonJCustomNpcPlacer.dll",
+                     "DonJEnemySpawner.dll",
+                     "DonJEnemySpawner.ENdll",
+                     "DonJEnemySpawner.pdb"
+                 })
+        {
+            StringAssert.Contains(readme, obsoleteAlias);
+            StringAssert.Contains(simpleGuide, obsoleteAlias);
+        }
+
+        StringAssert.Contains(readme, "Scripts\\DonJCustomNpcPlacer.manifest.json");
+        StringAssert.Contains(simpleGuide, "DonJCustomNpcPlacer.manifest.json");
+        StringAssert.Contains(readme, "Microsoft .NET Framework 4.8");
+        StringAssert.Contains(simpleGuide, "Microsoft .NET Framework 4.8");
     }
 
     [TestMethod]
@@ -360,6 +501,104 @@ public class PackagingSafetyTests
             Assert.AreNotEqual(0, result.ExitCode, "Une API de mauvaise version majeure devait être refusée.");
             Assert.AreEqual("version-conservée", File.ReadAllText(installed));
             StringAssert.Contains(result.CombinedOutput, "Manifest game-ready invalide");
+        });
+    }
+
+    [TestMethod]
+    public void GameReadyDeployment_RejectsAnotherAbiContractBeforeTouchingTheGame()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string packageDirectory = CreateVerifiedPackage(tempRoot, true);
+            string manifestPath = Path.Combine(packageDirectory, "manifest.json");
+            PackageManifest parsed = ReadManifest(manifestPath);
+            string manifest = File.ReadAllText(manifestPath);
+            string incompatibleHash = new string(
+                parsed.ScriptApi.AbiContract.Sha256[0] == '0' ? '1' : '0',
+                64);
+            string incompatibleManifest = manifest.Replace(
+                parsed.ScriptApi.AbiContract.Sha256,
+                incompatibleHash);
+            Assert.AreNotEqual(manifest, incompatibleManifest);
+            File.WriteAllText(manifestPath, incompatibleManifest);
+
+            string gtaRoot = CreateFakeGtaRoot(tempRoot);
+            string scriptsDirectory = Path.Combine(gtaRoot, "Scripts");
+            Directory.CreateDirectory(scriptsDirectory);
+            string installed = Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.ENdll");
+            File.WriteAllText(installed, "version-conservée");
+
+            ProcessResult result = RunPowerShell(
+                GetDeployScriptPath(),
+                "-PackageDirectory", packageDirectory,
+                "-GtaRoot", gtaRoot,
+                "-GtaScriptsDir", scriptsDirectory);
+
+            Assert.AreNotEqual(0, result.ExitCode);
+            Assert.AreEqual("version-conservée", File.ReadAllText(installed));
+            StringAssert.Contains(
+                result.CombinedOutput,
+                "Le manifest ne reference pas le contrat ABI canonique attendu");
+            Assert.AreEqual(
+                0,
+                Directory.GetFiles(scriptsDirectory, ".DonJCustomNpcPlacer.*").Length,
+                "Le rejet ABI doit précéder tout staging transactionnel.");
+        });
+    }
+
+    [TestMethod]
+    public void GameReadyDeployment_RejectsInvalidAbiBeforeMutatingInstalledFiles()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string packageDirectory = CreateVerifiedPackage(tempRoot, true);
+            string packageEndll = Path.Combine(packageDirectory, "DonJCustomNpcPlacer.ENdll");
+            string invalidEndll = Path.Combine(tempRoot, "invalid-package.ENdll");
+            CreateConsumerWithForbiddenObjectArrayCall(packageEndll, invalidEndll);
+            File.Copy(invalidEndll, packageEndll, true);
+
+            // Je rends volontairement le manifest cohérent avec le binaire altéré
+            // afin que seul le contrôle ABI puisse arrêter le déploiement.
+            string manifestPath = Path.Combine(packageDirectory, "manifest.json");
+            PackageManifest manifest = ReadManifest(manifestPath);
+            manifest.Files.Binary.SizeBytes = new FileInfo(packageEndll).Length;
+            manifest.Files.Binary.Sha256 = HashFile(packageEndll);
+            WriteManifest(manifestPath, manifest);
+
+            string gtaRoot = CreateFakeGtaRoot(tempRoot);
+            string scriptsDirectory = Path.Combine(gtaRoot, "Scripts");
+            Directory.CreateDirectory(scriptsDirectory);
+            File.WriteAllText(
+                Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.ENdll"),
+                "binaire-installé-à-conserver");
+            File.WriteAllText(
+                Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.pdb"),
+                "pdb-installé-à-conserver");
+            File.WriteAllText(
+                Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.manifest.json"),
+                "manifest-installé-à-conserver");
+            foreach (string alias in ObsoleteAliases())
+            {
+                File.WriteAllText(
+                    Path.Combine(scriptsDirectory, alias),
+                    "alias-à-conserver-" + alias);
+            }
+            Dictionary<string, string> installedSnapshot = SnapshotDirectoryHashes(scriptsDirectory);
+
+            ProcessResult result = RunPowerShell(
+                GetDeployScriptPath(),
+                "-PackageDirectory", packageDirectory,
+                "-GtaRoot", gtaRoot,
+                "-GtaScriptsDir", scriptsDirectory);
+
+            Assert.AreNotEqual(0, result.ExitCode, result.CombinedOutput);
+            StringAssert.Contains(result.CombinedOutput, "System.Object[]");
+            StringAssert.Contains(result.CombinedOutput, "ABI04");
+            AssertDirectorySnapshot(scriptsDirectory, installedSnapshot);
+            Assert.AreEqual(
+                0,
+                Directory.GetFiles(scriptsDirectory, ".DonJCustomNpcPlacer.*").Length,
+                "Le rejet ABI doit intervenir avant tout staging dans le dossier du jeu.");
         });
     }
 
@@ -647,11 +886,102 @@ public class PackagingSafetyTests
         return packageDirectory;
     }
 
+    private static void CreateConsumerWithForbiddenObjectArrayCall(
+        string sourceAssembly,
+        string outputAssembly)
+    {
+        using (Mono.Cecil.ModuleDefinition module = Mono.Cecil.ModuleDefinition.ReadModule(
+            sourceAssembly,
+            new Mono.Cecil.ReaderParameters { InMemory = true, ReadSymbols = false }))
+        {
+            Mono.Cecil.TypeReference functionType = module.GetTypeReferences().First(type =>
+                type.FullName == "GTA.Native.Function");
+            Mono.Cecil.TypeReference hashType = module.GetTypeReferences().First(type =>
+                type.FullName == "GTA.Native.Hash");
+            Mono.Cecil.MethodReference forbiddenCall = new Mono.Cecil.MethodReference(
+                "Call",
+                module.TypeSystem.Void,
+                functionType)
+            {
+                HasThis = false
+            };
+            forbiddenCall.Parameters.Add(new Mono.Cecil.ParameterDefinition(hashType));
+            forbiddenCall.Parameters.Add(new Mono.Cecil.ParameterDefinition(
+                new Mono.Cecil.ArrayType(module.TypeSystem.Object)));
+
+            Mono.Cecil.TypeDefinition fixtureType = new Mono.Cecil.TypeDefinition(
+                "DonJ.Tests",
+                "InvalidPackagedNibConsumer",
+                Mono.Cecil.TypeAttributes.Public |
+                Mono.Cecil.TypeAttributes.Abstract |
+                Mono.Cecil.TypeAttributes.Sealed,
+                module.TypeSystem.Object);
+            Mono.Cecil.MethodDefinition fixtureMethod = new Mono.Cecil.MethodDefinition(
+                "InvokeForbiddenCall",
+                Mono.Cecil.MethodAttributes.Public | Mono.Cecil.MethodAttributes.Static,
+                module.TypeSystem.Void);
+            fixtureType.Methods.Add(fixtureMethod);
+            module.Types.Add(fixtureType);
+
+            Mono.Cecil.Cil.ILProcessor il = fixtureMethod.Body.GetILProcessor();
+            il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ldc_I8, 0L));
+            il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ldc_I4_0));
+            il.Append(il.Create(
+                Mono.Cecil.Cil.OpCodes.Newarr,
+                module.TypeSystem.Object));
+            il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Call, forbiddenCall));
+            il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ret));
+
+            module.Write(outputAssembly);
+        }
+    }
+
+    private static Dictionary<string, string> SnapshotDirectoryHashes(string directory)
+    {
+        return Directory.GetFiles(directory, "*", SearchOption.AllDirectories)
+            .ToDictionary(
+                path => path.Substring(directory.TrimEnd(Path.DirectorySeparatorChar).Length + 1),
+                path =>
+                {
+                    FileInfo file = new FileInfo(path);
+                    // Je verrouille aussi taille et horodatage pour prouver que
+                    // le rejet ABI précède réellement toute écriture.
+                    return HashFile(path) + "|" +
+                           file.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" +
+                           file.LastWriteTimeUtc.Ticks.ToString(
+                               System.Globalization.CultureInfo.InvariantCulture);
+                },
+                StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void AssertDirectorySnapshot(
+        string directory,
+        Dictionary<string, string> expected)
+    {
+        Dictionary<string, string> actual = SnapshotDirectoryHashes(directory);
+        CollectionAssert.AreEquivalent(
+            expected.Keys.ToArray(),
+            actual.Keys.ToArray(),
+            "Je dois conserver exactement les mêmes fichiers après le rejet ABI.");
+        foreach (KeyValuePair<string, string> file in expected)
+        {
+            Assert.AreEqual(
+                file.Value,
+                actual[file.Key],
+                "Le rejet ABI ne doit modifier aucun fichier: " + file.Key);
+        }
+    }
+
     private static string CreateFakeGtaRoot(string tempRoot)
     {
         string gtaRoot = Path.Combine(tempRoot, "fake-gta");
         Directory.CreateDirectory(gtaRoot);
         File.WriteAllBytes(Path.Combine(gtaRoot, "GTA5_Enhanced.exe"), new byte[0]);
+        string runtimeApi = typeof(DonJEnemySpawner).BaseType.Assembly.Location;
+        File.Copy(
+            runtimeApi,
+            Path.Combine(gtaRoot, Path.GetFileName(runtimeApi)),
+            true);
         return gtaRoot;
     }
 
@@ -724,6 +1054,15 @@ public class PackagingSafetyTests
         using (FileStream stream = File.OpenRead(path))
         {
             return (PackageManifest)serializer.ReadObject(stream);
+        }
+    }
+
+    private static void WriteManifest(string path, PackageManifest manifest)
+    {
+        DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(PackageManifest));
+        using (FileStream stream = File.Create(path))
+        {
+            serializer.WriteObject(stream, manifest);
         }
     }
 
@@ -883,6 +1222,16 @@ public class PackagingSafetyTests
         return Path.Combine(GetRepositoryRoot(), "tools", "deploy-game-ready.ps1");
     }
 
+    private static string GetAbiContractPath()
+    {
+        return Path.Combine(
+            GetRepositoryRoot(),
+            "tools",
+            "NibAbiValidator",
+            "contracts",
+            "NIBScriptHookVDotNet2-2.11.6.abi.xml");
+    }
+
     private static string GetReleaseBuildDirectory()
     {
         return Path.Combine(GetRepositoryRoot(), "src", "DonJEnemySpawner", "bin", "Release");
@@ -933,6 +1282,9 @@ public class PackagingSafetyTests
         [DataMember(Name = "configuration")]
         internal string Configuration { get; set; }
 
+        [DataMember(Name = "generatedAtUtc")]
+        internal string GeneratedAtUtc { get; set; }
+
         [DataMember(Name = "commit")]
         internal string Commit { get; set; }
 
@@ -969,6 +1321,22 @@ public class PackagingSafetyTests
 
         [DataMember(Name = "major")]
         internal int Major { get; set; }
+
+        [DataMember(Name = "abiContract")]
+        internal PackageAbiContract AbiContract { get; set; }
+    }
+
+    [DataContract]
+    private sealed class PackageAbiContract
+    {
+        [DataMember(Name = "id")]
+        internal string Id { get; set; }
+
+        [DataMember(Name = "version")]
+        internal string Version { get; set; }
+
+        [DataMember(Name = "sha256")]
+        internal string Sha256 { get; set; }
     }
 
     [DataContract]
@@ -979,11 +1347,17 @@ public class PackagingSafetyTests
 
         [DataMember(Name = "symbols")]
         internal PackageFile Symbols { get; set; }
+
+        [DataMember(Name = "installationGuide")]
+        internal PackageFile InstallationGuide { get; set; }
     }
 
     [DataContract]
     private sealed class PackageFile
     {
+        [DataMember(Name = "name")]
+        internal string Name { get; set; }
+
         [DataMember(Name = "sizeBytes")]
         internal long SizeBytes { get; set; }
 

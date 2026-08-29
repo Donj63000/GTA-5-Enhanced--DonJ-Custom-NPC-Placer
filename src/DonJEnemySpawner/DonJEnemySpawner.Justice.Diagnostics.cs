@@ -29,8 +29,34 @@ public sealed partial class DonJEnemySpawner
         [DataMember(Name = "justiceSchemaVersion")]
         internal int JusticeSchemaVersion { get; set; }
 
+        [DataMember(Name = "scriptApi")]
+        internal JusticeDiagnosticScriptApi ScriptApi { get; set; }
+
         [DataMember(Name = "files")]
         internal JusticeDiagnosticManifestFiles Files { get; set; }
+    }
+
+    [DataContract]
+    private sealed class JusticeDiagnosticScriptApi
+    {
+        [DataMember(Name = "major")]
+        internal int Major { get; set; }
+
+        [DataMember(Name = "abiContract")]
+        internal JusticeDiagnosticAbiContract AbiContract { get; set; }
+    }
+
+    [DataContract]
+    private sealed class JusticeDiagnosticAbiContract
+    {
+        [DataMember(Name = "id")]
+        internal string Id { get; set; }
+
+        [DataMember(Name = "version")]
+        internal string Version { get; set; }
+
+        [DataMember(Name = "sha256")]
+        internal string Sha256 { get; set; }
     }
 
     [DataContract]
@@ -225,13 +251,26 @@ public sealed partial class DonJEnemySpawner
         string informationalVersion = manifest == null
             ? string.Empty
             : (manifest.InformationalVersion ?? string.Empty).Trim();
-        if (manifest == null || manifest.ManifestVersion != 1 ||
+        JusticeDiagnosticAbiContract abiContract =
+            manifest == null || manifest.ScriptApi == null
+                ? null
+                : manifest.ScriptApi.AbiContract;
+        string abiContractHash = abiContract == null
+            ? string.Empty
+            : (abiContract.Sha256 ?? string.Empty).Trim();
+        if (manifest == null || manifest.ManifestVersion != 2 ||
             !string.Equals(
                 manifest.Product,
                 "DonJCustomNpcPlacer",
                 StringComparison.Ordinal) ||
             manifest.SourceDirty ||
             manifest.JusticeSchemaVersion != JusticeXmlPersistenceCodec.SchemaMajor ||
+            manifest.ScriptApi == null ||
+            manifest.ScriptApi.Major != 2 ||
+            abiContract == null ||
+            string.IsNullOrWhiteSpace(abiContract.Id) ||
+            string.IsNullOrWhiteSpace(abiContract.Version) ||
+            abiContractHash.Length != 64 ||
             !string.Equals(
                 informationalVersion,
                 GetJusticeBuildId(),
@@ -262,6 +301,16 @@ public sealed partial class DonJEnemySpawner
         for (int index = 0; index < hash.Length; index++)
         {
             char value = hash[index];
+            if (!((value >= '0' && value <= '9') ||
+                  (value >= 'a' && value <= 'f') ||
+                  (value >= 'A' && value <= 'F')))
+            {
+                return string.Empty;
+            }
+        }
+        for (int index = 0; index < abiContractHash.Length; index++)
+        {
+            char value = abiContractHash[index];
             if (!((value >= '0' && value <= '9') ||
                   (value >= 'a' && value <= 'f') ||
                   (value >= 'A' && value <= 'F')))

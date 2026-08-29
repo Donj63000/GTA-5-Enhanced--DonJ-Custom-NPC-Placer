@@ -11,6 +11,10 @@ param(
 
     [string]$DependencyDirectory,
 
+    [string]$AbiValidatorPath,
+
+    [string]$AbiContractPath,
+
     [string]$Commit,
 
     [switch]$AllowDirtySource,
@@ -55,6 +59,68 @@ function Get-Sha256 {
     finally {
         $stream.Dispose()
         $algorithm.Dispose()
+    }
+}
+
+function Invoke-AbiValidator {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ValidatorPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Operation
+    )
+
+    $output = @(& $ValidatorPath @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $details = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+        throw "La verification ABI '$Operation' a echoue avec le code $exitCode.$([Environment]::NewLine)$details"
+    }
+
+    return $output
+}
+
+function Get-AbiContractMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ValidatorPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContractPath
+    )
+
+    $output = Invoke-AbiValidator `
+        -ValidatorPath $ValidatorPath `
+        -Arguments @("info", "--contract", $ContractPath) `
+        -Operation "lecture du contrat"
+    $json = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    try {
+        $metadata = $json | ConvertFrom-Json
+    }
+    catch {
+        throw "Le validateur ABI a retourne des metadonnees illisibles: $json"
+    }
+
+    $actualHash = Get-Sha256 -Path $ContractPath
+    if ($null -eq $metadata -or
+        [string]::IsNullOrWhiteSpace([string]$metadata.contractId) -or
+        [string]::IsNullOrWhiteSpace([string]$metadata.contractVersion) -or
+        ([string]$metadata.sha256) -notmatch '^[0-9a-fA-F]{64}$' -or
+        -not [string]::Equals(
+            ([string]$metadata.sha256).ToUpperInvariant(),
+            $actualHash,
+            [System.StringComparison]::Ordinal)) {
+        throw "Les metadonnees du contrat ABI ne correspondent pas a son contenu: $ContractPath"
+    }
+
+    return [pscustomobject]@{
+        Id = [string]$metadata.contractId
+        Version = [string]$metadata.contractVersion
+        Sha256 = $actualHash
     }
 }
 
@@ -240,6 +306,25 @@ if (-not (Test-Path -LiteralPath (Join-Path $repositoryFullPath "GTA5modDEV.sln"
     throw "Racine du depot invalide: $repositoryFullPath"
 }
 
+$scriptRepositoryRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($AbiValidatorPath)) {
+    $AbiValidatorPath = Join-Path $scriptRepositoryRoot "tools\NibAbiValidator\bin\Release\DonJ.NibAbiValidator.exe"
+}
+if ([string]::IsNullOrWhiteSpace($AbiContractPath)) {
+    $AbiContractPath = Join-Path $scriptRepositoryRoot "tools\NibAbiValidator\contracts\NIBScriptHookVDotNet2-2.11.6.abi.xml"
+}
+$abiValidatorFullPath = Get-NormalizedFullPath -Path $AbiValidatorPath -BasePath $repositoryFullPath
+$abiContractFullPath = Get-NormalizedFullPath -Path $AbiContractPath -BasePath $repositoryFullPath
+if (-not (Test-Path -LiteralPath $abiValidatorFullPath -PathType Leaf)) {
+    throw "Validateur ABI introuvable: $abiValidatorFullPath"
+}
+if (-not (Test-Path -LiteralPath $abiContractFullPath -PathType Leaf)) {
+    throw "Contrat ABI introuvable: $abiContractFullPath"
+}
+$abiContract = Get-AbiContractMetadata `
+    -ValidatorPath $abiValidatorFullPath `
+    -ContractPath $abiContractFullPath
+
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
     $BuildDirectory = Join-Path $repositoryFullPath "src\DonJEnemySpawner\bin\$Configuration"
 }
@@ -270,6 +355,16 @@ foreach ($requiredFile in @($buildEndll, $buildPdb, $installationGuide)) {
         throw "Fichier requis introuvable pour le package: $requiredFile"
     }
 }
+
+$validatedBuildEndllHash = Get-Sha256 -Path $buildEndll
+$validatedBuildPdbHash = Get-Sha256 -Path $buildPdb
+[void](Invoke-AbiValidator `
+    -ValidatorPath $abiValidatorFullPath `
+    -Arguments @(
+        "verify",
+        "--consumer", $buildEndll,
+        "--contract", $abiContractFullPath) `
+    -Operation "compatibilite du binaire avec le contrat canonique")
 
 if ([string]::IsNullOrWhiteSpace($Commit)) {
     $commitOutput = @(& git -C $repositoryFullPath rev-parse HEAD 2>$null)
@@ -333,8 +428,14 @@ if (Test-Path -LiteralPath $outputFullPath) {
             throw "Le dossier existant n'est pas un package game-ready reconnu: $outputFullPath"
         }
 
+        $existingManifestVersion = if ($null -eq $existingManifest) {
+            0
+        }
+        else {
+            [int]$existingManifest.manifestVersion
+        }
         if ($null -eq $existingManifest -or
-            [int]$existingManifest.manifestVersion -ne 1 -or
+            ($existingManifestVersion -ne 1 -and $existingManifestVersion -ne 2) -or
             [string]$existingManifest.product -ne "DonJCustomNpcPlacer") {
             throw "Le dossier existant n'est pas un package game-ready reconnu: $outputFullPath"
         }
@@ -363,15 +464,27 @@ try {
     $buildPdbHash = Get-Sha256 -Path $buildPdb
     $packagePdbHash = Get-Sha256 -Path $packagePdb
 
-    if ($buildEndllHash -ne $packageEndllHash) {
-        throw "Le binaire package ne correspond pas au binaire compile et teste."
+    if ($buildEndllHash -ne $validatedBuildEndllHash -or
+        $packageEndllHash -ne $validatedBuildEndllHash) {
+        throw "Le binaire a change apres sa validation ABI ou pendant sa copie vers le package."
     }
-    if ($buildPdbHash -ne $packagePdbHash) {
-        throw "Le PDB package ne correspond pas au PDB du meme build."
+    if ($buildPdbHash -ne $validatedBuildPdbHash -or
+        $packagePdbHash -ne $validatedBuildPdbHash) {
+        throw "Le PDB a change pendant sa copie vers le package."
     }
 
+    # Je revalide les octets exacts qui seront publies afin qu'une reecriture
+    # concurrente du dossier de build ne puisse jamais contourner le contrat ABI.
+    [void](Invoke-AbiValidator `
+        -ValidatorPath $abiValidatorFullPath `
+        -Arguments @(
+            "verify",
+            "--consumer", $packageEndll,
+            "--contract", $abiContractFullPath) `
+        -Operation "compatibilite de la copie package avec le contrat canonique")
+
     $manifest = [ordered]@{
-        manifestVersion = 1
+        manifestVersion = 2
         product = "DonJCustomNpcPlacer"
         configuration = $Configuration
         generatedAtUtc = [System.DateTime]::UtcNow.ToString("O")
@@ -384,6 +497,11 @@ try {
             name = $assemblyMetadata.ScriptApiName
             version = $assemblyMetadata.ScriptApiVersion
             major = $assemblyMetadata.ScriptApiMajor
+            abiContract = [ordered]@{
+                id = $abiContract.Id
+                version = $abiContract.Version
+                sha256 = $abiContract.Sha256
+            }
         }
         expectedTypes = $assemblyMetadata.ExpectedTypes
         files = [ordered]@{
@@ -449,6 +567,7 @@ try {
     Write-Host "Commit: $Commit"
     Write-Host "Schema Justice: $($assemblyMetadata.JusticeSchemaVersion)"
     Write-Host "API ScriptHookVDotNet: $($assemblyMetadata.ScriptApiName) $($assemblyMetadata.ScriptApiVersion)"
+    Write-Host "Contrat ABI: $($abiContract.Id) $($abiContract.Version) $($abiContract.Sha256)"
 }
 finally {
     if (Test-Path -LiteralPath $stagingDirectory) {

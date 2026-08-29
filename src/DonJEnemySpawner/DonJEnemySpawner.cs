@@ -323,19 +323,18 @@ private bool _menuVisible;
             Preset = WeaponUpgradePreset.Standard
         };
 
-        InitializePersistentSaveState();
-        InitializeJusticeSystem();
-        InitializeRelationshipGroups();
-        EnsureObsidianMenuEntryCache();
-        PrewarmMenuUiPools();
-
+        // Je rends d'abord le coeur du script joignable par NIB : une native
+        // ou une UI secondaire défaillante ne doit plus empêcher F10 ni l'arrêt propre.
         Tick += OnTick;
         KeyDown += OnKeyDown;
         KeyUp += OnKeyUp;
         Aborted += OnAborted;
 
-        LogInfo("Chargement", TrainerTitle + " charge.");
-        ShowStatus(TrainerTitle + " charge. " + MenuToggleKeyLabel + " pour ouvrir le menu.", 4500);
+        RunRuntimeStartupStage(RuntimeStartupStage.MenuWarmup);
+        RunRuntimeStartupStage(RuntimeStartupStage.PersistentSaveState);
+        RunRuntimeStartupStage(RuntimeStartupStage.Justice);
+        RunRuntimeStartupStage(RuntimeStartupStage.Relationships);
+        RunRuntimeStartupStage(RuntimeStartupStage.Status);
     }
 
 private enum MenuPage

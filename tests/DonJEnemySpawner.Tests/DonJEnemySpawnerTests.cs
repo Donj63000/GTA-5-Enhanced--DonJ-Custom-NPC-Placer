@@ -2729,8 +2729,17 @@ public class DonJEnemySpawnerTests
     public void SourceFile_SaveSystemPersistsLastFileAndUsesStableFallbacks()
     {
         string source = File.ReadAllText(GetSourceFilePath());
+        string runtimeSafetySource = File.ReadAllText(GetRuntimeSafetySourceFilePath());
 
-        StringAssert.Contains(source, "InitializePersistentSaveState();");
+        // Je vérifie les deux maillons du démarrage isolé : le constructeur programme
+        // l'étape persistante et son dispatcher appelle toujours l'initialisation réelle.
+        StringAssert.Contains(
+            source,
+            "RunRuntimeStartupStage(RuntimeStartupStage.PersistentSaveState);");
+        StringAssert.Contains(
+            runtimeSafetySource,
+            "case RuntimeStartupStage.PersistentSaveState:");
+        StringAssert.Contains(runtimeSafetySource, "InitializePersistentSaveState();");
         StringAssert.Contains(source, "private const string LastSaveFileMarkerName = \"_last_save.txt\";");
         StringAssert.Contains(source, "private const string SaveDirectoryEnvironmentVariable = \"DONJ_ENEMY_SPAWNER_SAVE_DIR\";");
         StringAssert.Contains(source, "private const string DefaultEnhancedGtaRoot = @\"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Grand Theft Auto V Enhanced\";");
@@ -2823,17 +2832,20 @@ public class DonJEnemySpawnerTests
 
         XElement localEndllTarget = FindTarget(document, "CreateLocalEndll");
         XElement validateTarget = FindTarget(document, "ValidateDeployTarget");
+        XElement validatorTarget = FindTarget(document, "BuildNibAbiValidator");
         XElement packageTarget = FindTarget(document, "CreateGtaDeployPackage");
         XElement deployTarget = FindTarget(document, "DeployAsEndll");
 
         Assert.IsNotNull(localEndllTarget, "La cible MSBuild CreateLocalEndll est introuvable.");
         Assert.IsNotNull(validateTarget, "La cible MSBuild ValidateDeployTarget est introuvable.");
+        Assert.IsNotNull(validatorTarget, "La cible MSBuild BuildNibAbiValidator est introuvable.");
         Assert.IsNotNull(packageTarget, "La cible MSBuild CreateGtaDeployPackage est introuvable.");
         Assert.IsNotNull(deployTarget, "La cible MSBuild DeployAsEndll est introuvable.");
         Assert.AreEqual("false", GetPropertyValue(document, "DeployToGta"));
 
         string localTargetXml = localEndllTarget.ToString(SaveOptions.DisableFormatting);
         string validateTargetXml = validateTarget.ToString(SaveOptions.DisableFormatting);
+        string validatorTargetXml = validatorTarget.ToString(SaveOptions.DisableFormatting);
         string packageTargetXml = packageTarget.ToString(SaveOptions.DisableFormatting);
         string targetXml = deployTarget.ToString(SaveOptions.DisableFormatting);
 
@@ -2841,6 +2853,8 @@ public class DonJEnemySpawnerTests
         StringAssert.Contains(localTargetXml, "$(TargetPath)");
         StringAssert.Contains(validateTargetXml, "GTA5_Enhanced.exe");
         StringAssert.Contains(validateTargetXml, "$(GtaScriptsDir)");
+        StringAssert.Contains(validatorTargetXml, "Targets=\"Restore;Build\"");
+        StringAssert.Contains(validatorTargetXml, "$(NibAbiValidatorProject)");
         Assert.AreEqual(
             @"$(RepositoryRoot)\tools\package-game-ready.ps1",
             GetPropertyValue(document, "PackageGameReadyScript"));
@@ -3048,6 +3062,15 @@ public class DonJEnemySpawnerTests
     private static string GetSourceFilePath()
     {
         return Path.Combine(GetRepositoryRoot(), "src", "DonJEnemySpawner", "DonJEnemySpawner.cs");
+    }
+
+    private static string GetRuntimeSafetySourceFilePath()
+    {
+        return Path.Combine(
+            GetRepositoryRoot(),
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.RuntimeSafety.cs");
     }
 
     private static string GetHighSecurityEscortSourceFilePath()

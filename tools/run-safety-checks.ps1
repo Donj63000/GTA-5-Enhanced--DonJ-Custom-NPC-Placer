@@ -14,6 +14,8 @@ $runRoot = Join-Path $resultRoot "safety-$timestamp"
 $logsRoot = Join-Path $runRoot "logs"
 $temporaryGtaRoot = Join-Path $runRoot "temporary-gta"
 $deployRoot = Join-Path $temporaryGtaRoot "Scripts"
+$abiValidator = Join-Path $repoRoot "tools\NibAbiValidator\bin\Release\DonJ.NibAbiValidator.exe"
+$abiContract = Join-Path $repoRoot "tools\NibAbiValidator\contracts\NIBScriptHookVDotNet2-2.11.6.abi.xml"
 if ([string]::IsNullOrWhiteSpace($PackageOutputDirectory)) {
     $packageRoot = Join-Path $runRoot "game-ready"
 }
@@ -179,6 +181,43 @@ Invoke-LoggedCommand `
     -FilePath "dotnet" `
     -Arguments (@("build", (Join-Path $repoRoot "GTA5modDEV.sln"), "-c", "Release", "--no-restore") + $msbuildProperties)
 
+$mainBin = Join-Path $repoRoot "src\DonJEnemySpawner\bin\Release"
+$testBin = Join-Path $repoRoot "tests\DonJEnemySpawner.Tests\bin\Release"
+$builtEndll = Join-Path $mainBin "DonJCustomNpcPlacer.ENdll"
+foreach ($abiFile in @($abiValidator, $abiContract)) {
+    if (-not (Test-Path -LiteralPath $abiFile -PathType Leaf)) {
+        throw "Fichier de verification ABI attendu introuvable: $abiFile"
+    }
+}
+
+Invoke-LoggedCommand `
+    -StepName "verify-nib-abi" `
+    -FilePath $abiValidator `
+    -Arguments @(
+        "verify",
+        "--consumer", $builtEndll,
+        "--contract", $abiContract)
+
+$builtScriptApiReference = Get-ScriptApiReferenceMetadata -BinaryPath $builtEndll
+$runtimeApiFileName = $builtScriptApiReference.Name + ".dll"
+$runtimeApiSource = Join-Path $testBin $runtimeApiFileName
+if (-not (Test-Path -LiteralPath $runtimeApiSource -PathType Leaf)) {
+    $runtimeApiSource = if ($gtaRoot) {
+        Join-Path $gtaRoot $runtimeApiFileName
+    }
+    else {
+        string.Empty
+    }
+}
+if ([string]::IsNullOrWhiteSpace($runtimeApiSource) -or
+    -not (Test-Path -LiteralPath $runtimeApiSource -PathType Leaf)) {
+    throw "API runtime de verification introuvable apres build: $runtimeApiFileName"
+}
+Copy-Item `
+    -LiteralPath $runtimeApiSource `
+    -Destination (Join-Path $temporaryGtaRoot $runtimeApiFileName) `
+    -Force
+
 $implicitDeploymentNames = @(
     "DonJCustomNpcPlacer.ENdll",
     "DonJCustomNpcPlacer.pdb",
@@ -206,8 +245,6 @@ Invoke-LoggedCommand `
         $runRoot
     ) + $msbuildProperties)
 
-$mainBin = Join-Path $repoRoot "src\DonJEnemySpawner\bin\Release"
-$testBin = Join-Path $repoRoot "tests\DonJEnemySpawner.Tests\bin\Release"
 $packageScript = Join-Path $repoRoot "tools\package-game-ready.ps1"
 $deployScript = Join-Path $repoRoot "tools\deploy-game-ready.ps1"
 
@@ -226,7 +263,11 @@ $packageArguments = @(
     "-OutputDirectory",
     $packageRoot,
     "-DependencyDirectory",
-    $testBin
+    $testBin,
+    "-AbiValidatorPath",
+    $abiValidator,
+    "-AbiContractPath",
+    $abiContract
 )
 if (-not $Ci) {
     # Je permets seulement au contrôle local de produire un artefact explicitement
@@ -260,7 +301,11 @@ $deployArguments = @(
     "-GtaRoot",
     $temporaryGtaRoot,
     "-GtaScriptsDir",
-    $deployRoot
+    $deployRoot,
+    "-AbiValidatorPath",
+    $abiValidator,
+    "-AbiContractPath",
+    $abiContract
 )
 
 if ($packageIsPublishable) {
@@ -358,9 +403,16 @@ $informationalVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(
 $scriptApiReference = Get-ScriptApiReferenceMetadata `
     -BinaryPath (Join-Path $packageRoot "DonJCustomNpcPlacer.ENdll")
 $scriptApiProperty = $manifest.PSObject.Properties["scriptApi"]
+$abiContractHash = (Get-FileHash -LiteralPath $abiContract -Algorithm SHA256).Hash
+$manifestAbiContract = if ($null -eq $scriptApiProperty) {
+    $null
+}
+else {
+    $manifest.scriptApi.PSObject.Properties["abiContract"]
+}
 
 if ($manifest.product -ne "DonJCustomNpcPlacer" -or
-    [int]$manifest.manifestVersion -ne 1 -or
+    [int]$manifest.manifestVersion -ne 2 -or
     [long]$manifest.files.binary.sizeBytes -le 0 -or
     ([string]$manifest.files.binary.sha256).ToUpperInvariant() -ne $packageEndllHash.ToUpperInvariant() -or
     ([string]$manifest.files.symbols.sha256).ToUpperInvariant() -ne $packagePdbHash.ToUpperInvariant() -or
@@ -371,6 +423,10 @@ if ($manifest.product -ne "DonJCustomNpcPlacer" -or
     [string]$manifest.scriptApi.name -ne $scriptApiReference.Name -or
     [string]$manifest.scriptApi.version -ne $scriptApiReference.Version -or
     [int]$manifest.scriptApi.major -ne $scriptApiReference.Major -or
+    $null -eq $manifestAbiContract -or
+    [string]::IsNullOrWhiteSpace([string]$manifest.scriptApi.abiContract.id) -or
+    [string]::IsNullOrWhiteSpace([string]$manifest.scriptApi.abiContract.version) -or
+    ([string]$manifest.scriptApi.abiContract.sha256).ToUpperInvariant() -ne $abiContractHash.ToUpperInvariant() -or
     $informationalVersion.IndexOf([string]$manifest.commit, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
     throw "Le manifest du package ne correspond pas au binaire teste."
 }
@@ -408,6 +464,7 @@ $summaryPath = Join-Path $runRoot "summary.txt"
     "SHA-256 ENdll: $packageEndllHash",
     "SHA-256 manifest: $packageManifestHash",
     "API ScriptHookVDotNet: $($scriptApiReference.Name) $($scriptApiReference.Version)",
+    "Contrat ABI: $($manifest.scriptApi.abiContract.id) $($manifest.scriptApi.abiContract.version) $abiContractHash",
     "Package publiable: $packageIsPublishable",
     "Verification: restore + build sans déploiement + tests + package + contrat strict de déploiement ENdll/PDB/manifest"
 ) | Set-Content -LiteralPath $summaryPath -Encoding UTF8

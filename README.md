@@ -634,8 +634,8 @@ You can change it from the mod menu.
 </p>
 
 > [!TIP]
-> For the simplest and safest setup, download the verified **`DonJCustomNpcPlacer-game-ready`** artifact produced by the latest successful `Safety` workflow.
-> The package is generated only after the Release build and tests pass. Its `manifest.json` records the exact commit, assembly version, ScriptHookVDotNet API identity, Justice schema, sizes, and SHA-256 hashes.
+> For the simplest and safest setup, download the verified **`DonJCustomNpcPlacer-game-ready`** artifact produced by the latest successful `Safety` workflow triggered by a push to `main`.
+> The package is generated only after the Release build, tests, and binary API validation pass. Its `manifest.json` records the exact commit, assembly version, ScriptHookVDotNet API identity and ABI-contract fingerprint, Justice schema, sizes, and SHA-256 hashes.
 
 ### Before You Start
 
@@ -644,6 +644,7 @@ This mod does not run by itself. GTA V Enhanced must already have the files that
 You must have:
 
 - **GTA V Enhanced** on Windows;
+- **Microsoft .NET Framework 4.8**;
 - **ScriptHookV**;
 - **NIBScriptHookVDotNet** for GTA V Enhanced;
 - a **Scripts** folder in the game folder.
@@ -712,7 +713,9 @@ Grand Theft Auto V Enhanced
 The simplest method is to use the package generated and verified by GitHub Actions. Binaries stored manually in a source checkout must not be used as releases.
 
 1. Open the repository's **Actions** page on GitHub.
-2. Open the latest successful **Safety** run for the version you want.
+2. Open the latest successful **Safety** run whose branch is `main` and whose
+   event is `push`. Pull-request and secondary-branch runs are validation runs,
+   not releases.
 3. In **Artifacts**, download:
 
 ```text
@@ -720,7 +723,11 @@ DonJCustomNpcPlacer-game-ready
 ```
 
 4. Extract the downloaded archive.
-5. The verified package contains:
+5. Open `manifest.json` and confirm that `manifestVersion` is `2`, `sourceDirty` is `false`,
+   `scriptApi.major` is `2`, `scriptApi.abiContract.sha256` contains
+   64 hexadecimal characters, and `commit` matches the latest commit shown on
+   the `main` branch.
+6. The verified package contains:
 
 ```text
 DonJCustomNpcPlacer.ENdll
@@ -729,7 +736,7 @@ INSTALLATION_SIMPLE.txt
 manifest.json
 ```
 
-6. Copy `DonJCustomNpcPlacer.ENdll` and, optionally, `DonJCustomNpcPlacer.pdb` into:
+7. Copy `DonJCustomNpcPlacer.ENdll` and, optionally, `DonJCustomNpcPlacer.pdb` into:
 
 ```text
 Grand Theft Auto V Enhanced\Scripts
@@ -741,7 +748,7 @@ Steam example:
 C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts
 ```
 
-7. Copy `manifest.json` into that same `Scripts` folder and rename the copy to:
+8. Copy `manifest.json` into that same `Scripts` folder and rename the copy to:
 
 ```text
 DonJCustomNpcPlacer.manifest.json
@@ -772,9 +779,13 @@ In the `Scripts` folder, you must have:
 
 ```text
 Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.ENdll
+Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.manifest.json
 ```
 
-The following file is optional, but you can leave it:
+The manifest is part of the verified installation. It lets the runtime diagnostic
+confirm the exact commit and SHA-256 of the loaded mod.
+
+The following matching file is optional, but you can leave it:
 
 ```text
 Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.pdb
@@ -829,6 +840,7 @@ Check in this order:
 Old files to delete if they exist:
 
 ```text
+Scripts\DonJCustomNpcPlacer.dll
 Scripts\DonJEnemySpawner.dll
 Scripts\DonJEnemySpawner.ENdll
 Scripts\DonJEnemySpawner.pdb
@@ -838,15 +850,27 @@ Scripts\DonJEnemySpawner.pdb
 
 ### Updating the Mod
 
-1. Close the game.
-2. Delete the old file:
+1. Close GTA V Enhanced and its loaders.
+2. Download and extract `DonJCustomNpcPlacer-game-ready` from the latest
+   successful `Safety` run triggered by a `push` to `main`, then confirm its
+   manifest commit matches the current `main` commit.
+3. Before touching the installed files, verify that the new
+   `DonJCustomNpcPlacer.ENdll` SHA-256 matches `files.binary.sha256` in the
+   package's `manifest.json`.
+4. Copy the verified `DonJCustomNpcPlacer.ENdll` into `Scripts`, replacing the
+   file with the same name. Do not delete the installed `.ENdll` before the new
+   package has been extracted and validated.
+5. Copy the matching `DonJCustomNpcPlacer.pdb` if you want debug symbols.
+6. Copy the package's `manifest.json` into `Scripts` and replace the installed
+   `DonJCustomNpcPlacer.manifest.json` while keeping that stable installed name.
+7. Recalculate the installed `.ENdll` SHA-256 and compare it with the manifest
+   again. Only after this succeeds, remove the four old aliases listed above,
+   including `DonJCustomNpcPlacer.dll` and `DonJEnemySpawner.*`.
+8. Restart the game in story mode and press `F10`.
 
-```text
-Scripts\DonJCustomNpcPlacer.ENdll
-```
-
-3. Copy the new `DonJCustomNpcPlacer.ENdll` file into `Scripts`.
-4. Restart the game in story mode.
+When updating from a source checkout, prefer `tools\deploy-game-ready.ps1`; it
+validates every referenced NIB member against the API installed with GTA before
+it replaces the ENdll/PDB/manifest triplet transactionally.
 
 ---
 
@@ -858,6 +882,7 @@ Scripts\DonJCustomNpcPlacer.ENdll
 ```text
 Scripts\DonJCustomNpcPlacer.ENdll
 Scripts\DonJCustomNpcPlacer.pdb
+Scripts\DonJCustomNpcPlacer.manifest.json
 ```
 
 3. Saves can be deleted separately if you do not want to keep them.
@@ -1146,7 +1171,7 @@ Check that:
 - `NIBScriptHookVDotNet.asi` is installed;
 - `NIBScriptHookVDotNet2.dll` is installed;
 - `ScriptHookV.dll` is compatible with your game version;
-- no old `DonJEnemySpawner.dll` or `DonJEnemySpawner.ENdll` file is still present.
+- no old `DonJCustomNpcPlacer.dll` or `DonJEnemySpawner.*` alias is still present.
 
 ---
 

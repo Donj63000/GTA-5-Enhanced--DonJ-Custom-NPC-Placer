@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>DonJ.NibAbiValidator</AssemblyName>
+    <RootNamespace>DonJ.NibAbiValidator</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="contracts\NIBScriptHookVDotNet2-2.11.6.abi.xml"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('contracts\NIBScriptHookVDotNet2-2.11.6.abi.xml')" />
+  </ItemGroup>
+</Project>

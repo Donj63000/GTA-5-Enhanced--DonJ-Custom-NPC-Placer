@@ -581,10 +581,13 @@ public sealed class JusticeAuditRemediationTests
         {
             File.WriteAllText(
                 manifestPath,
-                "{\"manifestVersion\":1,\"product\":\"DonJCustomNpcPlacer\"," +
+                "{\"manifestVersion\":2,\"product\":\"DonJCustomNpcPlacer\"," +
                 "\"commit\":\"" + commit + "\",\"sourceDirty\":false," +
                 "\"informationalVersion\":\"" + currentBuildId + "\"," +
                 "\"justiceSchemaVersion\":2," +
+                "\"scriptApi\":{\"major\":2,\"abiContract\":{" +
+                "\"id\":\"nib-shvdn-v2.11.6\",\"version\":\"2.11.6\"," +
+                "\"sha256\":\"" + new string('d', 64) + "\"}}," +
                 "\"decoy\":{\"sha256\":\"" + new string('c', 64) + "\"}," +
                 "\"files\":{\"binary\":{\"name\":\"DonJCustomNpcPlacer.ENdll\"," +
                 "\"sha256\":\"" + binaryHash + "\"},\"symbols\":{\"sha256\":\"" +

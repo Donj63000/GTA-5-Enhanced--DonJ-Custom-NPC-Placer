@@ -4,12 +4,22 @@ using GTA;
 public sealed partial class DonJEnemySpawner
 {
     private const int RuntimeStageErrorLogCooldownMs = 10000;
+    private int _runtimeStartupFailureCount;
 
     private readonly int[] _runtimeTickStageNextErrorLogAt =
         new int[(int)RuntimeTickStage.Count];
 
     private readonly bool[] _runtimeTickStageHasLoggedError =
         new bool[(int)RuntimeTickStage.Count];
+
+    private enum RuntimeStartupStage
+    {
+        MenuWarmup,
+        PersistentSaveState,
+        Justice,
+        Relationships,
+        Status
+    }
 
     private enum RuntimeTickStage
     {
@@ -50,6 +60,101 @@ public sealed partial class DonJEnemySpawner
         NpcBlips,
         VehicleBlips,
         Relationships
+    }
+
+    private void RunRuntimeStartupStage(RuntimeStartupStage stage)
+    {
+        try
+        {
+            switch (stage)
+            {
+                case RuntimeStartupStage.MenuWarmup:
+                    EnsureObsidianMenuEntryCache();
+                    PrewarmMenuUiPools();
+                    break;
+
+                case RuntimeStartupStage.PersistentSaveState:
+                    InitializePersistentSaveState();
+                    break;
+
+                case RuntimeStartupStage.Justice:
+                    InitializeJusticeSystem();
+                    break;
+
+                case RuntimeStartupStage.Relationships:
+                    InitializeRelationshipGroups();
+                    break;
+
+                case RuntimeStartupStage.Status:
+                    CompleteRuntimeStartupNotification();
+                    break;
+
+                default:
+                    throw new ArgumentOutOfRangeException("stage");
+            }
+        }
+        catch (Exception exception)
+        {
+            _runtimeStartupFailureCount++;
+            if (stage == RuntimeStartupStage.MenuWarmup)
+            {
+                // Je rends un préchauffage UI partiel retentable au prochain appui sur F10.
+                _obsidianMenuEntries = null;
+                _menuUiPoolsPrewarmed = false;
+                _justiceHudPoolsPrewarmed = false;
+            }
+            ReportRuntimeStartupFailure(stage, exception);
+        }
+    }
+
+    private void CompleteRuntimeStartupNotification()
+    {
+        if (_runtimeStartupFailureCount == 0)
+        {
+            LogInfo("Chargement", TrainerTitle + " charge.");
+            ShowStatus(
+                TrainerTitle + " charge. " + MenuToggleKeyLabel + " pour ouvrir le menu.",
+                4500);
+            return;
+        }
+
+        LogWarning(
+            "Chargement",
+            TrainerTitle + " charge en mode degrade apres " +
+            _runtimeStartupFailureCount.ToString(
+                System.Globalization.CultureInfo.InvariantCulture) +
+            " erreur(s) d'initialisation; F10 reste disponible.");
+        ShowStatus(
+            TrainerTitle + " charge en mode degrade. " +
+            MenuToggleKeyLabel + " reste disponible; consulte le log.",
+            7000);
+    }
+
+    private static void ReportRuntimeStartupFailure(
+        RuntimeStartupStage stage,
+        Exception exception)
+    {
+        try
+        {
+            LogException(GetRuntimeStartupLogContext(stage), exception);
+        }
+        catch
+        {
+            // Je ne laisse jamais le diagnostic d'un démarrage dégradé casser l'instance du script.
+        }
+    }
+
+    private static string GetRuntimeStartupLogContext(RuntimeStartupStage stage)
+    {
+        switch (stage)
+        {
+            case RuntimeStartupStage.MenuWarmup: return "Startup.MenuWarmup";
+            case RuntimeStartupStage.PersistentSaveState: return "Startup.PersistentSaveState";
+            case RuntimeStartupStage.Justice: return "Startup.Justice";
+            case RuntimeStartupStage.Relationships: return "Startup.Relationships";
+            case RuntimeStartupStage.Status: return "Startup.Status";
+            default: return "Startup.Unknown";
+        }
     }
 
     private void ReportRuntimeTickStageFailure(RuntimeTickStage stage, Exception exception)

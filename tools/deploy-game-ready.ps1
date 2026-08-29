@@ -6,7 +6,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$GtaRoot,
 
-    [string]$GtaScriptsDir
+    [string]$GtaScriptsDir,
+
+    [string]$AbiValidatorPath,
+
+    [string]$AbiContractPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +40,68 @@ function Get-Sha256 {
     finally {
         $stream.Dispose()
         $algorithm.Dispose()
+    }
+}
+
+function Invoke-AbiValidator {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ValidatorPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Operation
+    )
+
+    $output = @(& $ValidatorPath @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $details = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+        throw "La verification ABI '$Operation' a echoue avec le code $exitCode.$([Environment]::NewLine)$details"
+    }
+
+    return $output
+}
+
+function Get-AbiContractMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ValidatorPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContractPath
+    )
+
+    $output = Invoke-AbiValidator `
+        -ValidatorPath $ValidatorPath `
+        -Arguments @("info", "--contract", $ContractPath) `
+        -Operation "lecture du contrat"
+    $json = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    try {
+        $metadata = $json | ConvertFrom-Json
+    }
+    catch {
+        throw "Le validateur ABI a retourne des metadonnees illisibles: $json"
+    }
+
+    $actualHash = Get-Sha256 -Path $ContractPath
+    if ($null -eq $metadata -or
+        [string]::IsNullOrWhiteSpace([string]$metadata.contractId) -or
+        [string]::IsNullOrWhiteSpace([string]$metadata.contractVersion) -or
+        ([string]$metadata.sha256) -notmatch '^[0-9a-fA-F]{64}$' -or
+        -not [string]::Equals(
+            ([string]$metadata.sha256).ToUpperInvariant(),
+            $actualHash,
+            [System.StringComparison]::Ordinal)) {
+        throw "Les metadonnees du contrat ABI ne correspondent pas a son contenu: $ContractPath"
+    }
+
+    return [pscustomobject]@{
+        Id = [string]$metadata.contractId
+        Version = [string]$metadata.contractVersion
+        Sha256 = $actualHash
     }
 }
 
@@ -179,6 +245,24 @@ function Restore-PreviousFile {
 
 $packageFullPath = Get-NormalizedFullPath -Path $PackageDirectory
 $gtaRootFullPath = Get-NormalizedFullPath -Path $GtaRoot
+$repositoryFullPath = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($AbiValidatorPath)) {
+    $AbiValidatorPath = Join-Path $repositoryFullPath "tools\NibAbiValidator\bin\Release\DonJ.NibAbiValidator.exe"
+}
+if ([string]::IsNullOrWhiteSpace($AbiContractPath)) {
+    $AbiContractPath = Join-Path $repositoryFullPath "tools\NibAbiValidator\contracts\NIBScriptHookVDotNet2-2.11.6.abi.xml"
+}
+$abiValidatorFullPath = Get-NormalizedFullPath -Path $AbiValidatorPath
+$abiContractFullPath = Get-NormalizedFullPath -Path $AbiContractPath
+if (-not (Test-Path -LiteralPath $abiValidatorFullPath -PathType Leaf)) {
+    throw "Validateur ABI introuvable: $abiValidatorFullPath"
+}
+if (-not (Test-Path -LiteralPath $abiContractFullPath -PathType Leaf)) {
+    throw "Contrat ABI introuvable: $abiContractFullPath"
+}
+$canonicalAbiContract = Get-AbiContractMetadata `
+    -ValidatorPath $abiValidatorFullPath `
+    -ContractPath $abiContractFullPath
 if ([string]::IsNullOrWhiteSpace($GtaScriptsDir)) {
     $GtaScriptsDir = Join-Path $gtaRootFullPath "Scripts"
 }
@@ -215,13 +299,29 @@ $scriptApi = if ($null -eq $scriptApiProperty) {
 else {
     $scriptApiProperty.Value
 }
+$abiContractProperty = if ($null -eq $scriptApi) {
+    $null
+}
+else {
+    $scriptApi.PSObject.Properties["abiContract"]
+}
+$abiContract = if ($null -eq $abiContractProperty) {
+    $null
+}
+else {
+    $abiContractProperty.Value
+}
 if ($null -eq $manifest -or
-    [int]$manifest.manifestVersion -ne 1 -or
+    [int]$manifest.manifestVersion -ne 2 -or
     $manifest.product -ne "DonJCustomNpcPlacer" -or
     ([string]$manifest.commit) -notmatch '^[0-9a-fA-F]{40}$' -or
     [int]$manifest.justiceSchemaVersion -ne 2 -or
     $null -eq $scriptApi -or
     [int]$scriptApi.major -ne 2 -or
+    $null -eq $abiContract -or
+    [string]::IsNullOrWhiteSpace([string]$abiContract.id) -or
+    [string]::IsNullOrWhiteSpace([string]$abiContract.version) -or
+    ([string]$abiContract.sha256) -notmatch '^[0-9a-fA-F]{64}$' -or
     [bool]$manifest.sourceDirty) {
     throw "Manifest game-ready invalide: $manifestPath"
 }
@@ -250,6 +350,48 @@ if ($assemblyVersion -ne [string]$manifest.assemblyVersion -or
     $scriptApiReference.Major -ne [int]$scriptApi.major) {
     throw "Metadonnees d'assembly incompatibles avec le manifest."
 }
+
+if (-not [string]::Equals(
+        [string]$abiContract.id,
+        $canonicalAbiContract.Id,
+        [System.StringComparison]::Ordinal) -or
+    -not [string]::Equals(
+        [string]$abiContract.version,
+        $canonicalAbiContract.Version,
+        [System.StringComparison]::Ordinal) -or
+    -not [string]::Equals(
+        ([string]$abiContract.sha256).ToUpperInvariant(),
+        $canonicalAbiContract.Sha256,
+        [System.StringComparison]::Ordinal)) {
+    throw "Le manifest ne reference pas le contrat ABI canonique attendu."
+}
+
+$runtimeApiName = [string]$scriptApi.name
+if ($runtimeApiName -ne "NIBScriptHookVDotNet2" -and
+    $runtimeApiName -ne "ScriptHookVDotNet2") {
+    throw "Nom d'API runtime non autorise dans le manifest: $runtimeApiName"
+}
+$runtimeApiPath = Join-Path $gtaRootFullPath ($runtimeApiName + ".dll")
+if (-not (Test-Path -LiteralPath $runtimeApiPath -PathType Leaf)) {
+    throw "API runtime attendue introuvable avant deploiement: $runtimeApiPath"
+}
+$runtimeApiAssemblyName = [System.Reflection.AssemblyName]::GetAssemblyName($runtimeApiPath)
+if ($runtimeApiAssemblyName.Name -ne $runtimeApiName -or
+    $null -eq $runtimeApiAssemblyName.Version -or
+    $runtimeApiAssemblyName.Version.ToString() -ne [string]$scriptApi.version) {
+    throw "L'API runtime installee ne correspond pas a l'identite exigee par le package."
+}
+
+# Je bloque le deploiement avant toute ecriture si le runtime GTA ne peut pas
+# resoudre exactement les types et membres references par le livrable.
+[void](Invoke-AbiValidator `
+    -ValidatorPath $abiValidatorFullPath `
+    -Arguments @(
+        "verify",
+        "--consumer", $binary.Path,
+        "--contract", $abiContractFullPath,
+        "--runtime-api", $runtimeApiPath) `
+    -Operation "compatibilite avec l'API runtime GTA")
 
 New-Item -ItemType Directory -Force -Path $scriptsFullPath | Out-Null
 
@@ -435,6 +577,7 @@ try {
     Write-Host "SHA-256 ENdll: $($binary.Hash)"
     Write-Host "Manifest deploye: $targetManifest"
     Write-Host "API ScriptHookVDotNet: $($scriptApiReference.Name) $($scriptApiReference.Version)"
+    Write-Host "Contrat ABI: $($canonicalAbiContract.Id) $($canonicalAbiContract.Version) $($canonicalAbiContract.Sha256)"
 }
 finally {
     foreach ($temporaryPath in @($stagedBinary, $stagedPdb, $stagedManifest)) {
