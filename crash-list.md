@@ -1893,3 +1893,20 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: L'assertion textuelle fragile est remplacée par une expression régulière qui accepte les espaces et retours à la ligne autour de l'opérateur `||`, sans relâcher le contrat fonctionnel contrôlé.
 - Vérification: Test ciblé réussi `72/72`; `dotnet build GTA5modDEV.sln -c Release` réussi sans avertissement ni erreur; `dotnet test GTA5modDEV.sln -c Release --no-build` réussi `483/483`; `tools\run-safety-checks.ps1` réussi `483/483` avec ABI NIB v2 valide.
 - Résolution: Le contrat reste strict sur la preuve policière et n'échoue plus à cause d'un formatage C# équivalent.
+
+## 2026-08-30 01:43:37 +02:00 - Libération technique après une mort policière avec peine de prison
+- Statut: Corrigé et validation complète locale réussie.
+- Contexte: Test réel de GTA V Enhanced après le correctif de respawn Justice. Le joueur est mort pendant une poursuite policière avec des étoiles et une peine calculée de 1 800 secondes.
+- Symptôme: Après le respawn GTA à l'hôpital, le mod affichait `transfert impossible, remise en liberté technique sous mandat` au lieu de transférer le joueur à Bolingbroke.
+- Sources vérifiées:
+  - `bug-reports\20260830-013408-justice-respawn-prison-evasion`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\NIBScriptHookVDotNet.log`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.log`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts\DonJEnemySpawnerSaves\_justice_state.xml`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.Custody.cs`;
+  - `tests\DonJEnemySpawner.Tests\JusticeCustodyHardeningTests.cs` et `JusticeRuntimeContractTests.cs`.
+- Extraits utiles: Le runtime journalise successivement `Capture apres mort en poursuite`, trois snapshots d'inventaire indisponibles, `Inventaire incompatible après trois essais`, puis `Transfert annulé après timeout; inventaire rendu et dossier conservé sous mandat`. Le XML final portait `phase=AtLarge`, `warrant=true`, `sentenceSeconds=1800` et aucune détention active.
+- Analyse / hypothèse: La détection de la mort policière, le jugement et le choix de peine fonctionnaient. L'échec venait du fallback inventaire : un snapshot non lisible appelait explicitement le rollback de transfert, et le timeout générique créait le même rollback. Une panne technique annulait donc à tort la détention avant tout téléport vérifié.
+- Action menée: Le premier échec de snapshot entièrement non destructif bascule désormais vers un inventaire préservé, précommité avant le téléport. Les états préservés ou ambigus ne rejouent jamais `RemoveAll`; une restitution ambiguë attend la libération réelle. Le handler de transfert conserve la phase `Transporting`, rend le joueur mobile et retente avec un délai borné à cinq secondes sans créer de nouveau `TransferRollback`. La reprise des anciens WAL de rollback reste compatible. L'évasion demeure impossible tant que le joueur se trouve dans l'enveloppe extérieure de l'enceinte et exige six secondes continues réellement hors prison.
+- Vérification: Tests Justice ciblés réussis `93/93`, puis tests de durcissement `22/22`; `dotnet build GTA5modDEV.sln -c Release` réussi avec zéro avertissement et zéro erreur; `dotnet test GTA5modDEV.sln -c Release --no-build` réussi `485/485`; `tools\run-safety-checks.ps1` réussi `485/485` dans `TestResults\safety-20260830-015013`, avec contrat ABI NIB v2 valide (`32` types, `189` membres) et paquet `.ENdll` vérifié.
+- Résolution: Une mort ou arrestation policière ne peut plus devenir une remise en liberté technique à cause de l'inventaire ou du timeout. Le transfert reste obligatoire vers Mission Row ou Bolingbroke selon la peine, sous retries sécurisés jusqu'à confirmation physique.

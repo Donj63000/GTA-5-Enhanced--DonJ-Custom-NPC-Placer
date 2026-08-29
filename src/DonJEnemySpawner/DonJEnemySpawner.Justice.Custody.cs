@@ -1161,16 +1161,23 @@ public sealed partial class DonJEnemySpawner
             EnsureJusticeInventoryReadyForCustodyTransfer(player, now);
         if (inventoryPreparation != JusticeInventoryPreparationResult.Ready)
         {
-            if (inventoryPreparation ==
-                JusticeInventoryPreparationResult.UnsupportedLoadout)
+            if (CanContinueJusticeCustodyTransferWithoutInventoryConfiscation(
+                    inventoryPreparation))
             {
                 EnterJusticeNonDestructiveCustodyFallback(player, now);
+                if (!PersistJusticeCriticalPrecommitRedundantly())
+                {
+                    // Je rends le fallback durable avant le téléport. Au tick
+                    // suivant, son état prêt évite toute nouvelle confiscation.
+                    HandleJusticeCustodyTransferFailure(player, now);
+                    return;
+                }
             }
             else
             {
                 HandleJusticeCustodyTransferFailure(player, now);
+                return;
             }
-            return;
         }
 
         bool transferred = false;
@@ -1218,11 +1225,8 @@ public sealed partial class DonJEnemySpawner
         }
         if (!transferred)
         {
-            bool rollbackRequired = HandleJusticeCustodyTransferFailure(player, now);
-            if (!rollbackRequired)
-            {
-                RestoreJusticeCustodyPlayerTransientState(player);
-            }
+            HandleJusticeCustodyTransferFailure(player, now);
+            RestoreJusticeCustodyPlayerTransientState(player);
             return;
         }
 
@@ -1415,24 +1419,14 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
-    private bool HandleJusticeCustodyTransferFailure(Ped player, int now)
+    private void HandleJusticeCustodyTransferFailure(Ped player, int now)
     {
         RegisterJusticeCustodyTransferFailure(now);
-        uint elapsed = unchecked((uint)(now - _justiceCustodyTransferStartedAt));
-        if (elapsed < (uint)JusticeCustodyTransferTimeoutMs)
-        {
-            return false;
-        }
 
-        // Je déclenche le même rollback durable quel que soit le palier qui a
-        // échoué : snapshot, précommit ou téléportation. Si le disque bloque
-        // encore la transaction, je rends néanmoins le ped mobile dans cette
-        // session et le WAL reprendra avant toute autre mutation de détention.
-        if (!TryRollbackJusticeCustodyTransfer(player, now))
-        {
-            EnsureJusticeCustodyPlayerMobility(player);
-        }
-        return true;
+        // Je ne transforme jamais une panne technique en remise en liberté :
+        // le dossier reste en transport et le retry borné continue jusqu'à un
+        // transfert vérifié. Je rends seulement le ped mobile entre deux essais.
+        EnsureJusticeCustodyPlayerMobility(player);
     }
 
     private bool TryRollbackJusticeCustodyTransfer(Ped player, int now)
@@ -3856,6 +3850,26 @@ public sealed partial class DonJEnemySpawner
         Ped player,
         int now)
     {
+        bool preservedInventoryReady =
+            _justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.UnsupportedPreserved &&
+            !_justiceInventoryRemoved &&
+            !_justiceWeaponControlsLocked &&
+            !_justiceDeferredInventoryRestore;
+        bool ambiguousInventoryReady =
+            _justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.RestoreAmbiguous &&
+            !_justiceInventoryRemoved &&
+            !_justiceWeaponControlsLocked &&
+            _justiceDeferredInventoryRestore &&
+            ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
+        if (preservedInventoryReady || ambiguousInventoryReady)
+        {
+            // Je reprends directement un fallback déjà précommité. Je ne relance
+            // ni le snapshot ni RemoveAll après un reload ou un téléport refusé.
+            return JusticeInventoryPreparationResult.Ready;
+        }
+
         if (_justiceInventoryCustodyState ==
                 JusticeInventoryCustodyState.RemovedVerified &&
             _justiceInventoryRemoved &&
@@ -3959,6 +3973,19 @@ public sealed partial class DonJEnemySpawner
         Ped player,
         int now)
     {
+        if (_justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.UnsupportedPreserved ||
+            ((_justiceInventoryCustodyState ==
+                  JusticeInventoryCustodyState.RestoreAmbiguous ||
+              _justiceInventoryCustodyState ==
+                  JusticeInventoryCustodyState.RestorePending) &&
+             _justiceDeferredInventoryRestore))
+        {
+            // Je ne réarme jamais RemoveAll après l'adoption du fallback. Un
+            // snapshot ambigu reste réservé au merge post-libération.
+            return JusticeInventoryPreparationResult.Ready;
+        }
+
         if (!ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
         {
             _justiceInventoryCustodyState = JusticeInventoryCustodyState.UnsupportedPreserved;
@@ -4068,6 +4095,38 @@ public sealed partial class DonJEnemySpawner
             : JusticeInventoryPreparationResult.RetryableFailure;
     }
 
+    private bool CanContinueJusticeCustodyTransferWithoutInventoryConfiscation(
+        JusticeInventoryPreparationResult preparationResult)
+    {
+        if (preparationResult == JusticeInventoryPreparationResult.UnsupportedLoadout)
+        {
+            bool preservedInventory =
+                _justiceInventoryCustodyState ==
+                    JusticeInventoryCustodyState.UnsupportedPreserved &&
+                !_justiceInventoryRemoved &&
+                !_justiceWeaponControlsLocked &&
+                !_justiceDeferredInventoryRestore;
+            bool ambiguousInventory =
+                _justiceInventoryCustodyState ==
+                    JusticeInventoryCustodyState.RestoreAmbiguous &&
+                !_justiceInventoryRemoved &&
+                !_justiceWeaponControlsLocked &&
+                _justiceDeferredInventoryRestore &&
+                ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
+            return preservedInventory || ambiguousInventory;
+        }
+
+        // Je bascule dès le premier échec de capture entièrement non destructif.
+        // Attendre trois essais laisserait GTA afficher l'hôpital alors qu'aucune
+        // arme n'a été touchée et que la détention peut commencer sans risque.
+        return preparationResult == JusticeInventoryPreparationResult.RetryableFailure &&
+               _justiceInventoryCustodyState == JusticeInventoryCustodyState.CapturePending &&
+               !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot) &&
+               !_justiceInventoryRemoved &&
+               !_justiceWeaponControlsLocked &&
+               !_justiceDeferredInventoryRestore;
+    }
+
     private void EnterJusticeNonDestructiveCustodyFallback(Ped player, int now)
     {
         bool ambiguousRestorePending =
@@ -4086,13 +4145,14 @@ public sealed partial class DonJEnemySpawner
         JusticeMarkStateDirty();
         ShowStatus(
             ambiguousRestorePending
-                ? "Justice : vérification de confiscation ambiguë, restitution différée sous mandat."
-                : "Justice : inventaire incompatible, remise en liberté technique sous mandat.",
+                ? "Justice : confiscation incertaine, restitution différée et détention maintenue."
+                : "Justice : inventaire conservé, détention maintenue sans confiscation.",
             5500);
-        if (!TryRollbackJusticeCustodyTransfer(player, now))
-        {
-            EnsureJusticeCustodyPlayerMobility(player);
-        }
+        LogWarning(
+            "Justice.Inventaire",
+            ambiguousRestorePending
+                ? "Confiscation ambiguë : snapshot conservé, transfert en détention maintenu."
+                : "Snapshot incompatible : inventaire préservé, transfert en détention maintenu.");
     }
 
     private bool PersistJusticeCriticalPrecommitRedundantly(
@@ -4836,6 +4896,7 @@ public sealed partial class DonJEnemySpawner
     private void RetryJusticeDeferredInventoryRestore(Ped player, int now)
     {
         if (!_justiceDeferredInventoryRestore || _justiceWeaponSnapshot == null ||
+            JusticeIsCustodyActive ||
             !Entity.Exists(player) || player.IsDead ||
             !IsJusticeCustodyPlayerIdentityCompatible(player) ||
             !JusticeCustodyHasReached(now, _justiceNextDeferredInventoryRestoreAt) ||
@@ -4843,6 +4904,9 @@ public sealed partial class DonJEnemySpawner
         {
             return;
         }
+
+        // Je ne rends jamais un snapshot ambigu au milieu d'une détention. Le
+        // merge non destructif reprend seulement après la libération effective.
 
         _justiceNextDeferredInventoryRestoreAt = JusticeCustodyFutureTime(
             now,

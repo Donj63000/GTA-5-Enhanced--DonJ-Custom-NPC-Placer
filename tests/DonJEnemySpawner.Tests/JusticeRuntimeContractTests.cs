@@ -3657,10 +3657,14 @@ public sealed class JusticeRuntimeContractTests
             "JusticeInventoryPreparationResult inventoryPreparation",
             "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
             "inventoryPreparation != JusticeInventoryPreparationResult.Ready",
-            "JusticeInventoryPreparationResult.UnsupportedLoadout",
+            "CanContinueJusticeCustodyTransferWithoutInventoryConfiscation(",
             "EnterJusticeNonDestructiveCustodyFallback(player, now)",
-            "return;",
             "TeleportPlayerWithFadeSafe(player");
+        string fallback = ExecutableMethodBody(
+            source,
+            "EnterJusticeNonDestructiveCustodyFallback");
+        Assert.IsFalse(fallback.Contains("TryRollbackJusticeCustodyTransfer"));
+        StringAssert.Contains(fallback, "détention maintenue");
 
         Type inventoryState = GetNestedType("JusticeInventoryCustodyState");
         CollectionAssert.AreEqual(
