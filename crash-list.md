@@ -1797,3 +1797,49 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Le stub a été aligné sur les types, héritages, interfaces, accesseurs, visibilités et types sous-jacents d'enums réellement consommés. Le contrat schema 2 capture aussi ces invariants; les tests source ont été adaptés au dispatcher de démarrage et les guides conservent leurs exigences exactes. Les builds et tests ont ensuite été relancés sans écriture concurrente.
 - Vérification: `TestResults\safety-20260829-203725` réussit `493/493`, build stub et solution à zéro avertissement/zéro erreur, package local conforme et refus attendu de `sourceDirty=true`. La build Release réelle réussit à zéro avertissement/zéro erreur; `dotnet test GTA5modDEV.sln -c Release` réussit `479/479`. Le validateur relit enfin 32 références de types et 189 références de membres contre la DLL NIB 2.11.6 live avec zéro incompatibilité.
 - Résolution: Les écarts détectés et le défaut transitoire de schema sont clos; la chaîne locale stable est entièrement verte.
+
+## 2026-08-29 05:17:57 +02:00 - F10 inactif par incompatibilité ABI avec NIB 2.11.6
+- Statut: Corrigé, validé localement et en CI, artefact exact déployé et cycle F10 confirmé en jeu.
+- Contexte: Nouveau lancement de GTA V Enhanced après la première correction d'identité d'assembly NIB. Le livrable CI était reconnu comme API `2.11.6`, mais le menu restait inactif lorsque j'appuyais sur F10.
+- Symptôme: `DonJEnemySpawner` était trouvé puis rejeté pendant son constructeur. L'appel natif d'initialisation des relations levait une `MissingMethodException` avant l'enregistrement de `KeyDown += OnKeyDown`; F10 ne pouvait donc recevoir aucun événement.
+- Sources vérifiées:
+  - `bug-reports\20260829-051929-f10-toujours-inactif-apres-correctif-nib\summary.md`;
+  - `bug-reports\20260829-051929-f10-toujours-inactif-apres-correctif-nib\raw-logs\Grand-Theft-Auto-V-Enhanced__NIBScriptHookVDotNet.log`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.cs` et `src\DonJEnemySpawner\DonJEnemySpawner.RuntimeSafety.cs`;
+  - stub `tools\Stubs\NIBScriptHookVDotNet2`, validateur `tools\NibAbiValidator`, contrat ABI canonique et tests associés;
+  - `TestResults\safety-20260829-204809`;
+  - workflow GitHub `Safety` n° `33269599747`, commit `13e3f64b8e0b0945ffce24b15409300493a1c606`;
+  - artefact exact `DonJCustomNpcPlacer-game-ready` téléchargé sous `C:\Users\nodig\AppData\Local\Temp\DonJ-ci-33269599747-13e3f64`;
+  - API live `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\NIBScriptHookVDotNet2.dll`;
+  - ENdll, PDB, manifest et journaux live sous `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts`.
+- Extraits utiles:
+  - log NIB historique à `05:17:57`: `Failed to instantiate script DonJEnemySpawner because constructor threw an exception: System.MissingMethodException: Méthode introuvable : '!!0 GTA.Native.Function.Call(GTA.Native.Hash, System.Object[])'.`, puis `GetPlayerRelationshipGroup -> InitializeRelationshipGroups -> DonJEnemySpawner..ctor`;
+  - l'API NIB réelle expose `Function.Call(Hash, InputArgument[])`, pas la surcharge permissive `Object[]` fournie par l'ancien stub; l'audit complet a identifié au moins neuf formes incompatibles;
+  - manifest déployé: `manifestVersion=2`, commit `13e3f64b8e0b0945ffce24b15409300493a1c606`, `sourceDirty=false`, API `NIBScriptHookVDotNet2 2.11.6.0`, contrat `nib-shvdn-v2.11.6`, SHA-256 du contrat `F1D70E6BE8D12178CEBAADC2E4B5EE30926A9C850C1A9F1F2C25900C355BD3BD`;
+  - SHA-256 ENdll artefact/installé: `2316D390A12876CF3443AF344676541EB689570B7577A5EEBB2D279380E9BC3D`; PDB: `0C5192AFB4F72155B15E11B125C1F744A8EE46534D1AE4A3ABEC165CD3B5E612`; API live: `DBF8FC318730D7101E945D0F4B6552E34C8559BEEE6978826D5067329358CB71`;
+  - log NIB live à `21:05:14–21:05:16`: `Found 1 script(s) in DonJCustomNpcPlacer.ENdll resolved to API version 2.11.6`, `Instantiating script DonJEnemySpawner`, puis `Started script DonJEnemySpawner.`;
+  - log DonJ live à `21:05:16.040`: `Chargement - DonJ Custom NPC Placer charge.`, sans nouvelle `MissingMethodException`.
+- Analyse / hypothèse: Le stub CI autorisait des signatures absentes de NIB 2.11.6. Le compilateur avait donc lié le livrable à `Function.Call(Hash, Object[])`, méthode impossible à résoudre dans le jeu. Comme l'initialisation native des relations précédait l'abonnement clavier, cette incompatibilité arrêtait le constructeur avant F10. Le raccourci et sa logique n'étaient pas défectueux.
+- Action menée: Le stub a été aligné sur toute l'interface NIB 2.11.6 consommée, notamment `InputArgument[]`, les héritages, types valeur/référence, retours, opérateurs et emplacements des membres; les surcharges permissives `Object[]`/`ulong` ont été supprimées. Un validateur net48 basé sur Mono.Cecil et un contrat ABI schema 2 contrôlent désormais chaque référence du livrable avant packaging et avant toute mutation du dossier GTA. Le manifest v2 publie l'identité et le SHA-256 du contrat. Le constructeur enregistre les événements runtime avant les initialisations optionnelles, lesquelles sont isolées et journalisées; une panne Relations ou Justice ne peut plus neutraliser F10, et Relations conserve sa reprise cadencée. Des tests couvrent le consommateur ABI volontairement invalide, le refus transactionnel avant mutation, l'instanciation réelle sous stub, l'erreur Relations, le basculement F10 et F10 pendant le placement.
+- Vérification: `tools\run-safety-checks.ps1 -UseStubApi` réussit `493/493` dans `TestResults\safety-20260829-204809`; `dotnet build GTA5modDEV.sln -c Release` termine avec zéro avertissement/zéro erreur; `dotnet test GTA5modDEV.sln -c Release` réussit `479/479`. Le validateur contrôle `32` références de types et `189` références de membres avec zéro incompatibilité contre l'API NIB live. Le workflow GitHub `33269599747` du commit `13e3f64` est vert et publie l'artefact exact ensuite revalidé et déployé. Les hashes installés correspondent à l'artefact, aucun alias historique ni fichier transactionnel ne subsiste. Le lancement réel du jeu confirme `Started script DonJEnemySpawner` et le message de chargement DonJ. Pendant la session live de `21:05` à `21:08`, le menu DonJ a été observé ouvert, F10 l'a fermé, F10 l'a rouvert, puis F10 l'a refermé, sans `MissingMethodException`.
+- Résolution: L'incompatibilité ABI qui interrompait le constructeur est supprimée et verrouillée dans la compilation, le packaging et le déploiement. Le mod est chargé par NIB 2.11.6 et F10 ouvre, ferme puis rouvre normalement le menu en jeu.
+
+## 2026-08-29 21:09:13 +02:00 - Faux échecs d'outillage pendant la validation finale F10
+- Statut: Résolus, sans impact sur la CI, le livrable, Git ou GTA.
+- Contexte: Récupération de l'artefact exact du workflow `Safety` n° `33269599747`, présentation de ses métadonnées et lancement de GTA V Enhanced pour la preuve finale.
+- Symptôme: `gh run view ... --json artifacts` a refusé un champ JSON non pris en charge; une commande PowerShell de diagnostic a placé un pipeline directement après un bloc `foreach` et levé un `ParserError`; la première demande de lancement GTA n'exposait pas encore de fenêtre ciblable, puis une seconde demande a affiché une erreur Steam alors que le lancement initial continuait. Une revue read-only a reproduit le même défaut de pipeline et une comparaison `DateTime`/`DateTimeOffset` invalide en filtrant des événements.
+- Sources vérifiées:
+  - sorties des commandes `gh run view` et PowerShell concernées;
+  - endpoint GitHub Actions des artefacts du run `33269599747`;
+  - dossier `C:\Users\nodig\AppData\Local\Temp\DonJ-ci-33269599747-13e3f64`;
+  - `bug-reports\20260829-210303-gta-launch-failure-during-f10-validation`;
+  - `C:\Users\nodig\Documents\Rockstar Games\Launcher\launcher.log`;
+  - processus et fenêtre uniques de `GTA5_Enhanced.exe` observés pendant la validation.
+- Extraits utiles:
+  - `gh`: champ JSON `artifacts` non reconnu; l'API dédiée a ensuite résolu l'artefact id `9719718129`, nom `DonJCustomNpcPlacer-game-ready`;
+  - PowerShell: `ParserError: An empty pipe element is not allowed`; la relance a matérialisé les lignes dans une variable avant formatage;
+  - launcher à `21:03:24.169`: `Second external launch requested from SCUI. Discarding`, puis à `21:03:30.356`: lancement de `GTA5_Enhanced.exe`.
+- Analyse / hypothèse: Les deux premières erreurs étaient limitées aux interfaces des outils de lecture. Pour GTA, le premier lancement était déjà engagé dans Steam/Rockstar, mais aucune fenêtre n'était encore exposée; le launcher a correctement écarté la demande en doublon. Aucun symptôme n'était lié au mod ou au correctif ABI.
+- Action menée: L'endpoint GitHub Actions dédié a servi à sélectionner et télécharger l'artefact exact. Les résultats PowerShell ont été capturés avant leur mise en forme et les diagnostics DateTime ont été abandonnés au profit des journaux horodatés. Les relances GTA ont cessé; l'état des fenêtres a été rafraîchi jusqu'à l'apparition de l'unique processus du jeu.
+- Vérification: L'artefact exact a été téléchargé, son manifest et son contrat ABI ont été validés, puis ses hashes ont été relus après déploiement. `launcher.log` confirme que le lancement initial a produit `GTA5_Enhanced.exe` six secondes après le rejet du doublon. La session réelle a ensuite chargé DonJ et validé le cycle F10 complet.
+- Résolution: Incidents d'outillage clos; les commandes fautives étaient read-only et le faux échec de lancement n'a interrompu ni le jeu ni la validation.
