@@ -1729,3 +1729,21 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: La branche locale attendue capture temporairement ce sous-processus sous `ErrorActionPreference=Continue`, mémorise son code, restaure impérativement la politique stricte en `finally`, puis échoue uniquement si le package sale a été accepté. Un test de contrat vérifie l'ordre assouplissement local, invocation, capture et restauration.
 - Vérification: Test packaging ciblé `12/12`; relance stub `477/477` dans `TestResults\safety-20260829-035146`; relance standard `467/467` dans `TestResults\safety-20260829-035409`; build Release séparé zéro avertissement/zéro erreur et test séparé `467/467`.
 - Résolution: Défaut limité au harness et corrigé; aucun déploiement live ni mutation des sauvegardes GTA.
+
+## 2026-08-29 04:06:06 +02:00 - Fixtures packaging dépendants de la propreté du checkout CI
+- Statut: Cause corrigée et validations locales réussies; nouveau workflow GitHub requis.
+- Contexte: Premier workflow `Safety` déclenché sur la branche principale après le commit `d8650a3` de remédiation Justice avancée.
+- Symptôme: La build CI réussit sans avertissement ni erreur, mais la suite termine à `471/477`. Six tests de déploiement fabriquent leur package depuis un checkout GitHub propre: le manifest porte donc déjà `sourceDirty=false`. Le helper de fixture supposait au contraire un worktree local sale; ses remplacements `true -> false` ne changeaient rien et le scénario censé vérifier le refus d'un package sale déployait un package propre.
+- Sources vérifiées:
+  - workflow GitHub Actions `Safety` n° `33227958962`, job `99035245792`;
+  - log distant de l'étape `Run safety suite` et TRX publié par la CI;
+  - `bug-reports\20260829-040606-ci-packaging-fixtures-source-propre`;
+  - `tests\DonJEnemySpawner.Tests\PackagingSafetyTests.cs`, helper `CreateVerifiedPackage`.
+- Extraits utiles:
+  - build CI: `0 Warning(s)`, `0 Error(s)`;
+  - tests CI: `Failed: 6, Passed: 471, Total: 477`;
+  - assertion récurrente: `Le fixture local doit être explicitement marqué publiable pour tester le déploiement` alors que le manifest affichait déjà `sourceDirty: false`.
+- Analyse / hypothèse: Le produit et le script de déploiement ne sont pas en cause. Le fixture dérivait implicitement son état sale/propre du dépôt hôte, ce qui rendait le test non déterministe entre le worktree de développement et un checkout CI propre.
+- Action menée: `CreateVerifiedPackage` remplace désormais explicitement `sourceDirty=true|false` par la valeur demandée pour chaque scénario, vérifie la présence du champ puis redécode le manifest pour confirmer la politique. Les tests de package sale et publiable deviennent indépendants de l'état Git réel.
+- Vérification: `PackagingSafetyTests` réussit `12/12`; `tools\run-safety-checks.ps1 -UseStubApi` réussit `477/477` dans `TestResults\safety-20260829-040723`, avec build zéro avertissement/zéro erreur et package local vérifié. La build Release standard termine aussi à zéro avertissement/zéro erreur et la suite standard réussit `467/467`. Le nouveau workflow `Safety` doit encore confirmer le checkout GitHub propre.
+- Résolution: Aucun déploiement GTA live ni donnée joueur affecté; correction limitée au déterminisme des tests CI.

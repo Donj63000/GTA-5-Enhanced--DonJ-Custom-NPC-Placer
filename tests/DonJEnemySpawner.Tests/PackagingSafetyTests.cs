@@ -557,21 +557,25 @@ public class PackagingSafetyTests
             "-DependencyDirectory", Path.GetDirectoryName(typeof(DonJEnemySpawner).Assembly.Location));
 
         Assert.AreEqual(0, result.ExitCode, result.CombinedOutput);
-        if (publishable)
-        {
-            string manifestPath = Path.Combine(packageDirectory, "manifest.json");
-            string manifest = File.ReadAllText(manifestPath);
-            string publishableManifest = Regex.Replace(
-                manifest,
-                "(\"sourceDirty\"\\s*:\\s*)true",
-                "$1false",
-                RegexOptions.CultureInvariant);
-            Assert.AreNotEqual(
-                manifest,
-                publishableManifest,
-                "Le fixture local doit être explicitement marqué publiable pour tester le déploiement.");
-            File.WriteAllText(manifestPath, publishableManifest);
-        }
+        string manifestPath = Path.Combine(packageDirectory, "manifest.json");
+        string manifest = File.ReadAllText(manifestPath);
+        const string SourceDirtyPattern = "(\"sourceDirty\"\\s*:\\s*)(?:true|false)";
+        Assert.IsTrue(
+            Regex.IsMatch(manifest, SourceDirtyPattern, RegexOptions.CultureInvariant),
+            "Le manifest du fixture doit exposer sourceDirty.");
+
+        // Je fixe explicitement la nature du fixture pour que le résultat ne
+        // dépende jamais de la propreté du checkout local ou de la CI.
+        string fixtureManifest = Regex.Replace(
+            manifest,
+            SourceDirtyPattern,
+            "$1" + (publishable ? "false" : "true"),
+            RegexOptions.CultureInvariant);
+        File.WriteAllText(manifestPath, fixtureManifest);
+        Assert.AreEqual(
+            !publishable,
+            ReadManifest(manifestPath).SourceDirty,
+            "Le fixture doit porter explicitement la politique demandée.");
         return packageDirectory;
     }
 
