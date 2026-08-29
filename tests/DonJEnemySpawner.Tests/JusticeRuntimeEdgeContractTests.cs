@@ -499,8 +499,9 @@ public sealed class JusticeRuntimeEdgeContractTests
             "return playerRestored;");
         AssertOrdered(
             retryDiscipline,
-            "player.IsInvincible = _justiceDisciplineStoredInvincible",
-            "player.IsInvincible != _justiceDisciplineStoredInvincible",
+            "TryReleasePlayerInvincibility(",
+            "PlayerInvincibilityOwner.JusticeDiscipline",
+            "_justiceDisciplineStoredInvincible",
             "_justiceDisciplineInvincibilityRestorePending = false");
         AssertOrdered(
             amnesty,

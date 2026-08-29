@@ -3136,7 +3136,8 @@ public sealed class JusticeRuntimeContractTests
         string discipline = ExecutableMethodBody(source, "BeginJusticeCustodyDiscipline");
         AssertOrdered(
             discipline,
-            "nonLethalProtectionVerified = player.IsInvincible",
+            "TryAcquirePlayerInvincibility(",
+            "PlayerInvincibilityOwner.JusticeDiscipline",
             "if (!nonLethalProtectionVerified)",
             "_justiceDisciplineInvincibilityRestorePending = true",
             "TryRestoreJusticeDisciplineInvincibility(player)",

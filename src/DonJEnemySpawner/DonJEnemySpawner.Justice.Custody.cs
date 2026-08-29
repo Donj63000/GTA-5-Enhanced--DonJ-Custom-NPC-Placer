@@ -668,12 +668,22 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        if (_placementMode)
+        if (HasPlacementSessionState())
         {
-            // Je rends d'abord les flags et la caméra du placement. Le snapshot
-            // Justice capture ainsi l'état réel du héros, et UpdatePlacementMode
-            // ne peut plus le regeler après le téléport de détention.
+            // Je rends d'abord les flags et la caméra du placement, y compris
+            // après un démarrage interrompu avant _placementMode = true.
             StopPlacementMode(false);
+        }
+        if (_placementPlayerStateStored ||
+            HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement))
+        {
+            // Le snapshot Justice ne doit surtout pas capturer notre valeur
+            // temporaire true. La phase Captured retentera ce transfert au tick
+            // suivant, après la restauration différée du joueur.
+            ShowStatus(
+                "Justice : transfert différé pendant la restauration du placement.",
+                3000);
+            return;
         }
 
         // Je reclasse après la conversion de l'amende : une peine ayant atteint
@@ -5685,43 +5695,35 @@ public sealed partial class DonJEnemySpawner
 
         _justiceDisciplineActive = true;
         _justiceDisciplineEndsAt = JusticeCustodyFutureTime(now, JusticeCustodyDisciplineDurationMs);
-        try
-        {
-            _justiceDisciplineStoredInvincible = player.IsInvincible;
-        }
-        catch
-        {
-            _justiceDisciplineStoredInvincible = _justiceCustodyPlayerStateStored
-                ? _justiceCustodyStoredInvincible
-                : false;
-        }
+        bool custodyFallbackInvincibility = _justiceCustodyPlayerStateStored
+            ? _justiceCustodyStoredInvincible
+            : false;
+        bool capturedInvincibility;
+        bool nonLethalProtectionVerified = TryAcquirePlayerInvincibility(
+            player,
+            PlayerInvincibilityOwner.JusticeDiscipline,
+            out capturedInvincibility);
+        _justiceDisciplineStoredInvincible =
+            (nonLethalProtectionVerified ||
+             HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.JusticeDiscipline) ||
+             IsPlayerInvincibilityRecoveryPending())
+                ? capturedInvincibility
+                : custodyFallbackInvincibility;
         _justiceDisciplineCrimeKind = _justiceDisciplineIntent.CrimeKind;
         _justiceDisciplineIncidentId = _justiceDisciplineIntent.IncidentId;
         _justiceDisciplineReturnStartedAt = 0;
         _justiceNextDisciplineReturnAttemptAt = 0;
         _justiceDisciplineReturnFailureCount = 0;
-        bool nonLethalProtectionVerified = false;
-        bool invincibilityMutationMayHaveStarted = false;
-        try
-        {
-            player.IsInvincible = true;
-            invincibilityMutationMayHaveStarted = true;
-            nonLethalProtectionVerified = player.IsInvincible;
-        }
-        catch
-        {
-            // Le setter peut avoir réussi avant que le getter de vérification ne
-            // lève. Je restaure donc toujours la valeur capturée dans ce cas.
-            invincibilityMutationMayHaveStarted = true;
-            nonLethalProtectionVerified = false;
-        }
+        _justiceDisciplineInvincibilityRestorePending = false;
         if (!nonLethalProtectionVerified)
         {
             // Sans invulnérabilité vérifiée, aucun garde ne reçoit d'ordre de
-            // combat. L'intention durable sera jugée sans exposer le joueur.
+            // combat. Le gestionnaire partagé annule sa mutation ou conserve
+            // une restauration retentable si l'API GTA a échoué à mi-écriture.
             _justiceDisciplineActive = false;
             _justiceDisciplineEndsAt = 0;
-            if (invincibilityMutationMayHaveStarted)
+            if (HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.JusticeDiscipline) ||
+                IsPlayerInvincibilityRecoveryPending())
             {
                 _justiceDisciplineInvincibilityRestorePending = true;
                 TryRestoreJusticeDisciplineInvincibility(player);
@@ -5934,7 +5936,8 @@ public sealed partial class DonJEnemySpawner
     private bool EndJusticeCustodyDiscipline(Ped player)
     {
         if (!_justiceDisciplineActive &&
-            !_justiceDisciplineInvincibilityRestorePending)
+            !_justiceDisciplineInvincibilityRestorePending &&
+            !HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.JusticeDiscipline))
         {
             return true;
         }
@@ -5977,20 +5980,18 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        try
-        {
-            player.IsInvincible = _justiceDisciplineStoredInvincible;
-            if (player.IsInvincible != _justiceDisciplineStoredInvincible)
-            {
-                return false;
-            }
-            _justiceDisciplineInvincibilityRestorePending = false;
-            return true;
-        }
-        catch
+        bool restored = TryReleasePlayerInvincibility(
+            player,
+            PlayerInvincibilityOwner.JusticeDiscipline,
+            _justiceDisciplineStoredInvincible,
+            true);
+        if (!restored)
         {
             return false;
         }
+
+        _justiceDisciplineInvincibilityRestorePending = false;
+        return true;
     }
 
     private static int GetJusticeCustodyCrimePriority(JusticeCrimeKind kind)
@@ -8504,6 +8505,23 @@ public sealed partial class DonJEnemySpawner
         _justiceVoluntaryFinePaymentIntent = null;
         _justiceNextVoluntaryPaymentResumeAt = 0;
         ResetJusticeFineCashReadRetry();
+        if (HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.JusticeDiscipline))
+        {
+            Ped currentPlayer = null;
+            try
+            {
+                currentPlayer = Game.Player.Character;
+            }
+            catch
+            {
+            }
+
+            TryReleasePlayerInvincibility(
+                currentPlayer,
+                PlayerInvincibilityOwner.JusticeDiscipline,
+                _justiceDisciplineStoredInvincible,
+                true);
+        }
         _justiceDisciplineIntent = null;
         _justiceDisciplineActive = false;
         _justiceDisciplineInvincibilityRestorePending = false;

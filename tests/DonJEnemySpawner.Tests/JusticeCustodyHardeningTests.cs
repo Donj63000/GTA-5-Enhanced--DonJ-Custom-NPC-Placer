@@ -455,8 +455,11 @@ public sealed class JusticeCustodyHardeningTests
         AssertOrdered(
             begin,
             "if (_justiceCaseState.SentenceSeconds <= 0)",
-            "if (_placementMode)",
+            "if (HasPlacementSessionState())",
             "StopPlacementMode(false)",
+            "if (_placementPlayerStateStored ||",
+            "HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement)",
+            "return;",
             "_justiceCustodySite = GetJusticeCustodySiteForSentence",
             "CompleteJusticeCustodyTransfer(player, Game.GameTime)");
         AssertOrdered(

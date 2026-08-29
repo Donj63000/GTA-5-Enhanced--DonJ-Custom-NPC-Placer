@@ -279,6 +279,9 @@ private bool _menuVisible;
 
     private bool _storedPlayerInvincible;
     private bool _storedPlayerFrozen;
+    private Ped _placementProtectedPlayer;
+    private int _placementProtectedPlayerHandle;
+    private bool _placementPlayerStateStored;
 
     private static Type _weaponComponentHashType;
 
@@ -837,6 +840,11 @@ private enum EnemyBehavior
                         UpdateTerminatorMode();
                         break;
 
+                    case RuntimeTickStage.PlayerProtection:
+                        MaintainPlayerInvincibilityProtection();
+                        MaintainPlacementPlayerStateRecovery();
+                        break;
+
                     case RuntimeTickStage.CustomModelRequest:
                         if (_customModelInputRequested)
                         {
@@ -951,6 +959,7 @@ private enum EnemyBehavior
             bool justiceEarlySucceeded = RunTickStage(RuntimeTickStage.JusticeEarly);
             RunTickStage(RuntimeTickStage.CartelEarly);
             RunTickStage(RuntimeTickStage.Terminator);
+            RunTickStage(RuntimeTickStage.PlayerProtection);
             _autoRespawnsThisTick = 0;
 
             RunTickStage(RuntimeTickStage.CustomModelRequest);
@@ -1104,6 +1113,10 @@ private enum EnemyBehavior
                         StopPlacementMode(false);
                         break;
 
+                    case RuntimeShutdownStage.PlayerProtection:
+                        ShutdownPlayerInvincibilityProtection();
+                        break;
+
                     case RuntimeShutdownStage.Menu:
                         ReleaseMenuUi();
                         break;
@@ -1138,6 +1151,7 @@ private enum EnemyBehavior
         RunShutdownStep(RuntimeShutdownStage.Justice);
         RunShutdownStep(RuntimeShutdownStage.Terminator);
         RunShutdownStep(RuntimeShutdownStage.Placement);
+        RunShutdownStep(RuntimeShutdownStage.PlayerProtection);
         RunShutdownStep(RuntimeShutdownStage.Menu);
         RunShutdownStep(RuntimeShutdownStage.DangerAction);
         RunShutdownStep(RuntimeShutdownStage.HighSecurityEscort);
@@ -7088,36 +7102,76 @@ private void DrawMenu()
             return;
         }
 
-        Ped player = Game.Player.Character;
+        if (HasPlacementSessionState())
+        {
+            // Une précédente initialisation partielle ne doit jamais servir de
+            // base à une nouvelle capture d'état. Je la nettoie d'abord.
+            StopPlacementMode(false);
+            if (HasPlacementSessionState())
+            {
+                ShowStatus("Placement indisponible: restauration du joueur en cours.", 4000);
+                return;
+            }
+        }
 
+        Ped player = Game.Player.Character;
         if (!Entity.Exists(player) || player.IsDead)
         {
             ShowStatus("Placement impossible: joueur invalide.", 3000);
             return;
         }
 
-        EnsureRelationshipGroups();
-
-        SetMenuVisible(false);
-
-        _storedPlayerInvincible = player.IsInvincible;
-        _storedPlayerFrozen = player.FreezePosition;
-
-        player.IsInvincible = true;
-        player.FreezePosition = true;
-
-        Vector3 cameraPosition = Function.Call<Vector3>(Hash.GET_GAMEPLAY_CAM_COORD);
-        Vector3 cameraRotation = Function.Call<Vector3>(Hash.GET_GAMEPLAY_CAM_ROT, 2);
-
-        _placementCameraRotation = cameraRotation;
-        _placementHeading = NormalizeHeading(player.Heading);
-        _placementCamera = World.CreateCamera(cameraPosition, cameraRotation, 60.0f);
-
-        if (Camera.Exists(_placementCamera))
+        try
         {
+            EnsureRelationshipGroups();
+            SetMenuVisible(false);
+
+            int playerHandle = player.Handle;
+            if (playerHandle == 0)
+            {
+                throw new InvalidOperationException("Handle joueur invalide.");
+            }
+
+            _storedPlayerFrozen = player.FreezePosition;
+            _placementProtectedPlayer = player;
+            _placementProtectedPlayerHandle = playerHandle;
+            _placementPlayerStateStored = true;
+
+            bool originalInvincibility;
+            if (!TryAcquirePlayerInvincibility(
+                    player,
+                    PlayerInvincibilityOwner.Placement,
+                    out originalInvincibility))
+            {
+                throw new InvalidOperationException(
+                    "La protection temporaire du joueur n'a pas pu être vérifiée.");
+            }
+
+            _storedPlayerInvincible = originalInvincibility;
+            player.FreezePosition = true;
+            if (!player.FreezePosition)
+            {
+                throw new InvalidOperationException(
+                    "Le gel temporaire du joueur n'a pas pu être vérifié.");
+            }
+
+            Vector3 cameraPosition = Function.Call<Vector3>(Hash.GET_GAMEPLAY_CAM_COORD);
+            Vector3 cameraRotation = Function.Call<Vector3>(Hash.GET_GAMEPLAY_CAM_ROT, 2);
+
+            _placementCameraRotation = cameraRotation;
+            _placementHeading = NormalizeHeading(player.Heading);
+            _placementCamera = World.CreateCamera(cameraPosition, cameraRotation, 60.0f);
+
+            if (!Camera.Exists(_placementCamera))
+            {
+                throw new InvalidOperationException(
+                    "La caméra de placement n'a pas pu être créée.");
+            }
+
             _placementCamera.FarClip = 10000.0f;
             World.RenderingCamera = _placementCamera;
 
+            // Le mode n'est publié qu'après la réussite de toutes les mutations.
             _placementMode = true;
             _placementHasHit = false;
             _placementCancelRequested = false;
@@ -7125,62 +7179,165 @@ private void DrawMenu()
             _nextPlacementSpawnAllowedAt = 0;
             _nextPreviewRetryAt = 0;
 
-            ShowStatus("Placement camera actif: clic gauche/Entree place, Echap/clic droit quitte.", 5000);
+            ShowStatus(
+                "Placement camera actif: clic gauche/Entree place, Echap/clic droit quitte.",
+                5000);
         }
-        else
+        catch (Exception ex)
         {
-            player.IsInvincible = _storedPlayerInvincible;
-            player.FreezePosition = _storedPlayerFrozen;
-            ShowStatus("Impossible de creer la camera de placement.", 4000);
-            SetMenuVisible(true);
+            // La restauration passe avant le diagnostic : une panne de log ou
+            // d'UI ne doit jamais empêcher la sortie du mode invincible.
+            StopPlacementMode(true);
+            try
+            {
+                LogException("Placement.Demarrage", ex);
+            }
+            catch
+            {
+            }
+            try
+            {
+                ShowStatus(
+                    "Placement annulé: état du joueur et caméra restaurés.",
+                    4500);
+            }
+            catch
+            {
+            }
         }
     }
 
     private void StopPlacementMode(bool reopenMenu)
     {
-        if (!_placementMode)
-        {
-            return;
-        }
-
+        // Je ne retourne jamais uniquement sur _placementMode : ce booléen n'est
+        // vrai qu'à la fin du démarrage, alors que le joueur est protégé avant.
         _placementMode = false;
 
-        DeletePlacementPreview();
-
-        if (Camera.Exists(_placementCamera))
+        Exception firstCleanupFailure = null;
+        try
         {
-            World.RenderingCamera = null;
-            _placementCamera.Destroy();
+            DeletePlacementPreview();
+        }
+        catch (Exception ex)
+        {
+            firstCleanupFailure = ex;
         }
 
+        Camera camera = _placementCamera;
+        if (!object.ReferenceEquals(camera, null))
+        {
+            try
+            {
+                // NIB/SHVDN v2 expose le setter de RenderingCamera mais pas
+                // nécessairement son getter. Dès que notre caméra existe, nous
+                // devons rendre la caméra de gameplay avant de la détruire.
+                World.RenderingCamera = null;
+            }
+            catch (Exception ex)
+            {
+                if (firstCleanupFailure == null)
+                {
+                    firstCleanupFailure = ex;
+                }
+            }
+
+            try
+            {
+                if (Camera.Exists(camera))
+                {
+                    camera.Destroy();
+                }
+            }
+            catch (Exception ex)
+            {
+                if (firstCleanupFailure == null)
+                {
+                    firstCleanupFailure = ex;
+                }
+            }
+        }
         _placementCamera = null;
 
-        Ped player = Game.Player.Character;
-
-        if (Entity.Exists(player))
+        bool playerRestored = false;
+        try
         {
-            player.IsInvincible = _storedPlayerInvincible;
-            player.FreezePosition = _storedPlayerFrozen;
+            playerRestored = TryRestorePlacementPlayerState();
+        }
+        catch (Exception ex)
+        {
+            if (firstCleanupFailure == null)
+            {
+                firstCleanupFailure = ex;
+            }
         }
 
         _placementCancelRequested = false;
         _placementConfirmRequested = false;
+        _placementHasHit = false;
 
         if (reopenMenu)
         {
-            SetMenuVisible(true);
+            try
+            {
+                SetMenuVisible(true);
+            }
+            catch (Exception ex)
+            {
+                if (firstCleanupFailure == null)
+                {
+                    firstCleanupFailure = ex;
+                }
+            }
+        }
+
+        if (firstCleanupFailure != null)
+        {
+            try
+            {
+                LogException("Placement.Nettoyage", firstCleanupFailure);
+            }
+            catch
+            {
+            }
+        }
+
+        if (!playerRestored)
+        {
+            try
+            {
+                LogWarning(
+                    "Placement.RestaurationJoueur",
+                    "Restauration différée; une nouvelle tentative sera faite au prochain tick.");
+            }
+            catch
+            {
+            }
         }
     }
 
     private void UpdatePlacementMode()
     {
+        Ped player = Game.Player.Character;
+        if (!IsPlacementProtectedPlayer(player) || player.IsDead)
+        {
+            StopPlacementMode(true);
+            ShowStatus("Placement quitté: le personnage joueur a changé.", 3200);
+            return;
+        }
+
         if (!Camera.Exists(_placementCamera))
         {
             StopPlacementMode(true);
             return;
         }
 
-        KeepPlayerSafeDuringPlacement();
+        if (!KeepPlayerSafeDuringPlacement())
+        {
+            StopPlacementMode(true);
+            ShowStatus("Placement quitté: protection du joueur non vérifiée.", 3500);
+            return;
+        }
+
         DisablePlacementControls();
 
         bool mouseCancel = IsDisabledControlJustPressed(GtaControl.Aim);
@@ -7226,17 +7383,135 @@ private void DrawMenu()
         }
     }
 
-    private void KeepPlayerSafeDuringPlacement()
+    private bool KeepPlayerSafeDuringPlacement()
     {
         Ped player = Game.Player.Character;
-
-        if (!Entity.Exists(player))
+        if (!IsPlacementProtectedPlayer(player) ||
+            !HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement))
         {
-            return;
+            return false;
         }
 
-        player.IsInvincible = true;
-        player.FreezePosition = true;
+        MaintainPlayerInvincibilityProtection();
+        try
+        {
+            player.FreezePosition = true;
+            return player.IsInvincible && player.FreezePosition;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool HasPlacementSessionState()
+    {
+        return _placementMode ||
+               _placementPlayerStateStored ||
+               HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement) ||
+               !object.ReferenceEquals(_placementCamera, null) ||
+               !object.ReferenceEquals(_placementPreviewPed, null) ||
+               !object.ReferenceEquals(_placementPreviewVehicle, null) ||
+               !object.ReferenceEquals(_placementPreviewProp, null);
+    }
+
+    private void MaintainPlacementPlayerStateRecovery()
+    {
+        if (!_placementMode &&
+            (_placementPlayerStateStored ||
+             HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement)))
+        {
+            TryRestorePlacementPlayerState();
+        }
+    }
+
+    private bool TryRestorePlacementPlayerState()
+    {
+        bool hasPlacementProtection =
+            HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement);
+        if (!_placementPlayerStateStored && !hasPlacementProtection)
+        {
+            return true;
+        }
+
+        Ped player = ResolvePlacementProtectedPlayer();
+        bool invincibilityRestored = TryReleasePlayerInvincibility(
+            player,
+            PlayerInvincibilityOwner.Placement,
+            _storedPlayerInvincible,
+            false);
+
+        bool freezeRestored = true;
+        if (_placementPlayerStateStored)
+        {
+            if (object.ReferenceEquals(player, null))
+            {
+                freezeRestored = IsKnownMissingPlayerEntity(_placementProtectedPlayer);
+            }
+            else
+            {
+                try
+                {
+                    player.FreezePosition = _storedPlayerFrozen;
+                    freezeRestored = player.FreezePosition == _storedPlayerFrozen;
+                }
+                catch
+                {
+                    freezeRestored = false;
+                }
+            }
+        }
+
+        if (invincibilityRestored && freezeRestored)
+        {
+            _placementProtectedPlayer = null;
+            _placementProtectedPlayerHandle = 0;
+            _placementPlayerStateStored = false;
+            _storedPlayerInvincible = false;
+            _storedPlayerFrozen = false;
+            return true;
+        }
+
+        return false;
+    }
+
+    private Ped ResolvePlacementProtectedPlayer()
+    {
+        if (IsPlacementProtectedPlayer(_placementProtectedPlayer))
+        {
+            return _placementProtectedPlayer;
+        }
+
+        try
+        {
+            Ped currentPlayer = Game.Player.Character;
+            if (IsPlacementProtectedPlayer(currentPlayer))
+            {
+                return currentPlayer;
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private bool IsPlacementProtectedPlayer(Ped player)
+    {
+        if (!IsExistingPlayerEntity(player) || _placementProtectedPlayerHandle == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return player.Handle == _placementProtectedPlayerHandle;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void DisablePlacementControls()

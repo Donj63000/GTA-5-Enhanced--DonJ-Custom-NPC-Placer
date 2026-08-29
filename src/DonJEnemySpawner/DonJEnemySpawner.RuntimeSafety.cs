@@ -27,6 +27,7 @@ public sealed partial class DonJEnemySpawner
         JusticeEarly,
         CartelEarly,
         Terminator,
+        PlayerProtection,
         CustomModelRequest,
         SaveRequest,
         LoadRequest,
@@ -54,6 +55,7 @@ public sealed partial class DonJEnemySpawner
         Justice,
         Terminator,
         Placement,
+        PlayerProtection,
         Menu,
         DangerAction,
         HighSecurityEscort,
@@ -238,6 +240,7 @@ public sealed partial class DonJEnemySpawner
             case RuntimeTickStage.JusticeEarly: return "Tick.JusticeEarly";
             case RuntimeTickStage.CartelEarly: return "Tick.CartelEarly";
             case RuntimeTickStage.Terminator: return "Tick.Terminator";
+            case RuntimeTickStage.PlayerProtection: return "Tick.PlayerProtection";
             case RuntimeTickStage.CustomModelRequest: return "Tick.CustomModelRequest";
             case RuntimeTickStage.SaveRequest: return "Tick.SaveRequest";
             case RuntimeTickStage.LoadRequest: return "Tick.LoadRequest";
@@ -273,6 +276,7 @@ public sealed partial class DonJEnemySpawner
             case RuntimeShutdownStage.Justice: return "Shutdown.Justice";
             case RuntimeShutdownStage.Terminator: return "Shutdown.Terminator";
             case RuntimeShutdownStage.Placement: return "Shutdown.Placement";
+            case RuntimeShutdownStage.PlayerProtection: return "Shutdown.PlayerProtection";
             case RuntimeShutdownStage.Menu: return "Shutdown.Menu";
             case RuntimeShutdownStage.DangerAction: return "Shutdown.DangerAction";
             case RuntimeShutdownStage.HighSecurityEscort: return "Shutdown.HighSecurityEscort";

@@ -1862,3 +1862,19 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Les logs ont été collectés avec `tools\collect-bug-logs.ps1`; le snapshot live et les chemins de code susceptibles de modifier l'invincibilité ont été inspectés en lecture seule. Aucun fichier source, binaire installé, état de sauvegarde GTA ou réglage en jeu n'a été modifié.
 - Vérification: Aucune suite de tests ni reproduction supplémentaire n'est lancée, conformément à la demande d'arrêt et de publication de l'état actuel sans test.
 - Résolution: Non résolu. L'incident est conservé pour reprise manuelle ultérieure depuis l'état publié sur `main`.
+
+## 2026-08-29 23:22:18 +02:00 - Contrat ABI Camera refusé après application du correctif d'immortalité
+- Statut: Corrigé, validé localement et déployé comme build de test.
+- Contexte: Première exécution de `tools\run-safety-checks.ps1` juste après l'application de `fix-player-immortality.patch`.
+- Symptôme: La compilation Release réussissait, mais le validateur ABI refusait le livrable avant les tests avec `ABI040 Reference de membre non autorisée par le contrat : method|class [api]GTA.Camera|op_Inequality`.
+- Sources vérifiées:
+  - `TestResults\safety-20260829-231210\logs\verify-nib-abi.log`;
+  - `bug-reports\20260829-231224-safety-failure` et son `crash-list-entry.md` généré par `tools\collect-bug-logs.ps1`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.cs`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.PlayerProtection.cs`;
+  - `tests\DonJEnemySpawner.Tests\PlayerInvincibilityRegressionTests.cs`.
+- Extraits utiles: `GTA.Camera.op_Inequality` était appelé par `_placementCamera != null`; le contrat NIB v2.11.6 ne référence pas cet opérateur.
+- Analyse / hypothèse: Le patch introduisait dix comparaisons `null` directes sur des wrappers GTA (`Camera`, `Ped`, `Vehicle`, `Prop`). Ces opérateurs CLR ne sont pas une API v2 autorisée, même si l'existence effective de l'entité doit continuer à être contrôlée par les natives prévues.
+- Action menée: Les dix comparaisons sont remplacées par `object.ReferenceEquals`, ce qui conserve la détection des états de placement partiels sans appeler un opérateur GTA. Le test de régression vérifie explicitement ce garde-fou pour la caméra de placement.
+- Vérification: `tools\run-safety-checks.ps1` réussit dans `TestResults\safety-20260829-231422` avec `481/481`; `dotnet build GTA5modDEV.sln -c Release` termine avec zéro avertissement/zéro erreur; `dotnet test GTA5modDEV.sln -c Release` réussit `481/481`. Le validateur ABI contrôle le livrable installé contre `NIBScriptHookVDotNet2.dll` avec `runtimeValidated=true`, `32` références de types et `189` références de membres.
+- Résolution: Le correctif d'immortalité reste appliqué et le livrable de test valide a remplacé l'ENdll, le PDB et le manifest GTA. Le manifest installé indique volontairement `sourceDirty=true`; la version précédente reste sauvegardée dans `TestResults\safety-20260829-231422\gta-predeploy-backup-20260829-231422`.
