@@ -316,16 +316,40 @@ public sealed class JusticeEnginePersistenceRegressionTests
     [TestMethod]
     public void WitnessSnapshot_ReservesVictimsBeforePoliceAndLivingWitnesses()
     {
-        string capture = ExtractMethodBody(ReadJusticeSource(), "GetJusticeWitnessCandidatesForActor");
-        StringAssert.Contains(capture, "for (int pass = 0; pass < 3");
+        string runtime = ReadJusticeSource();
+        string worldSnapshot = ReadJusticeWorldSnapshotSource();
+        string worldCapture = ExtractMethodBody(worldSnapshot, "CaptureJusticeWorldSnapshot");
+        string detection = ExtractMethodBody(runtime, "DetectJusticeEventFronts");
+        string witnessCapture = ExtractMethodBody(runtime, "GetJusticeWitnessCandidatesForActor");
+
+        Assert.AreEqual(1, CountOccurrences(worldCapture, "GetNearbyPedsSafe"));
+        Assert.AreEqual(1, CountOccurrences(worldCapture, "GetNearbyVehiclesSafe"));
         AssertOrdered(
-            capture,
+            worldCapture,
+            "GetNearbyPedsSafe(player, JusticeWorldSnapshotRadius)",
+            "_justiceWorldSnapshot.PedQueryCount = 1",
+            "GetNearbyVehiclesSafe(player, JusticeWorldSnapshotRadius)",
+            "_justiceWorldSnapshot.VehicleQueryCount = 1");
+        Assert.AreEqual(1, CountOccurrences(detection, "CaptureJusticeWorldSnapshot(player)"));
+        AssertOrdered(
+            detection,
+            "CaptureJusticeWorldSnapshot(player)",
+            "ScanJusticeEventVictims(");
+
+        Assert.AreEqual(0, CountOccurrences(runtime, "GetNearbyPedsSafe"));
+        Assert.AreEqual(0, CountOccurrences(runtime, "GetNearbyVehiclesSafe"));
+        StringAssert.Contains(witnessCapture, "Ped[] nearby = GetJusticeSnapshotPeds()");
+        StringAssert.Contains(
+            witnessCapture,
+            "IsJusticeSnapshotEntityWithin(candidate, actor, JusticeWitnessRadius)");
+        StringAssert.Contains(witnessCapture, "for (int pass = 0; pass < 3");
+        AssertOrdered(
+            witnessCapture,
             "bool dead",
             "dead && victimCount < JusticeMaximumVictimCandidatesPerEvent",
             "!dead && IsJusticePolicePed(candidate)",
             "!dead && !IsJusticePolicePed(candidate)",
             "target.Candidates[candidateCount++]");
-        Assert.AreEqual(1, CountOccurrences(capture, "GetNearbyPedsSafe"));
     }
 
     [TestMethod]
@@ -447,6 +471,15 @@ public sealed class JusticeEnginePersistenceRegressionTests
             "src",
             "DonJEnemySpawner",
             "DonJEnemySpawner.Justice.cs"));
+    }
+
+    private static string ReadJusticeWorldSnapshotSource()
+    {
+        return File.ReadAllText(Path.Combine(
+            GetRepositoryRoot(),
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.Justice.WorldSnapshot.cs"));
     }
 
     private static string ExtractMethodBody(string source, string methodName)

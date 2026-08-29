@@ -1,7 +1,16 @@
 DonJ Custom NPC Placer Enhanced - installation simple
 ======================================================
 
-Ce dossier contient les fichiers du mod prets a placer dans GTA V Enhanced.
+Ce guide est integre au package game-ready genere et verifie par la CI.
+N'utilisez jamais un ancien binaire conserve manuellement dans le depot source.
+
+Ou obtenir le package
+---------------------
+
+1. Ouvrez l'onglet Actions du depot GitHub.
+2. Ouvrez la derniere execution Safety reussie pour la version voulue.
+3. Telechargez l'artefact DonJCustomNpcPlacer-game-ready.
+4. Decompressez-le avant de suivre les etapes ci-dessous.
 
 Fichiers inclus
 ---------------
@@ -12,6 +21,11 @@ Fichiers inclus
 - DonJCustomNpcPlacer.pdb
   Optionnel. Il sert surtout au debug et rend les logs plus lisibles.
   Vous pouvez le copier aussi, ca ne gene pas.
+
+- manifest.json
+  Il indique le commit, les versions, les tailles et les SHA-256 exacts du
+  binaire et du PDB issus du meme build teste. Copiez-le dans Scripts en le
+  renommant DonJCustomNpcPlacer.manifest.json pour le diagnostic du mod.
 
 Ou mettre les fichiers
 ----------------------
@@ -33,12 +47,14 @@ Ou mettre les fichiers
 
    - DonJCustomNpcPlacer.ENdll
    - DonJCustomNpcPlacer.pdb  (optionnel)
+   - manifest.json, renomme DonJCustomNpcPlacer.manifest.json
 
 Important
 ---------
 
-Ne copiez pas le dossier "Mode-pour-jeu-ici" entier dans Scripts.
-Ouvrez ce dossier, puis copiez les fichiers qui sont dedans directement dans Scripts.
+Ne copiez pas le dossier du package entier dans Scripts.
+Copiez uniquement DonJCustomNpcPlacer.ENdll, le manifest renomme et, si vous le
+souhaitez, le PDB fourni dans ce meme package verifie.
 
 Ce qu'il faut avoir avant de lancer le jeu
 -----------------------------------------
@@ -47,7 +63,7 @@ Dans le dossier principal de GTA V Enhanced, au meme niveau que GTA5_Enhanced.ex
 vous devez avoir :
 
 - ScriptHookV.dll
-- dinput8.dll
+- xinput1_4.dll
 - NIBScriptHookVDotNet.asi
 - NIBScriptHookVDotNet2.dll
 
@@ -68,11 +84,16 @@ Lancer le mod
 Mise a jour du mod
 ------------------
 
-1. Fermez le jeu.
-2. Supprimez l'ancien fichier :
-   Scripts\DonJCustomNpcPlacer.ENdll
-3. Copiez le nouveau DonJCustomNpcPlacer.ENdll depuis ce dossier.
-4. Relancez le jeu.
+1. Fermez le jeu et ses loaders.
+2. Verifiez le SHA-256 du nouveau DonJCustomNpcPlacer.ENdll avec manifest.json.
+3. Copiez DonJCustomNpcPlacer.ENdll et DonJCustomNpcPlacer.pdb depuis le package
+   game-ready verifie en remplacant les fichiers du meme nom. Ne supprimez jamais
+   l'ancien ENdll avant d'avoir valide le nouveau fichier a copier.
+4. Remplacez Scripts\DonJCustomNpcPlacer.manifest.json par le manifest.json du
+   meme package, en conservant ce nom stable.
+5. Recalculez le SHA-256 du ENdll installe et comparez-le encore au manifest.
+6. Seulement apres cette validation, retirez les anciens alias listes ci-dessous.
+7. Relancez le jeu.
 
 Si vous aviez une ancienne version
 ----------------------------------

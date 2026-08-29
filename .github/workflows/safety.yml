@@ -19,11 +19,20 @@ jobs:
 
       - name: Run safety suite
         shell: pwsh
-        run: .\tools\run-safety-checks.ps1 -Ci -UseStubApi
+        run: .\tools\run-safety-checks.ps1 -Ci -UseStubApi -PackageOutputDirectory .\artifacts\game-ready
+
+      - name: Upload verified game-ready package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DonJCustomNpcPlacer-game-ready
+          path: artifacts/game-ready/**
+          if-no-files-found: error
 
       - name: Upload safety results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: safety-results
-          path: TestResults/safety-*
+          path: |
+            TestResults/safety-*

@@ -2,6 +2,8 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
+using GTA;
 using GTA.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -10,6 +12,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 public sealed class JusticeCustodyHardeningTests
 {
     private static readonly Type ScriptType = typeof(DonJEnemySpawner);
+    private const BindingFlags PrivateInstance = BindingFlags.NonPublic | BindingFlags.Instance;
     private const BindingFlags PrivateStatic = BindingFlags.NonPublic | BindingFlags.Static;
 
     [TestMethod]
@@ -77,10 +80,37 @@ public sealed class JusticeCustodyHardeningTests
             "NativeGetSelectedPedWeapon",
             "selectedWeaponHash != _justiceWeaponSnapshot.SelectedWeaponHash");
 
+        string provisional = ExtractMethodBody(
+            source,
+            "RestoreJusticeInventoryProvisionallyOnShutdown");
+        Assert.IsFalse(provisional.Contains("RemoveJusticePlayerWeaponsSafe"));
+        StringAssert.Contains(provisional, "RestoreJusticeWeaponSnapshotMergeSafe(player, true, true)");
+        StringAssert.Contains(provisional, "attempt < 3 && !restored");
+        Assert.IsFalse(
+            provisional.Contains("_justiceInventoryRemoved ="),
+            "La restitution d'arrêt reste provisoire : l'état durable doit demander une reconfiscation au reload.");
+
         string shutdown = ExtractMethodBody(source, "JusticeShutdownCustody");
         Assert.IsFalse(shutdown.Contains("RestoreJusticeWeaponSnapshot(player)"));
         Assert.IsFalse(shutdown.Contains("RemoveJusticePlayerWeaponsSafe"));
-        StringAssert.Contains(shutdown, "RestoreJusticeWeaponSnapshotMergeSafe(player, true, true)");
+        Assert.AreEqual(
+            6,
+            CountOccurrences(shutdown, "RunJusticeCustodyShutdownStep("),
+            "Chaque domaine de nettoyage doit être isolé, police comprise dans le finally.");
+        AssertOrdered(
+            shutdown,
+            "\"Activite\"",
+            "\"Discipline\"",
+            "\"Inventaire\"",
+            "RestoreJusticeInventoryProvisionallyOnShutdown(player)",
+            "\"EtatJoueur\"",
+            "\"Scene\"",
+            "finally",
+            "\"Police\"",
+            "_justiceWeaponControlsLocked = false");
+
+        string isolatedStep = ExtractMethodBody(source, "RunJusticeCustodyShutdownStep");
+        AssertOrdered(isolatedStep, "try", "action();", "catch (Exception ex)", "LogException");
     }
 
     [TestMethod]
@@ -109,11 +139,12 @@ public sealed class JusticeCustodyHardeningTests
         string resume = ExtractMethodBody(source, "ResumeJusticeFineDebitIntent");
         AssertOrdered(
             resume,
+            "TryArmJusticeFinancialAttempt(",
             "intent.DebitAttempted = true",
             "intent.CashWriteResult = JusticeCashWriteResult.Unknown",
-            "PersistJusticeCriticalPrecommitRedundantly()",
+            "if (!attemptWasAlreadyDurable)",
             "intent.CashWriteResult = TryWriteJusticeSinglePlayerCash",
-            "PersistJusticeCriticalPrecommitRedundantly()");
+            "JusticeFlushStateNow()");
         StringAssert.Contains(resume, "JusticeCashWriteResult.Succeeded");
         StringAssert.Contains(resume, "finalSentence = intent.SentenceIfDebited");
         StringAssert.Contains(resume, "JusticeCashWriteResult.Rejected");
@@ -379,9 +410,9 @@ public sealed class JusticeCustodyHardeningTests
         string failure = ExtractMethodBody(source, "HandleJusticeCustodyTransferFailure");
 
         Assert.AreEqual(
-            3,
+            4,
             CountOccurrences(transfer, "HandleJusticeCustodyTransferFailure(player, now)"),
-            "Le snapshot, le précommit et le téléport doivent partager le même timeout.");
+            "Le snapshot joueur, le WAL, l'inventaire et le téléport doivent partager le même timeout.");
         Assert.IsFalse(transfer.Contains("RegisterJusticeCustodyTransferFailure(now)"));
         AssertOrdered(
             failure,
@@ -431,9 +462,132 @@ public sealed class JusticeCustodyHardeningTests
         AssertOrdered(
             transfer,
             "StoreJusticeCustodyPlayerState(player)",
-            "PrepareJusticeInventoryConfiscation(player)",
+            "PersistJusticeCriticalPrecommitRedundantly()",
+            "JusticeInventoryPreparationResult inventoryPreparation",
+            "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
+            "inventoryPreparation != JusticeInventoryPreparationResult.Ready",
             "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)");
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "None",
+                "CapturePending",
+                "SnapshotPersisted",
+                "RemovalPending",
+                "RemovedVerified",
+                "UnsupportedPreserved",
+                "RestorePending",
+                "RestoreAmbiguous"
+            },
+            Enum.GetNames(GetNestedType("JusticeInventoryCustodyState")));
     }
+
+    [TestMethod]
+    public void AmbiguousInventoryRemoval_PreservesTheSnapshotForDeferredRestore()
+    {
+        Type removalResultType = GetNestedType("JusticeInventoryRemovalResult");
+        CollectionAssert.AreEqual(
+            new[] { "NotAttempted", "RemovedVerified", "EffectMayHaveApplied" },
+            Enum.GetNames(removalResultType));
+
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        object snapshot = CreateValidatedEmptyWeaponSnapshot();
+        SetField(script, "_justiceWeaponSnapshot", snapshot);
+        SetField(
+            script,
+            "_justiceInventoryCustodyState",
+            Enum.Parse(GetNestedType("JusticeInventoryCustodyState"), "RemovalPending"));
+
+        object preparationResult = Invoke(
+            script,
+            "RegisterJusticeInventoryRemovalFailure",
+            Enum.Parse(removalResultType, "EffectMayHaveApplied"),
+            1000);
+
+        Assert.AreEqual("UnsupportedLoadout", preparationResult.ToString());
+        Assert.AreSame(snapshot, GetField<object>(script, "_justiceWeaponSnapshot"));
+        Assert.AreEqual(
+            "RestoreAmbiguous",
+            GetField<object>(script, "_justiceInventoryCustodyState").ToString());
+        Assert.IsTrue(GetField<bool>(script, "_justiceDeferredInventoryRestore"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceInventoryRemoved"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceWeaponControlsLocked"));
+        Assert.AreEqual(0, GetField<int>(script, "_justiceNextInventoryPersistenceRetryAt"));
+        Assert.AreNotEqual(0, GetField<int>(script, "_justiceNextDeferredInventoryRestoreAt"));
+        Assert.IsTrue((bool)Invoke(script, "ValidateJusticeInventoryCustodyStateInvariant"));
+
+        string source = ReadCustodySource();
+        string removal = ExtractMethodBody(source, "RemoveJusticePlayerWeaponsSafe");
+        AssertOrdered(
+            removal,
+            "effectMayHaveApplied = true",
+            "Function.Call(Hash.REMOVE_ALL_PED_WEAPONS",
+            "VerifyJusticePlayerHasNoWeapons(player)",
+            "JusticeInventoryRemovalResult.EffectMayHaveApplied");
+
+        string fallback = ExtractMethodBody(
+            source,
+            "EnterJusticeNonDestructiveCustodyFallback");
+        AssertOrdered(
+            fallback,
+            "bool ambiguousRestorePending",
+            "if (!ambiguousRestorePending)",
+            "JusticeInventoryCustodyState.UnsupportedPreserved");
+
+        string reset = ExtractMethodBody(source, "ResetJusticeCustodyPersistentFields");
+        AssertOrdered(
+            reset,
+            "JusticeInventoryCustodyState deferredInventoryState",
+            "if (shouldPreserveDeferredRestore)",
+            "_justiceWeaponSnapshot = deferredSnapshot",
+            "_justiceInventoryCustodyState = deferredInventoryState");
+    }
+
+#if DONJ_STUB_API
+    [TestMethod]
+    public void RemoveAllAppliedButPostCheckFails_ReturnsAmbiguousInsteadOfPreserved()
+    {
+        StubRuntime.Reset();
+        bool removeAllWasApplied = false;
+        StubRuntime.NativeCallHandler = (hash, arguments) =>
+        {
+            if (hash == (ulong)Hash.REMOVE_ALL_PED_WEAPONS)
+            {
+                removeAllWasApplied = true;
+                return null;
+            }
+            if (hash == (ulong)Hash.HAS_PED_GOT_WEAPON)
+            {
+                // Je simule une lecture GTA obsolète après un effet réellement appliqué.
+                return true;
+            }
+
+            return null;
+        };
+
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        object snapshot = CreateValidatedEmptyWeaponSnapshot();
+        SetField(script, "_justiceWeaponSnapshot", snapshot);
+        Ped player = new Ped { Handle = 91 };
+        object removalResult = Invoke(
+            script,
+            "RemoveJusticePlayerWeaponsSafe",
+            player);
+
+        Assert.IsTrue(removeAllWasApplied);
+        Assert.AreEqual("EffectMayHaveApplied", removalResult.ToString());
+
+        Invoke(script, "RegisterJusticeInventoryRemovalFailure", removalResult, 2000);
+
+        Assert.AreSame(snapshot, GetField<object>(script, "_justiceWeaponSnapshot"));
+        Assert.AreEqual(
+            "RestoreAmbiguous",
+            GetField<object>(script, "_justiceInventoryCustodyState").ToString());
+        Assert.IsTrue(GetField<bool>(script, "_justiceDeferredInventoryRestore"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceInventoryRemoved"));
+    }
+#endif
 
     [TestMethod]
     public void DeferredInventoryRestore_PreservesOnlyTheSameSessionCustomPedHandle()
@@ -566,6 +720,39 @@ public sealed class JusticeCustodyHardeningTests
         Type type = ScriptType.GetNestedType(name, BindingFlags.NonPublic);
         Assert.IsNotNull(type, "Type privé introuvable : " + name);
         return type;
+    }
+
+    private static object Invoke(object instance, string methodName, params object[] arguments)
+    {
+        MethodInfo method = ScriptType.GetMethod(methodName, PrivateInstance);
+        Assert.IsNotNull(method, "Méthode privée introuvable : " + methodName);
+        return method.Invoke(instance, arguments);
+    }
+
+    private static void SetField(object instance, string fieldName, object value)
+    {
+        FieldInfo field = ScriptType.GetField(fieldName, PrivateInstance);
+        Assert.IsNotNull(field, "Champ privé introuvable : " + fieldName);
+        field.SetValue(instance, value);
+    }
+
+    private static T GetField<T>(object instance, string fieldName)
+    {
+        FieldInfo field = ScriptType.GetField(fieldName, PrivateInstance);
+        Assert.IsNotNull(field, "Champ privé introuvable : " + fieldName);
+        return (T)field.GetValue(instance);
+    }
+
+    private static object CreateValidatedEmptyWeaponSnapshot()
+    {
+        Type snapshotType = GetNestedType("JusticeWeaponSnapshot");
+        object snapshot = Activator.CreateInstance(snapshotType, true);
+        FieldInfo validated = snapshotType.GetField(
+            "IsValidated",
+            BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.IsNotNull(validated, "Marqueur de validation du snapshot introuvable.");
+        validated.SetValue(snapshot, true);
+        return snapshot;
     }
 
     private static string ReadCustodySource()

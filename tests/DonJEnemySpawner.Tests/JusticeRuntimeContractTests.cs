@@ -8,6 +8,7 @@ using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.Serialization;
+using System.Threading;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using GTA.Math;
@@ -39,6 +40,7 @@ public sealed class JusticeRuntimeContractTests
         Assert.AreEqual(32, GetStaticFieldValue<int>("JusticeMaximumPendingIncidents"));
         Assert.AreEqual(48, GetStaticFieldValue<int>("JusticeMaximumAllyTokens"));
         Assert.AreEqual(24, GetStaticFieldValue<int>("JusticeMaximumWitnessActorSnapshots"));
+        Assert.AreEqual(6, GetStaticFieldValue<int>("JusticeMaximumConfirmedIncidentsPerTick"));
         Assert.AreEqual(80.0f, GetStaticFieldValue<float>("JusticeWitnessRadius"), 0.001f);
         Assert.AreEqual(12000, GetStaticFieldValue<int>("JusticeAllyAttributionLifetimeMs"));
         Assert.AreEqual(120.0f, GetStaticFieldValue<float>("JusticeAllyAttributionRadius"), 0.001f);
@@ -74,12 +76,31 @@ public sealed class JusticeRuntimeContractTests
             evidenceCalls.Count(call => call.Name == "GetNearbyPedsSafe"),
             "La qualification d'une infraction ne doit plus rescanner directement le monde.");
 
-        List<MethodBase> snapshotCalls = ReadCalledMethods(
+        List<MethodBase> actorSnapshotCalls = ReadCalledMethods(
             FindMethod("GetJusticeWitnessCandidatesForActor", PrivateInstance));
         Assert.AreEqual(
+            0,
+            actorSnapshotCalls.Count(call => call.Name == "GetNearbyPedsSafe"),
+            "Le filtre d'un acteur ne doit jamais relancer une requête monde GTA.");
+        Assert.AreEqual(
             1,
-            snapshotCalls.Count(call => call.Name == "GetNearbyPedsSafe"),
-            "La création du snapshot réalise un seul buffer de proximité, ensuite partagé dans le tick.");
+            actorSnapshotCalls.Count(call => call.Name == "GetJusticeSnapshotPeds"),
+            "Chaque acteur réutilise le tableau peds immuable de la passe courante.");
+        Assert.AreEqual(
+            1,
+            actorSnapshotCalls.Count(call => call.Name == "IsJusticeSnapshotEntityWithin"),
+            "La proximité d'un acteur doit être filtrée par distance au carré dans le snapshot partagé.");
+
+        List<MethodBase> worldCaptureCalls = ReadCalledMethods(
+            FindMethod("CaptureJusticeWorldSnapshot", PrivateInstance));
+        Assert.AreEqual(
+            1,
+            worldCaptureCalls.Count(call => call.Name == "GetNearbyPedsSafe"),
+            "Une passe Justice réalise une seule requête peds GTA.");
+        Assert.AreEqual(
+            1,
+            worldCaptureCalls.Count(call => call.Name == "GetNearbyVehiclesSafe"),
+            "Une passe Justice réalise une seule requête véhicules GTA.");
 
         string evidence = ExecutableMethodBody(ReadRuntimeSource(), "BuildJusticeEvidence");
         StringAssert.Contains(evidence, "humans < JusticeMaximumWitnessesPerEvent");
@@ -562,14 +583,28 @@ public sealed class JusticeRuntimeContractTests
                 new Func<int, bool>(level => ++writes >= 2));
 
             InvokeInstance(script, "RetryJusticeEscapeWantedMinimum", 0);
+            Assert.AreEqual(0, writes);
+            Assert.IsTrue(state.EscapeWantedMinimumPending);
+            Assert.IsTrue(state.EscapeWantedMinimumAttempted);
+
+            AwaitQueuedPersistence(script);
+            InvokeInstance(script, "RetryJusticeEscapeWantedMinimum", 0);
             Assert.AreEqual(1, writes);
             Assert.IsTrue(state.EscapeWantedMinimumPending);
             Assert.IsFalse(state.EscapeWantedMinimumAttempted);
 
+            AwaitQueuedPersistence(script);
+            InvokeInstance(script, "RetryJusticeEscapeWantedMinimum", 0);
+            Assert.AreEqual(1, writes);
+            Assert.IsTrue(state.EscapeWantedMinimumPending);
+            Assert.IsTrue(state.EscapeWantedMinimumAttempted);
+
+            AwaitQueuedPersistence(script);
             InvokeInstance(script, "RetryJusticeEscapeWantedMinimum", 0);
             Assert.AreEqual(2, writes);
             Assert.IsFalse(state.EscapeWantedMinimumPending);
             Assert.IsFalse(state.EscapeWantedMinimumAttempted);
+            AwaitQueuedPersistence(script);
 
             // Une descente ultérieure des étoiles reste entièrement à GTA.
             InvokeInstance(script, "RetryJusticeEscapeWantedMinimum", 0);
@@ -611,11 +646,16 @@ public sealed class JusticeRuntimeContractTests
                 "_justiceWantedClearObservationOverride",
                 new Func<int?>(() => { clears++; return 0; }));
 
+            Assert.IsFalse(
+                (bool)InvokeInstance(script, "TryApplyJusticeAmnestyWantedClear"),
+                "Le premier passage doit seulement enfiler le snapshot critique.");
+            AwaitQueuedPersistence(script);
             Assert.IsTrue((bool)InvokeInstance(script, "TryApplyJusticeAmnestyWantedClear"));
             Assert.AreEqual(1, clears);
             Assert.IsTrue(GetFieldValue<bool>(script, "_justiceAmnestyWantedClearAttempted"));
             Assert.IsTrue((bool)InvokeInstance(script, "TryApplyJusticeAmnestyWantedClear"));
             Assert.AreEqual(1, clears, "Un échec d'acquittement ne doit jamais rejouer le clear.");
+            FlushAndAwait(script);
 
             object reader = CreateJusticeHeadlessScript();
             Assert.IsTrue((bool)InvokeInstance(
@@ -747,7 +787,7 @@ public sealed class JusticeRuntimeContractTests
             Assert.IsNotNull(releaseSite);
             releaseSite.SetValue(writer, Enum.Parse(releaseSite.FieldType, "None"));
             SetFieldValue(writer, "_justiceLegalReleaseSelectedWeaponHash", 0);
-            Assert.IsTrue((bool)InvokeInstance(writer, "JusticeFlushStateNow"));
+            FlushAndAwait(writer);
 
             object reader = CreateJusticeHeadlessScript();
             Assert.IsTrue((bool)InvokeInstance(
@@ -1036,7 +1076,7 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void JusticePersistence_VersionOneRoundTripsCaseRecordOperationsAndInventory()
+    public void JusticePersistence_VersionTwoRoundTripsAndLegacyV1RemainsReadable()
     {
         WithTemporarySaveDirectory(directory =>
         {
@@ -1047,6 +1087,7 @@ public sealed class JusticeRuntimeContractTests
             SetFieldValue(writerScript, "_justiceEnabled", true);
             SetFieldValue(writerScript, "_justiceWeaponSnapshot", CreateValidWeaponSnapshot());
             SetFieldValue(writerScript, "_justiceInventoryRemoved", true);
+            SetEnumField(writerScript, "_justiceInventoryCustodyState", "RemovedVerified");
             SetFieldValue(writerScript, "_justiceCustodyPlayerModelHash", 0x12345678);
             SetFieldValue(writerScript, "_justiceCustodyPlayerStateStored", true);
             SetFieldValue(writerScript, "_justiceCustodyStoredInvincible", false);
@@ -1081,23 +1122,24 @@ public sealed class JusticeRuntimeContractTests
                 new DateTime(2026, 8, 25, 20, 1, 0, DateTimeKind.Utc).Ticks);
             SetFieldValue(writerScript, "_justiceFineDebitIntent", fineIntent);
 
-            Assert.IsTrue(
-                (bool)InvokeInstance(writerScript, "JusticeFlushStateNow"),
-                "L'ecriture du fichier Justice multi-profils doit reussir.");
+            FlushAndAwait(writerScript);
             string path = Path.Combine(directory, "_justice_state.xml");
             Assert.IsTrue(File.Exists(path));
 
             XDocument xml = XDocument.Load(path);
             Assert.AreEqual("JusticeState", xml.Root.Name.LocalName);
-            Assert.AreEqual("1", (string)xml.Root.Attribute("version"));
-            Assert.IsNotNull(xml.Root.Element("Case"));
-            Assert.IsNotNull(xml.Root.Element("Record"));
-            Assert.IsNotNull(xml.Root.Element("Custody"));
+            Assert.AreEqual("2", (string)xml.Root.Attribute("schemaMajor"));
+            Assert.AreEqual("0", (string)xml.Root.Attribute("schemaMinor"));
+            Assert.IsFalse(string.IsNullOrWhiteSpace((string)xml.Root.Attribute("payloadSha256")));
+            XElement persistedProfile = GetPersistedActiveJusticeProfile(xml);
+            Assert.IsNotNull(persistedProfile.Element("Case"));
+            Assert.IsNotNull(persistedProfile.Element("Record"));
+            Assert.IsNotNull(persistedProfile.Element("Custody"));
             Assert.IsNull(xml.Root.Element("Npcs"), "L'état Justice doit rester séparé des scènes XML.");
             Assert.AreEqual(
                 "true",
-                (string)xml.Root.Element("Case").Element("Charges").Element("Charge").Attribute("adjudicated"));
-            XElement[] persistedAllies = xml.Root.Element("Case")
+                (string)persistedProfile.Element("Case").Element("Charges").Element("Charge").Attribute("adjudicated"));
+            XElement[] persistedAllies = persistedProfile.Element("Case")
                 .Element("Charges")
                 .Element("Charge")
                 .Element("AlliedContributors")
@@ -1172,7 +1214,10 @@ public sealed class JusticeRuntimeContractTests
             Assert.IsTrue(GetFieldValue<bool>(readerScript, "_justiceCustodyStoredFrozen"));
             Assert.IsFalse(GetFieldValue<bool>(readerScript, "_justiceCustodyStoredCanRagdoll"));
 
-            string canonicalStateXml = File.ReadAllText(path);
+            XDocument canonicalLegacyV1 = ConvertJusticeV2ToLegacyV1(xml);
+            canonicalLegacyV1.Root.Element("PlayerProfiles")?.Remove();
+            canonicalLegacyV1.Root.Attribute("activePlayerSlot")?.Remove();
+            string canonicalStateXml = canonicalLegacyV1.ToString(SaveOptions.DisableFormatting);
             XDocument emptyConvictionIdXml = XDocument.Parse(canonicalStateXml);
             emptyConvictionIdXml.Root
                 .Element("Record")
@@ -1187,7 +1232,7 @@ public sealed class JusticeRuntimeContractTests
             emptyConvictionIdXml.Save(path);
             object invalidConvictionReader = CreateJusticeHeadlessScript();
             Assert.IsFalse((bool)InvokeInstance(invalidConvictionReader, "TryReadJusticeStateFile", path));
-            File.WriteAllText(path, canonicalStateXml);
+            canonicalLegacyV1.Save(path);
 
             File.Copy(path, path + ".bak", true);
             XDocument invalidAmmoXml = XDocument.Load(path);
@@ -1220,7 +1265,7 @@ public sealed class JusticeRuntimeContractTests
                 "custody:one:fine:release:incident:one",
                 GetMemberValue(fallbackIntent, "EpisodeId"));
 
-            XDocument unpreparedIntentXml = new XDocument(xml);
+            XDocument unpreparedIntentXml = new XDocument(canonicalLegacyV1);
             XElement unpreparedIntent = unpreparedIntentXml.Root
                 .Element("Custody")
                 .Element("FineDebitIntent");
@@ -1234,18 +1279,6 @@ public sealed class JusticeRuntimeContractTests
             unpreparedIntent.SetAttributeValue("sentenceIfDebited", "810");
             unpreparedIntent.SetAttributeValue("debitAttempted", "false");
             unpreparedIntent.SetAttributeValue("attemptedAtUtcTicks", "0");
-            XElement activeProfileIntent = unpreparedIntentXml.Root
-                .Element("PlayerProfiles")
-                .Elements("Profile")
-                .Single(profile =>
-                    (string)profile.Attribute("slot") ==
-                    (string)unpreparedIntentXml.Root.Attribute("activePlayerSlot"))
-                .Element("Custody")
-                .Element("FineDebitIntent");
-            foreach (XAttribute attribute in unpreparedIntent.Attributes())
-            {
-                activeProfileIntent.SetAttributeValue(attribute.Name, attribute.Value);
-            }
             string unpreparedPath = Path.Combine(directory, "_justice_state_unprepared_fine.xml");
             unpreparedIntentXml.Save(unpreparedPath);
             object unpreparedReader = CreateJusticeHeadlessScript();
@@ -1261,24 +1294,25 @@ public sealed class JusticeRuntimeContractTests
                 0L,
                 GetMemberValue(loadedUnpreparedIntent, "PreparedAtUtcTicks"));
 
-            foreach (XElement ally in xml.Descendants("Ally"))
+            XDocument legacyXml = new XDocument(canonicalLegacyV1);
+            foreach (XElement ally in legacyXml.Descendants("Ally"))
             {
                 ally.Attribute("generation")?.Remove();
             }
-            XElement legacyFineIntent = xml.Root.Element("Custody").Element("FineDebitIntent");
+            XElement legacyFineIntent = legacyXml.Root.Element("Custody").Element("FineDebitIntent");
             legacyFineIntent.Attribute("cashPlanPrepared")?.Remove();
             legacyFineIntent.Attribute("preparedAtUtcTicks")?.Remove();
             legacyFineIntent.Attribute("debitAttempted")?.Remove();
             legacyFineIntent.Attribute("attemptedAtUtcTicks")?.Remove();
-            XElement legacyCustody = xml.Root.Element("Custody");
+            XElement legacyCustody = legacyXml.Root.Element("Custody");
             legacyCustody.Attribute("playerStateStored")?.Remove();
             legacyCustody.Attribute("storedInvincible")?.Remove();
             legacyCustody.Attribute("storedFrozen")?.Remove();
             legacyCustody.Attribute("storedCanRagdoll")?.Remove();
-            xml.Root.Element("PlayerProfiles")?.Remove();
-            xml.Root.Attribute("activePlayerSlot")?.Remove();
+            legacyXml.Root.Element("PlayerProfiles")?.Remove();
+            legacyXml.Root.Attribute("activePlayerSlot")?.Remove();
             string legacyV1Path = Path.Combine(directory, "_justice_state_legacy_v1.xml");
-            xml.Save(legacyV1Path);
+            legacyXml.Save(legacyV1Path);
             object legacyReader = CreateJusticeHeadlessScript();
             Assert.IsTrue((bool)InvokeInstance(legacyReader, "TryReadJusticeStateFile", legacyV1Path));
             JusticeCharge legacyCharge = GetFieldValue<JusticeCaseState>(legacyReader, "_justiceCaseState").Charges[0];
@@ -1331,10 +1365,10 @@ public sealed class JusticeRuntimeContractTests
                 JusticeOperationKind.ApplyConviction,
                 writerCase.CustodyEpisodeId));
 
-            Assert.IsTrue((bool)InvokeInstance(writer, "JusticeFlushStateNow"));
+            FlushAndAwait(writer);
             string path = Path.Combine(directory, "_justice_state.xml");
             XDocument xml = XDocument.Load(path);
-            XElement[] persistedCharges = xml.Root
+            XElement[] persistedCharges = GetPersistedActiveJusticeProfile(xml)
                 .Element("Case")
                 .Element("Charges")
                 .Elements("Charge")
@@ -1400,7 +1434,7 @@ public sealed class JusticeRuntimeContractTests
             SetFieldValue(writer, "_justiceCaseState", profiles[0].CaseState);
             SetFieldValue(writer, "_justiceRecordState", profiles[0].RecordState);
 
-            Assert.IsTrue((bool)InvokeInstance(writer, "JusticeFlushStateNow"));
+            FlushAndAwait(writer);
             string path = Path.Combine(directory, "_justice_state.xml");
             long fileLength = new FileInfo(path).Length;
             long maximum = GetStaticFieldValue<long>("JusticeStateMaximumFileBytes");
@@ -1558,10 +1592,9 @@ public sealed class JusticeRuntimeContractTests
             SetMemberValue(intent, "PenaltySeconds", 60);
             SetFieldValue(writer, "_justiceDisciplineIntent", intent);
 
-            Assert.IsTrue((bool)InvokeInstance(writer, "JusticeFlushStateNow"));
+            FlushAndAwait(writer);
             string path = Path.Combine(directory, "_justice_state.xml");
-            XElement persistedIntent = XDocument.Load(path)
-                .Root
+            XElement persistedIntent = GetPersistedActiveJusticeProfile(XDocument.Load(path))
                 .Element("Custody")
                 .Element("DisciplineIntent");
             Assert.IsNotNull(persistedIntent);
@@ -1571,17 +1604,26 @@ public sealed class JusticeRuntimeContractTests
 
             string validPrecommitXml = File.ReadAllText(path);
             SetFieldValue(writer, "_justiceCustodyPlayerModelHash", 0);
-            Assert.IsFalse(
+            Assert.IsTrue(
                 (bool)InvokeInstance(writer, "JusticeFlushStateNow"),
-                "Un état de détention que le lecteur rejetterait ne doit jamais remplacer le primaire.");
+                "Le thread GTA doit accepter le DTO sans bloquer sur sa validation disque.");
+            Assert.IsFalse(
+                (bool)InvokeInstance(writer, "JusticeAwaitQueuedPersistenceForTests"),
+                "Le writer doit rejeter le snapshot de détention invalide.");
             Assert.AreEqual(
                 validPrecommitXml,
                 File.ReadAllText(path),
                 "Le primaire valide doit rester byte pour byte intact après un temp sémantiquement invalide.");
             SetFieldValue(writer, "_justiceCustodyPlayerModelHash", 0x12345678);
+            SetFieldValue(
+                writer,
+                "_justiceMonotonicTimeMs",
+                GetFieldValue<long>(writer, "_justiceNextStateFlushAttemptAtMs"));
+            FlushAndAwait(writer);
 
             File.Copy(path, path + ".bak", true);
-            XDocument foreignIntent = XDocument.Load(path);
+            XDocument foreignIntent = ConvertJusticeV2ToLegacyV1(XDocument.Load(path));
+            foreignIntent.Root.Element("PlayerProfiles")?.Remove();
             foreignIntent.Root
                 .Element("Custody")
                 .Element("DisciplineIntent")
@@ -1598,7 +1640,8 @@ public sealed class JusticeRuntimeContractTests
                     "IncidentId"));
             File.Copy(path + ".bak", path, true);
 
-            XDocument mixedWal = XDocument.Load(path);
+            XDocument mixedWal = ConvertJusticeV2ToLegacyV1(XDocument.Load(path));
+            mixedWal.Root.Element("PlayerProfiles")?.Remove();
             mixedWal.Root
                 .Element("Case")
                 .Element("ProcessedIncidents")
@@ -1622,6 +1665,7 @@ public sealed class JusticeRuntimeContractTests
             Assert.IsNotNull(GetFieldValue<object>(resumed, "_justiceDisciplineIntent"));
 
             InvokeInstance(resumed, "CompleteJusticeCustodyDiscipline", (object)null, 5000);
+            AwaitQueuedPersistence(resumed);
 
             Assert.IsNull(GetFieldValue<object>(resumed, "_justiceDisciplineIntent"));
             Assert.AreEqual(2, resumedState.Charges.Count);
@@ -1642,7 +1686,7 @@ public sealed class JusticeRuntimeContractTests
             Assert.AreEqual(incidentId, completedState.Charges[1].IncidentId);
             Assert.AreEqual(2, completedRecord.Convictions.Count);
 
-            XDocument legacyCommittedWal = XDocument.Load(path);
+            XDocument legacyCommittedWal = ConvertJusticeV2ToLegacyV1(XDocument.Load(path));
             legacyCommittedWal.Root.Element("PlayerProfiles")?.Remove();
             legacyCommittedWal.Root.Attribute("activePlayerSlot")?.Remove();
             XElement legacySummary = legacyCommittedWal.Root
@@ -1729,9 +1773,7 @@ public sealed class JusticeRuntimeContractTests
             SetFieldValue(writer, "_justiceLastCanonicalPlayerSlot", -1);
             SetFieldValue(writer, "_justiceLastCanonicalPlayerModelHash", 0);
 
-            Assert.IsTrue(
-                (bool)InvokeInstance(writer, "JusticeFlushStateNow"),
-                "Le front de mort doit survivre au bref trou d'identité du respawn.");
+            FlushAndAwait(writer);
 
             string path = Path.Combine(directory, "_justice_state.xml");
             object reader = CreateJusticeHeadlessScript();
@@ -1776,11 +1818,11 @@ public sealed class JusticeRuntimeContractTests
                 SentenceSeconds = 60
             });
             SetFieldValue(script, "_justiceEnabled", true);
-            Assert.IsTrue((bool)InvokeInstance(script, "JusticeFlushStateNow"));
+            FlushAndAwait(script);
 
             state.ActiveScore = 22;
             state.Charges[0].Points = 22;
-            Assert.IsTrue((bool)InvokeInstance(script, "JusticeFlushStateNow"));
+            FlushAndAwait(script);
             string primary = Path.Combine(directory, "_justice_state.xml");
             string backup = primary + ".bak";
             Assert.IsTrue(File.Exists(backup), "La seconde écriture atomique doit conserver le dernier état valide en .bak.");
@@ -1811,14 +1853,16 @@ public sealed class JusticeRuntimeContractTests
             Assert.IsFalse((bool)InvokeInstance(versionReader, "TryReadJusticeStateFile", malformed));
             Assert.AreEqual(44, GetFieldValue<JusticeCaseState>(versionReader, "_justiceCaseState").ActiveScore);
 
-            XDocument invalidPhaseDocument = XDocument.Load(backup);
+            XDocument invalidPhaseDocument = ConvertJusticeV2ToLegacyV1(XDocument.Load(backup));
+            invalidPhaseDocument.Root.Element("PlayerProfiles")?.Remove();
             invalidPhaseDocument.Root.Element("Case").SetAttributeValue("phase", "999");
             string invalidPhase = Path.Combine(directory, "invalid-phase.xml");
             invalidPhaseDocument.Save(invalidPhase);
             Assert.IsFalse((bool)InvokeInstance(versionReader, "TryReadJusticeStateFile", invalidPhase));
             Assert.AreEqual(44, GetFieldValue<JusticeCaseState>(versionReader, "_justiceCaseState").ActiveScore);
 
-            XDocument impossibleRecidivismDocument = XDocument.Load(backup);
+            XDocument impossibleRecidivismDocument = ConvertJusticeV2ToLegacyV1(XDocument.Load(backup));
+            impossibleRecidivismDocument.Root.Element("PlayerProfiles")?.Remove();
             impossibleRecidivismDocument.Root
                 .Element("Record")
                 .SetAttributeValue("recidivism", "100");
@@ -1828,7 +1872,8 @@ public sealed class JusticeRuntimeContractTests
                 (bool)InvokeInstance(versionReader, "TryReadJusticeStateFile", impossibleRecidivism),
                 "Un indice R sans aucune condamnation capable de le produire doit être rejeté.");
 
-            XDocument invalidOperationDocument = XDocument.Load(backup);
+            XDocument invalidOperationDocument = ConvertJusticeV2ToLegacyV1(XDocument.Load(backup));
+            invalidOperationDocument.Root.Element("PlayerProfiles")?.Remove();
             XElement operations = invalidOperationDocument.Root
                 .Element("Case")
                 .Element("CompletedOperations");
@@ -1838,7 +1883,8 @@ public sealed class JusticeRuntimeContractTests
             Assert.IsFalse((bool)InvokeInstance(versionReader, "TryReadJusticeStateFile", invalidOperation));
             Assert.AreEqual(44, GetFieldValue<JusticeCaseState>(versionReader, "_justiceCaseState").ActiveScore);
 
-            XDocument invalidFineDocument = XDocument.Load(backup);
+            XDocument invalidFineDocument = ConvertJusticeV2ToLegacyV1(XDocument.Load(backup));
+            invalidFineDocument.Root.Element("PlayerProfiles")?.Remove();
             invalidFineDocument.Root.Element("Case").SetAttributeValue(
                 "fineDue",
                 (JusticePolicy.MaxActiveFine + 1L).ToString(CultureInfo.InvariantCulture));
@@ -1847,7 +1893,8 @@ public sealed class JusticeRuntimeContractTests
             Assert.IsFalse((bool)InvokeInstance(versionReader, "TryReadJusticeStateFile", invalidFine));
             Assert.AreEqual(44, GetFieldValue<JusticeCaseState>(versionReader, "_justiceCaseState").ActiveScore);
 
-            XDocument erasedPendingFineDocument = XDocument.Load(backup);
+            XDocument erasedPendingFineDocument = ConvertJusticeV2ToLegacyV1(XDocument.Load(backup));
+            erasedPendingFineDocument.Root.Element("PlayerProfiles")?.Remove();
             erasedPendingFineDocument.Root.Element("Case").SetAttributeValue("fineDue", "0");
             string erasedPendingFine = Path.Combine(directory, "erased-pending-fine.xml");
             erasedPendingFineDocument.Save(erasedPendingFine);
@@ -1855,7 +1902,8 @@ public sealed class JusticeRuntimeContractTests
                 (bool)InvokeInstance(versionReader, "TryReadJusticeStateFile", erasedPendingFine),
                 "Une charge non jugée doit conserver au minimum toute son amende dérivable.");
 
-            XDocument erasedPendingSentenceDocument = XDocument.Load(backup);
+            XDocument erasedPendingSentenceDocument = ConvertJusticeV2ToLegacyV1(XDocument.Load(backup));
+            erasedPendingSentenceDocument.Root.Element("PlayerProfiles")?.Remove();
             erasedPendingSentenceDocument.Root.Element("Case").SetAttributeValue("sentenceSeconds", "0");
             string erasedPendingSentence = Path.Combine(directory, "erased-pending-sentence.xml");
             erasedPendingSentenceDocument.Save(erasedPendingSentence);
@@ -1863,7 +1911,8 @@ public sealed class JusticeRuntimeContractTests
                 (bool)InvokeInstance(versionReader, "TryReadJusticeStateFile", erasedPendingSentence),
                 "Une charge non jugée doit conserver au minimum toute sa peine dérivable.");
 
-            XDocument mismatchedEnabledDocument = XDocument.Load(backup);
+            XDocument mismatchedEnabledDocument = ConvertJusticeV2ToLegacyV1(XDocument.Load(backup));
+            mismatchedEnabledDocument.Root.Element("PlayerProfiles")?.Remove();
             mismatchedEnabledDocument.Root.SetAttributeValue("enabled", "false");
             string mismatchedEnabled = Path.Combine(directory, "mismatched-enabled.xml");
             mismatchedEnabledDocument.Save(mismatchedEnabled);
@@ -1936,13 +1985,14 @@ public sealed class JusticeRuntimeContractTests
             SetFieldValue(writer, "_justiceCustodyPlayerModelHash", 0x12345678);
             SetFieldValue(writer, "_justiceCustodyPlayerSlot", 0);
 
-            Assert.IsTrue((bool)InvokeInstance(writer, "JusticeFlushStateNow"));
+            FlushAndAwait(writer);
             string path = Path.Combine(directory, "_justice_state.xml");
             string canonical = File.ReadAllText(path);
             object validReader = CreateJusticeHeadlessScript();
             Assert.IsTrue((bool)InvokeInstance(validReader, "TryReadJusticeStateFile", path));
 
-            XDocument erasedFine = XDocument.Parse(canonical);
+            XDocument erasedFine = ConvertJusticeV2ToLegacyV1(XDocument.Parse(canonical));
+            erasedFine.Root.Element("PlayerProfiles")?.Remove();
             erasedFine.Root.Element("Case").SetAttributeValue("fineDue", "0");
             erasedFine.Save(path);
             Assert.IsFalse((bool)InvokeInstance(
@@ -1950,7 +2000,8 @@ public sealed class JusticeRuntimeContractTests
                 "TryReadJusticeStateFile",
                 path));
 
-            XDocument erasedSentence = XDocument.Parse(canonical);
+            XDocument erasedSentence = ConvertJusticeV2ToLegacyV1(XDocument.Parse(canonical));
+            erasedSentence.Root.Element("PlayerProfiles")?.Remove();
             erasedSentence.Root.Element("Case").SetAttributeValue("sentenceSeconds", "0");
             erasedSentence.Save(path);
             Assert.IsFalse((bool)InvokeInstance(
@@ -2418,19 +2469,67 @@ public sealed class JusticeRuntimeContractTests
             "JusticeRegisterEscape()",
             "PruneClosedCustodyOperations",
             "_justiceCaseState.CustodyEpisodeId = string.Empty",
-            "ResetJusticeCustodyPersistentFields(false)",
+            "ResetJusticeCustodyPersistentFields(preserveAmbiguousInventoryRecovery)",
             "JusticeMarkStateDirty()",
             "JusticeFlushStateNow()");
+        AssertOrdered(
+            completion,
+            "JusticeInventoryRemovalResult removalResult",
+            "JusticeInventoryRemovalResult.EffectMayHaveApplied",
+            "RegisterJusticeInventoryRemovalFailure(removalResult, now)",
+            "preserveAmbiguousInventoryRecovery = true",
+            "if (!preserveAmbiguousInventoryRecovery)",
+            "_justiceWeaponSnapshot = null",
+            "ResetJusticeCustodyPersistentFields(preserveAmbiguousInventoryRecovery)");
         Assert.AreEqual(
             1,
             Regex.Matches(completion, @"JusticeFlushStateNow\s*\(").Count,
             "La sortie ferme directement l'épisode après le précommit redondant encapsulé.");
         Assert.AreEqual(
-            2,
+            0,
             Regex.Matches(
                 ExtractMethodBody(custodySource, "PersistJusticeCriticalPrecommitRedundantly"),
                 @"JusticeFlushStateNow\s*\(").Count,
-            "Le précommit critique doit couvrir primaire et backup avant RemoveAll.");
+            "Le précommit critique ne doit plus bloquer le thread GTA sur deux flush XML complets.");
+        Assert.AreEqual(
+            1,
+            Regex.Matches(
+                ExtractMethodBody(custodySource, "PersistJusticeCriticalPrecommitRedundantly"),
+                @"PersistJusticeCriticalPrecommitToWal\s*\(").Count,
+            "Un effet critique doit passer par une unique écriture WAL durable.");
+
+        string persistenceSource = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.Justice.Persistence.Runtime.cs"));
+        string walPrecommit = ExtractMethodBody(
+            persistenceSource,
+            "PersistJusticeCriticalPrecommitToWal");
+        Assert.AreEqual(
+            0,
+            Regex.Matches(walPrecommit, @"_justiceWriteAheadLog\.Append\s*\(prepared\s*\)").Count,
+            "Le thread GTA ne doit écrire aucune frame avant la confirmation disque du snapshot.");
+        AssertOrdered(
+            walPrecommit,
+            "TryCaptureJusticePersistenceSnapshot",
+            "TryEnqueueJusticeSnapshot(snapshot, false)",
+            "_justiceCriticalBarrierRevision = snapshot.Revision",
+            "TryCommitJusticeCriticalBarrierToWal()");
+        string walCommit = ExtractMethodBody(
+            persistenceSource,
+            "TryCommitJusticeCriticalBarrierToWal");
+        AssertOrdered(
+            walCommit,
+            "_justiceRepository.GetDiagnostics()",
+            "diagnostics.DiskRevision < _justiceCriticalBarrierRevision",
+            "JusticeWalState.Prepared",
+            "_justiceWriteAheadLog.Append(prepared)",
+            "JusticeWalState.Attempted");
+        Assert.AreEqual(
+            1,
+            Regex.Matches(walCommit, @"_justiceWriteAheadLog\.Append\s*\(prepared\s*\)").Count,
+            "Une seule frame Prepared compacte doit être écrite après confirmation disque.");
 
         string registration = ExtractMethodBody(runtimeSource, "JusticeRegisterEscape");
         Assert.IsFalse(
@@ -2439,7 +2538,7 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void JusticeEscape_AlwaysRemovesWeaponsCollectedInCustodyAfterThePersistedIntent()
+    public void JusticeEscape_DiscardsTheSnapshotOnlyAfterANonAmbiguousRemovalOutcome()
     {
         string completion = ExecutableMethodBody(
             File.ReadAllText(Path.Combine(
@@ -2465,7 +2564,11 @@ public sealed class JusticeRuntimeContractTests
             "JusticePolicy.TryRegisterOperation(_justiceCaseState, discard)",
             "if (!PersistJusticeCriticalPrecommitRedundantly())",
             "IsJusticeCustodyPlayerIdentityCompatible(player)",
+            "ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot)",
             "RemoveJusticePlayerWeaponsSafe(player)",
+            "JusticeInventoryRemovalResult.EffectMayHaveApplied",
+            "preserveAmbiguousInventoryRecovery = true",
+            "if (!preserveAmbiguousInventoryRecovery)",
             "_justiceWeaponSnapshot = null",
             "JusticeRegisterEscape()");
     }
@@ -2737,7 +2840,7 @@ public sealed class JusticeRuntimeContractTests
             fineMethod,
             "_justiceFineDebitIntent = new JusticeFineDebitIntent",
             "JusticeMarkStateDirty",
-            "if (!PersistJusticeCriticalPrecommitRedundantly())",
+            "if (!EnsureJusticeFinancialPreparedSnapshot(\"FineDebit\"))",
             "ResumeJusticeFineDebitIntent()");
 
         string fineResume = ExecutableMethodBody(source, "ResumeJusticeFineDebitIntent");
@@ -2790,9 +2893,9 @@ public sealed class JusticeRuntimeContractTests
         Assert.IsTrue(externalDebit >= 0);
         AssertOrdered(
             fineResume.Substring(0, externalDebit),
+            "TryArmJusticeFinancialAttempt(",
             "intent.DebitAttempted = true",
-            "intent.AttemptedAtUtcTicks = DateTime.UtcNow.Ticks",
-            "PersistJusticeCriticalPrecommitRedundantly()");
+            "intent.AttemptedAtUtcTicks = DateTime.UtcNow.Ticks");
         Assert.AreEqual(
             1,
             Regex.Matches(fineResume, "TryWriteJusticeSinglePlayerCash").Count,
@@ -2800,7 +2903,7 @@ public sealed class JusticeRuntimeContractTests
         StringAssert.Contains(fineResume, "HasFineDebitAttemptTimedOut");
         StringAssert.Contains(fineResume, "at-most-once");
         Assert.IsTrue(
-            fineMethod.LastIndexOf("PersistJusticeCriticalPrecommitRedundantly", StringComparison.Ordinal) <
+            fineMethod.LastIndexOf("EnsureJusticeFinancialPreparedSnapshot", StringComparison.Ordinal) <
             fineMethod.LastIndexOf("ResumeJusticeFineDebitIntent", StringComparison.Ordinal),
             "L'intention durable doit précéder tout appel capable d'écrire le cash GTA.");
 
@@ -2808,11 +2911,51 @@ public sealed class JusticeRuntimeContractTests
         AssertOrdered(
             confiscation,
             "ValidateJusticeWeaponSnapshot",
+            "JusticeInventoryCustodyState.SnapshotPersisted",
             "PersistJusticeCriticalPrecommitRedundantly",
+            "JusticeInventoryCustodyState.RemovalPending",
             "RemoveJusticePlayerWeaponsSafe");
-        StringAssert.Contains(
-            ExtractMethodBody(source, "PersistJusticeCriticalPrecommitRedundantly"),
-            "JusticeMarkStateDirty();");
+        string criticalWrapper = ExtractMethodBody(
+            source,
+            "PersistJusticeCriticalPrecommitRedundantly");
+        Assert.AreEqual(
+            1,
+            Regex.Matches(criticalWrapper, @"PersistJusticeCriticalPrecommitToWal\s*\(").Count,
+            "Le wrapper critique doit déléguer une seule fois au WAL sans double flush XML.");
+        Assert.AreEqual(0, Regex.Matches(criticalWrapper, @"JusticeFlushStateNow\s*\(").Count);
+
+        string persistenceSource = File.ReadAllText(Path.Combine(
+            GetRepositoryRoot(),
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.Justice.Persistence.Runtime.cs"));
+        string walPrecommit = ExtractMethodBody(
+            persistenceSource,
+            "PersistJusticeCriticalPrecommitToWal");
+        AssertOrdered(
+            walPrecommit,
+            "TryCaptureJusticePersistenceSnapshot",
+            "TryEnqueueJusticeSnapshot(snapshot, false)",
+            "_justiceCriticalBarrierRevision = snapshot.Revision",
+            "TryCommitJusticeCriticalBarrierToWal()");
+        Assert.AreEqual(
+            0,
+            Regex.Matches(walPrecommit, @"_justiceWriteAheadLog\.Append\s*\(prepared\s*\)").Count,
+            "Aucune frame WAL ne doit précéder la confirmation disque du snapshot complet.");
+        string walCommit = ExtractMethodBody(
+            persistenceSource,
+            "TryCommitJusticeCriticalBarrierToWal");
+        AssertOrdered(
+            walCommit,
+            "_justiceRepository.GetDiagnostics()",
+            "diagnostics.DiskRevision < _justiceCriticalBarrierRevision",
+            "JusticeWalState.Prepared",
+            "_justiceWriteAheadLog.Append(prepared)",
+            "JusticeWalState.Attempted");
+        Assert.AreEqual(
+            1,
+            Regex.Matches(walCommit, @"_justiceWriteAheadLog\.Append\s*\(prepared\s*\)").Count,
+            "Une mutation externe ne doit produire qu'une frame Prepared compacte.");
         int failedSnapshotFlush = confiscation.IndexOf(
             "if (!PersistJusticeCriticalPrecommitRedundantly())",
             StringComparison.Ordinal);
@@ -2820,7 +2963,7 @@ public sealed class JusticeRuntimeContractTests
         Assert.IsTrue(failedSnapshotFlush >= 0 && failedSnapshotFlush < removeAll);
         StringAssert.Contains(
             confiscation.Substring(failedSnapshotFlush, removeAll - failedSnapshotFlush),
-            "return;",
+            "return JusticeInventoryPreparationResult.RetryableFailure;",
             "Un snapshot non persisté doit préserver physiquement l'inventaire.");
     }
 
@@ -2985,7 +3128,9 @@ public sealed class JusticeRuntimeContractTests
             transfer,
             "StoreJusticeCustodyPlayerState(player)",
             "PersistJusticeCriticalPrecommitRedundantly()",
-            "PrepareJusticeInventoryConfiscation(player)",
+            "JusticeInventoryPreparationResult inventoryPreparation",
+            "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
+            "inventoryPreparation != JusticeInventoryPreparationResult.Ready",
             "TeleportPlayerWithFadeSafe(player");
 
         string discipline = ExecutableMethodBody(source, "BeginJusticeCustodyDiscipline");
@@ -3236,11 +3381,12 @@ public sealed class JusticeRuntimeContractTests
         AssertOrdered(
             resume,
             "GetCurrentSinglePlayerCashSlotSafe() != intent.Slot",
-            "if (!PersistJusticeCriticalPrecommitRedundantly())",
+            "!EnsureJusticeFinancialPreparedSnapshot(\"FineDebit\")",
             "TryReadJusticeSinglePlayerCash(intent.Slot, out cash)",
-            "TryWriteJusticeSinglePlayerCash(intent.Slot, intent.CashAfter)",
+            "TryArmJusticeFinancialAttempt(",
+            "intent.CashWriteResult = TryWriteJusticeSinglePlayerCash(",
             "JusticePolicy.TryRegisterOperation(_justiceCaseState, operation)",
-            "if (!JusticeFlushStateNow())");
+            "bool outcomePersisted =");
     }
 
     [TestMethod]
@@ -3304,14 +3450,44 @@ public sealed class JusticeRuntimeContractTests
             "DonJEnemySpawner.Justice.Custody.cs"));
 
         string transfer = ExecutableMethodBody(source, "CompleteJusticeCustodyTransfer");
-        StringAssert.Contains(transfer, "else if (!_justiceInventoryRemoved)");
-        StringAssert.Contains(transfer, "_justiceWeaponControlsLocked = true");
-        StringAssert.Contains(transfer, "_justiceNextInventoryPersistenceRetryAt = 0");
+        AssertOrdered(
+            transfer,
+            "JusticeInventoryPreparationResult inventoryPreparation",
+            "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
+            "inventoryPreparation != JusticeInventoryPreparationResult.Ready",
+            "JusticeInventoryPreparationResult.UnsupportedLoadout",
+            "EnterJusticeNonDestructiveCustodyFallback(player, now)",
+            "return;",
+            "TeleportPlayerWithFadeSafe(player");
+
+        Type inventoryState = GetNestedType("JusticeInventoryCustodyState");
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "None",
+                "CapturePending",
+                "SnapshotPersisted",
+                "RemovalPending",
+                "RemovedVerified",
+                "UnsupportedPreserved",
+                "RestorePending",
+                "RestoreAmbiguous"
+            },
+            Enum.GetNames(inventoryState));
+        string custodyReader = ExecutableMethodBody(source, "JusticeReadCustodyXml");
+        StringAssert.Contains(custodyReader, "inventoryState");
+        StringAssert.Contains(custodyReader, "MigrateLegacyJusticeInventoryCustodyState");
 
         string shutdown = ExecutableMethodBody(source, "JusticeShutdownCustody");
-        Assert.IsFalse(
-            shutdown.Contains("_justiceWeaponControlsLocked = false"),
-            "OnAborted doit préserver le retry d'un snapshot non encore commis.");
+        StringAssert.Contains(shutdown, "RestoreJusticeInventoryProvisionallyOnShutdown(player)");
+        StringAssert.Contains(
+            shutdown,
+            "_justiceWeaponControlsLocked = false",
+            "OnAborted doit toujours rendre les contrôles, tandis que l'état inventaire durable garde la reprise.");
+        Assert.AreEqual(
+            6,
+            Regex.Matches(shutdown, @"RunJusticeCustodyShutdownStep\s*\(").Count,
+            "Une panne d'un nettoyage ne doit pas empêcher les cinq autres domaines de s'exécuter.");
 
         string update = ExecutableMethodBody(source, "JusticeUpdateCustody");
         AssertOrdered(
@@ -3338,11 +3514,12 @@ public sealed class JusticeRuntimeContractTests
             new[]
             {
                 "JusticeEnabled", "JusticeProfile", "JusticeStatus", "JusticeLastCrime", "JusticeSeverity",
-                "JusticeWarrant", "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticePayFine",
-                "JusticeSentence", "JusticeRecidivism", "JusticeResetProfile"
+                "JusticeWarrant", "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticeFineDispute",
+                "JusticePayFine", "JusticeResolveFineDispute", "JusticeSentence", "JusticeRecidivism",
+                "JusticePoliceMode", "JusticeRecovery", "JusticeDiagnostic", "JusticeResetProfile"
             },
             justicePage.Cast<object>().Select(entry => GetMemberValue(entry, "Action").ToString()).ToArray());
-        Assert.AreEqual(13, justicePage.Count);
+        Assert.AreEqual(18, justicePage.Count);
         Assert.AreEqual(
             "Normal",
             GetMemberValue(
@@ -3366,6 +3543,36 @@ public sealed class JusticeRuntimeContractTests
             GetMemberValue(
                 justicePage.Cast<object>().Single(entry =>
                     GetMemberValue(entry, "Action").ToString() == "JusticePayFine"),
+                "Label"));
+        Assert.AreEqual(
+            "Info",
+            GetMemberValue(
+                justicePage.Cast<object>().Single(entry =>
+                    GetMemberValue(entry, "Action").ToString() == "JusticeFineDispute"),
+                "Kind").ToString());
+        Assert.AreEqual(
+            "Danger",
+            GetMemberValue(
+                justicePage.Cast<object>().Single(entry =>
+                    GetMemberValue(entry, "Action").ToString() == "JusticeResolveFineDispute"),
+                "Kind").ToString());
+        Assert.AreEqual(
+            "Normal",
+            GetMemberValue(
+                justicePage.Cast<object>().Single(entry =>
+                    GetMemberValue(entry, "Action").ToString() == "JusticePoliceMode"),
+                "Kind").ToString());
+        Assert.AreEqual(
+            "Action",
+            GetMemberValue(
+                justicePage.Cast<object>().Single(entry =>
+                    GetMemberValue(entry, "Action").ToString() == "JusticeDiagnostic"),
+                "Kind").ToString());
+        Assert.AreEqual(
+            "Diagnostic Justice",
+            GetMemberValue(
+                justicePage.Cast<object>().Single(entry =>
+                    GetMemberValue(entry, "Action").ToString() == "JusticeDiagnostic"),
                 "Label"));
         Assert.AreEqual(
             "Danger",
@@ -3395,8 +3602,12 @@ public sealed class JusticeRuntimeContractTests
             InvokeInstance(menuScript, "DangerActionDisplayName", Enum.Parse(GetNestedType("MainMenuAction"), "JusticeEnabled")));
 
         object profileAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticeProfile");
+        object policeModeAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticePoliceMode");
+        object resolveDisputeAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticeResolveFineDispute");
         object resetAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticeResetProfile");
         Assert.IsTrue((bool)InvokeStatic("IsObsidianValueEditable", profileAction));
+        Assert.IsTrue((bool)InvokeStatic("IsObsidianValueEditable", policeModeAction));
+        Assert.IsTrue((bool)InvokeStatic("IsDangerAction", resolveDisputeAction));
         Assert.IsTrue((bool)InvokeStatic("IsDangerAction", resetAction));
         Assert.AreEqual(
             "RÉINITIALISER CE PERSONNAGE",
@@ -3422,6 +3633,19 @@ public sealed class JusticeRuntimeContractTests
         Assert.IsTrue(
             confirmCalls.Any(call => call.Name == "ExecuteJusticeConfirmedProfileReset"),
             "La seconde validation stylée doit être le seul chemin vers la réinitialisation du profil.");
+
+        MethodInfo activationMethod = ScriptType
+            .GetMethods(PrivateInstance)
+            .Single(method =>
+                method.Name == "ActivateMainMenuItem" &&
+                method.GetParameters().Length == 1);
+        List<MethodBase> activationCalls = ReadCalledMethods(activationMethod);
+        Assert.IsTrue(
+            activationCalls.Any(call => call.Name == "ShowJusticeDiagnosticStatus"),
+            "L'action diagnostic doit journaliser et afficher la build réellement chargée.");
+        Assert.IsTrue(
+            activationCalls.Any(call => call.Name == "RecoverJusticeControlsAndInventoryFromMenu"),
+            "La récupération manuelle doit rester accessible dans Justice avancée.");
 
         string menuSource = File.ReadAllText(Path.Combine(
             GetRepositoryRoot(),
@@ -3956,9 +4180,103 @@ public sealed class JusticeRuntimeContractTests
             string fullTemp = Path.GetFullPath(Path.GetTempPath());
             if (fullDirectory.StartsWith(fullTemp, StringComparison.OrdinalIgnoreCase) && Directory.Exists(fullDirectory))
             {
-                Directory.Delete(fullDirectory, true);
+                DeleteTemporaryDirectoryAfterJusticeWriterStops(fullDirectory);
             }
         }
+    }
+
+    private static void DeleteTemporaryDirectoryAfterJusticeWriterStops(string directory)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+        while (Directory.Exists(directory))
+        {
+            try
+            {
+                Directory.Delete(directory, true);
+                return;
+            }
+            catch (IOException)
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    throw;
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    throw;
+                }
+            }
+            Thread.Sleep(25);
+        }
+    }
+
+    private static XElement GetPersistedActiveJusticeProfile(XDocument document)
+    {
+        Assert.IsNotNull(document);
+        Assert.IsNotNull(document.Root);
+        XElement profiles = document.Root.Element("Profiles");
+        if (profiles == null)
+        {
+            return document.Root;
+        }
+        XElement recovery = document.Root.Element("RuntimeRecovery");
+        Assert.IsNotNull(recovery);
+        string activeSlot = (string)recovery.Attribute("activePlayerSlot");
+        XElement profile = profiles.Elements("Profile").SingleOrDefault(
+            candidate => string.Equals(
+                (string)candidate.Attribute("slot"),
+                activeSlot,
+                StringComparison.Ordinal));
+        Assert.IsNotNull(profile, "Le profil v2 actif doit être l'unique autorité.");
+        return profile;
+    }
+
+    private static XDocument ConvertJusticeV2ToLegacyV1(XDocument document)
+    {
+        Assert.IsNotNull(document);
+        Assert.IsNotNull(document.Root);
+        if (document.Root.Element("Profiles") == null)
+        {
+            return new XDocument(document);
+        }
+
+        XElement active = GetPersistedActiveJusticeProfile(document);
+        XElement recovery = document.Root.Element("RuntimeRecovery");
+        XElement root = new XElement(
+            "JusticeState",
+            new XAttribute("version", "1"),
+            new XAttribute("enabled", (string)active.Element("Case").Attribute("enabled")),
+            new XAttribute("policeIntegrationMode", (string)recovery.Attribute("policeIntegrationMode") ?? "1"),
+            new XAttribute("activePlayerSlot", (string)recovery.Attribute("activePlayerSlot")),
+            new XAttribute("nextIdentityGeneration", (string)recovery.Attribute("nextIdentityGeneration") ?? "0"),
+            CopyLegacyProfileAttribute(active, "pendingDeathCapture", "false"),
+            CopyLegacyProfileAttribute(active, "pendingDeathCapturePlayerSlot", "-1"),
+            CopyLegacyProfileAttribute(active, "pendingDeathCapturePlayerModel", "0"),
+            CopyLegacyProfileAttribute(active, "pendingAmnestyWantedClear", "false"),
+            CopyLegacyProfileAttribute(active, "pendingLegalReleaseFinalization", "false"),
+            CopyLegacyProfileAttribute(active, "pendingLegalReleaseSite", "0"),
+            CopyLegacyProfileAttribute(active, "pendingLegalReleaseSelectedWeapon", "0"),
+            new XAttribute("lastCanonicalPlayerSlot", (string)active.Attribute("slot")),
+            CopyLegacyProfileAttribute(active, "lastCanonicalPlayerModel", "0"),
+            new XElement(active.Element("Case")),
+            new XElement(active.Element("Record")),
+            new XElement(active.Element("Custody")),
+            new XElement(
+                "PlayerProfiles",
+                document.Root.Element("Profiles").Elements("Profile").Select(
+                    profile => new XElement(profile))));
+        return new XDocument(root);
+    }
+
+    private static XAttribute CopyLegacyProfileAttribute(
+        XElement profile,
+        string name,
+        string fallback)
+    {
+        return new XAttribute(name, (string)profile.Attribute(name) ?? fallback);
     }
 
     private static string ExtractMethodBody(string source, string methodName)
@@ -4135,6 +4453,21 @@ public sealed class JusticeRuntimeContractTests
     {
         MethodInfo method = FindMethodByArguments(target.GetType(), methodName, PrivateInstance, args.Length);
         return method.Invoke(target, args);
+    }
+
+    private static void FlushAndAwait(object script)
+    {
+        Assert.IsTrue(
+            (bool)InvokeInstance(script, "JusticeFlushStateNow"),
+            "Le snapshot doit être accepté par le repository.");
+        AwaitQueuedPersistence(script);
+    }
+
+    private static void AwaitQueuedPersistence(object script)
+    {
+        Assert.IsTrue(
+            (bool)InvokeInstance(script, "JusticeAwaitQueuedPersistenceForTests"),
+            "La barrière réservée aux tests doit confirmer la révision sur disque.");
     }
 
     private static object InvokeObjectInstance(object target, string methodName, params object[] args)

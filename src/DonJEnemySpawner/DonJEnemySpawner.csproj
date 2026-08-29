@@ -17,6 +17,12 @@
     <GtaRoot Condition="'$(GtaRoot)' == ''">$(DefaultEnhancedGtaRoot)</GtaRoot>
     <GtaScriptsDir Condition="'$(GtaScriptsDir)' == ''">$(GtaRoot)\Scripts</GtaScriptsDir>
 
+    <!-- Je ne touche jamais au dossier GTA pendant une compilation normale. -->
+    <DeployToGta Condition="'$(DeployToGta)' == ''">false</DeployToGta>
+    <RepositoryRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))</RepositoryRoot>
+    <PackageGameReadyScript>$(RepositoryRoot)\tools\package-game-ready.ps1</PackageGameReadyScript>
+    <DeployGameReadyScript>$(RepositoryRoot)\tools\deploy-game-ready.ps1</DeployGameReadyScript>
+
     <!-- API v2 cible : NIBScriptHookVDotNet2.dll en priorité, sinon ScriptHookVDotNet2.dll. -->
     <ShvdnApiReferenceName Condition="Exists('$(GtaRoot)\NIBScriptHookVDotNet2.dll')">NIBScriptHookVDotNet2</ShvdnApiReferenceName>
     <ShvdnApiPath Condition="Exists('$(GtaRoot)\NIBScriptHookVDotNet2.dll')">$(GtaRoot)\NIBScriptHookVDotNet2.dll</ShvdnApiPath>
@@ -57,40 +63,35 @@
           SkipUnchangedFiles="false" />
   </Target>
 
-  <Target Name="DeployAsEndll" AfterTargets="CreateLocalEndll" Condition="'$(Configuration)' == 'Release'">
-    <MakeDir Directories="$(GtaScriptsDir)"
-             Condition="!Exists('$(GtaScriptsDir)')" />
+  <Target Name="ValidateDeployTarget"
+          Condition="'$(Configuration)' == 'Release' and '$(DeployToGta)' == 'true'">
+    <Error Condition="'$(GtaScriptsDir)' == ''"
+           Text="GtaScriptsDir doit etre defini pour deployer dans GTA." />
+    <Error Condition="!Exists('$(GtaRoot)\GTA5_Enhanced.exe')"
+           Text="Le dossier GTA indique est invalide : $(GtaRoot)" />
+    <Error Condition="!Exists('$(PackageGameReadyScript)')"
+           Text="Script de packaging introuvable : $(PackageGameReadyScript)" />
+    <Error Condition="!Exists('$(DeployGameReadyScript)')"
+           Text="Script de deploiement introuvable : $(DeployGameReadyScript)" />
+  </Target>
 
-    <!-- Nettoyage de la nouvelle variante. -->
-    <Delete Files="$(GtaScriptsDir)\$(AssemblyName).dll"
-            Condition="Exists('$(GtaScriptsDir)\$(AssemblyName).dll')" />
+  <Target Name="CreateGtaDeployPackage"
+          DependsOnTargets="ValidateDeployTarget"
+          Condition="'$(Configuration)' == 'Release' and '$(DeployToGta)' == 'true'">
+    <PropertyGroup>
+      <!-- Je normalise les chemins sans séparateur final avant de les citer pour PowerShell. -->
+      <GtaDeployBuildDirectory>$([System.IO.Path]::GetFullPath('$(TargetDir).'))</GtaDeployBuildDirectory>
+      <GtaDeployPackageDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(IntermediateOutputPath)game-ready'))</GtaDeployPackageDirectory>
+    </PropertyGroup>
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(PackageGameReadyScript)&quot; -Configuration &quot;$(Configuration)&quot; -RepositoryRoot &quot;$(RepositoryRoot)&quot; -BuildDirectory &quot;$(GtaDeployBuildDirectory)&quot; -OutputDirectory &quot;$(GtaDeployPackageDirectory)&quot; -DependencyDirectory &quot;$(GtaRoot)&quot; -Force" />
+  </Target>
 
-    <Delete Files="$(GtaScriptsDir)\$(AssemblyName).ENdll"
-            Condition="Exists('$(GtaScriptsDir)\$(AssemblyName).ENdll')" />
-
-    <Delete Files="$(GtaScriptsDir)\$(AssemblyName).pdb"
-            Condition="Exists('$(GtaScriptsDir)\$(AssemblyName).pdb')" />
-
-    <!-- Nettoyage de l'ancien nom pour eviter que deux scripts se chargent en meme temps. -->
-    <Delete Files="$(GtaScriptsDir)\DonJEnemySpawner.dll"
-            Condition="Exists('$(GtaScriptsDir)\DonJEnemySpawner.dll')" />
-
-    <Delete Files="$(GtaScriptsDir)\DonJEnemySpawner.ENdll"
-            Condition="Exists('$(GtaScriptsDir)\DonJEnemySpawner.ENdll')" />
-
-    <Delete Files="$(GtaScriptsDir)\DonJEnemySpawner.pdb"
-            Condition="Exists('$(GtaScriptsDir)\DonJEnemySpawner.pdb')" />
-
-    <Copy SourceFiles="$(TargetDir)$(AssemblyName).ENdll"
-          DestinationFiles="$(GtaScriptsDir)\$(AssemblyName).ENdll"
-          SkipUnchangedFiles="false" />
-
-    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb"
-          DestinationFiles="$(GtaScriptsDir)\$(AssemblyName).pdb"
-          Condition="Exists('$(TargetDir)$(AssemblyName).pdb')"
-          SkipUnchangedFiles="false" />
-
+  <Target Name="DeployAsEndll"
+          AfterTargets="CreateLocalEndll"
+          DependsOnTargets="CreateGtaDeployPackage"
+          Condition="'$(Configuration)' == 'Release' and '$(DeployToGta)' == 'true'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(DeployGameReadyScript)&quot; -PackageDirectory &quot;$(GtaDeployPackageDirectory)&quot; -GtaRoot &quot;$(GtaRoot)&quot; -GtaScriptsDir &quot;$(GtaScriptsDir)&quot;" />
     <Message Importance="High"
-             Text="DonJ Custom NPC Placer deploye vers : $(GtaScriptsDir)\$(AssemblyName).ENdll" />
+              Text="DonJ Custom NPC Placer deploye vers : $(GtaScriptsDir)\$(AssemblyName).ENdll" />
   </Target>
 </Project>

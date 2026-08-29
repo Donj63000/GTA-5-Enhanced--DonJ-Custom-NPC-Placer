@@ -1548,3 +1548,184 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Collecte complète via `tools\collect-bug-logs.ps1`, contrôle des processus résiduels, puis relance de la suite avec une sortie par test pour exclure un test fautif.
 - Vérification: La relance complète réussit `404/404`. La suite standard réussit `404/404` dans `TestResults\safety-20260828-033154`, puis la suite stub réussit `412/412` dans `TestResults\safety-20260828-033308`. La reconstruction finale contre l'API NIB réelle termine avec zéro avertissement et zéro erreur.
 - Résolution: Interruption d'outillage transitoire circonscrite; aucune modification fonctionnelle supplémentaire nécessaire.
+
+## 2026-08-29 02:47:27 +02:00 - Échecs intermédiaires pendant la remédiation de l'audit Justice avancée
+- Statut: Résolus; validations globales standard et stub réussies en fin d'intervention.
+- Contexte: Remplacement de la persistance synchrone par des snapshots DTO hors thread, réduction du WAL, durcissement de la migration v1, de l'isolation de profil et du packaging game-ready.
+- Symptôme: La première suite après conversion typée comptait `29` échecs sur `452`, principalement des tests encore couplés aux anciens flushs synchrones et au WAL XML complet. Les passages ciblés ont ensuite signalé un WAL refusé sans fichier à relire (`8/9`), un ancien manifeste de diagnostic (`25/26`), deux attentes obsolètes de paiement (`13/15`), un timeout de `2,5 s` avec le ledger maximal, une erreur de compilation dans le test de diagnostic, puis quatre fixtures de déploiement qui ne remplaçaient pas `sourceDirty` dans le JSON PowerShell indenté (`32/36`). Plusieurs recherches `rg` ont aussi utilisé un glob Windows invalide et renvoyé `os error 123`.
+- Sources vérifiées:
+  - `tests\DonJEnemySpawner.Tests\TestResults\full-after-typed.trx`;
+  - `tests\DonJEnemySpawner.Tests\TestResults\targeted-packaging-wal.trx`;
+  - tests Justice WAL, paiement, diagnostic, profils et packaging;
+  - sources `DonJEnemySpawner.Justice.Persistence.*.cs`, `DonJEnemySpawner.Justice.Wal.cs` et scripts `tools\*-game-ready.ps1`.
+- Extraits utiles:
+  - packaging initial: `échec : 4, réussite : 32, total : 36`;
+  - cause du fixture: le manifeste contenait `"sourceDirty":  true` alors que le remplacement exigeait exactement `"sourceDirty": true`;
+  - relance ciblée: `échec : 0, réussite : 36, total : 36`;
+  - build après correction: `0 Avertissement(s)`, `0 Erreur(s)`.
+- Analyse / hypothèse: Les principaux échecs reflétaient des contrats de test devenus obsolètes après l'architecture asynchrone. Le timeout du ledger était spécifique à la barrière headless de test et non au thread gameplay. Le dernier lot packaging provenait exclusivement d'une hypothèse fragile sur les espaces du sérialiseur PowerShell; le garde-fou de déploiement rejetait correctement les sources sales.
+- Action menée: Les tests sont réalignés sur les barrières de révision disque, le DTO de garde à vue et le WAL compact; la barrière réservée aux tests dispose d'un budget de `30 s`; les fixtures de manifeste utilisent une expression régulière tolérant l'indentation tout en exigeant le booléen `sourceDirty`; les recherches suivantes utilisent `rg -g` ou des chemins explicites.
+- Vérification: Build Release réussi sans avertissement. Les `36` tests ciblés audit/WAL/packaging passent après correction; les suites de sécurité finales réussissent `467/467` en standard et `477/477` avec stub.
+- Résolution: Incidents intermédiaires circonscrits et corrigés sans écrire dans les sauvegardes GTA ni déployer un package marqué non publiable.
+
+## 2026-08-29 02:50:00 +02:00 - Glob `rg` invalide pendant la vérification documentaire Justice
+- Statut: Résolu; erreur d'outillage sans impact sur le projet.
+- Contexte: Relecture des appels à `PersistJusticeCriticalPrecommitToWal` avant d'aligner la documentation développeur et la matrice manuelle sur l'implémentation actuelle.
+- Symptôme: La recherche `rg` a reçu le chemin `src/DonJEnemySpawner/*.cs`, que PowerShell/Windows n'a pas développé, et a renvoyé `os error 123`.
+- Sources vérifiées:
+  - sortie de la commande de relecture documentaire ;
+  - fichiers source sous `src\DonJEnemySpawner` ;
+  - état Git du dépôt.
+- Extraits utiles:
+  - `rg: src/DonJEnemySpawner/*.cs: IO error` ;
+  - `La syntaxe du nom de fichier, de répertoire ou de volume est incorrecte. (os error 123)`.
+- Analyse / hypothèse: Le glob Unix placé dans un argument de chemin n'est pas valide pour cette invocation Windows de `rg`; aucun build, test, fichier runtime ou sauvegarde GTA n'a été touché.
+- Action menée: La recherche est relancée sur le dossier explicite avec un filtre `-g '*.cs'`.
+- Vérification: Le diff documentaire reste valide via `git diff --check`; la relance compatible Windows confirme les appelants recherchés.
+- Résolution: Incident limité à la commande de recherche, sans modification fonctionnelle ni risque runtime résiduel.
+
+## 2026-08-29 03:23:57 +02:00 - Échecs ciblés de persistance pendant la remédiation Justice avancée
+- Statut: Résolu et validé globalement.
+- Contexte: Vérification des profils typés, du retry du writer asynchrone et des changements de protagoniste après le passage au schéma Justice 2 et au repository hors thread GTA.
+- Symptôme: La suite de sécurité stub a d'abord réussi `466/468`: le snapshot `Custody` typé d'un profil inactif restait nul après rechargement et un échec injecté du writer empêchait le retry d'une intention disciplinaire. Une suite ciblée profils a ensuite échoué `5` fois parce que quatre tests attendaient encore une bascule immédiatement committée et qu'un test cherchait une frame WAL déjà compactée. Une commande directe `dotnet test -p:UseStubApi=true`, lancée sans préparer le faux `GtaRoot` et les assemblies du stub, a produit des erreurs de compilation de harness sans révéler de défaut produit. Enfin, une build lancée pendant une édition parallèle de l'inventaire a momentanément trouvé six appels encore typés comme des booléens.
+- Sources vérifiées:
+  - `bug-reports\20260829-030000-safety-failure` et `TestResults\safety-20260829-025701\logs\test-release.log`;
+  - `bug-reports\20260829-032357-remediation-audit-justice-echecs-intermediaires-2`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.Persistence.Runtime.cs`, `DonJEnemySpawner.Justice.Persistence.TypedCustody.cs` et `DonJEnemySpawner.Justice.Profiles.cs`;
+  - `tests\DonJEnemySpawner.Tests\JusticePlayerProfilePersistenceTests.cs`, `JusticeRuntimeContractTests.cs` et `JusticeCustodyHardeningTests.cs`.
+- Extraits utiles:
+  - sécurité stub initiale: `échec : 2, réussite : 466, total : 468`;
+  - profils ciblés intermédiaires: `échec : 5`, puis `réussite : 32/32` après réalignement et correction;
+  - build concurrente intermédiaire: six erreurs de conversion de `JusticeInventoryRemovalResult` vers `bool`;
+  - la commande stub directe ne disposait ni du runtime simulé préparé par `run-safety-checks.ps1`, ni des références GTA factices attendues.
+- Analyse / hypothèse: Le lecteur v2 validait correctement les fragments XML mais ne matérialisait pas encore le DTO de garde à vue des profils inactifs. Le circuit de retry observait l'échec avant de conserver le fait qu'une nouvelle tentative était déjà due, ce qui repoussait indéfiniment la révision réparée. Les autres échecs provenaient de contrats de tests synchrones obsolètes, d'une inspection trop tardive après compaction, d'une invocation stub incomplète et d'un état transitoire d'édition parallèle.
+- Action menée: Le chargement v2 hydrate désormais chaque `Custody` typé sous son propre profil puis restaure l'état runtime courant. Le writer mémorise si le retry était dû avant d'observer l'échec et autorise alors la révision réparée à remplacer le snapshot fautif. Les changements de profil attendent explicitement leur `DiskRevision`; les tests utilisent cette barrière et vérifient le rejet avant compaction. L'état ternaire de retrait d'inventaire a été propagé à tous les appelants. Les validations stub finales passent exclusivement par `tools\run-safety-checks.ps1 -UseStubApi`.
+- Vérification: Les profils passent finalement `35/35`, les DTO/custody `6/6`, l'inventaire stub `21/21`, puis les suites de sécurité complètes `467/467` en standard et `477/477` avec stub.
+- Résolution: Les causes sont circonscrites et couvertes; aucune sauvegarde GTA ni installation live n'a été modifiée par ces échecs intermédiaires.
+
+## 2026-08-29 03:23:58 +02:00 - Erreurs d'outillage read-only pendant la revue Justice avancée
+- Statut: Résolu; aucun fichier fonctionnel ni état GTA affecté.
+- Contexte: Recherches croisées et lecture de plages source pendant l'analyse des correctifs de persistance, d'inventaire et de packaging.
+- Symptôme: Plusieurs commandes `rg` ont reçu des globs de chemin Windows non développés (`DonJEnemySpawner.Justice.Persistence.*.cs`, `src/DonJEnemySpawner/*.cs` et `tests/*.cs`) et ont renvoyé `os error 123`. Une lecture PowerShell a calculé `Select-Object -Skip -1` après avoir recherché le symbole dans le mauvais fichier. Une première tentative `apply_patch` de l'agent inventaire n'a pas trouvé son contexte et n'a appliqué aucune modification.
+- Sources vérifiées:
+  - sorties terminal des commandes de recherche et de lecture;
+  - `bug-reports\20260829-032357-remediation-audit-justice-echecs-intermediaires-2`;
+  - `bug-reports\20260829-033231-revue-inventaire-packaging-glob-rg-invalide`;
+  - `bug-reports\20260829-035958-rg-backreference-non-supportee-controle-docs`;
+  - état Git et diffs des sources/tests concernés.
+- Extraits utiles:
+  - `La syntaxe du nom de fichier, de répertoire ou de volume est incorrecte. (os error 123)`;
+  - `Cannot validate argument on parameter 'Skip'. The -1 argument is less than the minimum allowed range of 0`;
+  - la tentative de patch a signalé un contexte introuvable sans écrire de hunk.
+- Analyse / hypothèse: Ces incidents viennent uniquement de syntaxes de recherche incompatibles avec la résolution des globs sous Windows et d'un offset absent. Aucun processus de build, aucune native et aucune sauvegarde n'étaient impliqués.
+- Action menée: Les recherches suivantes utilisent des dossiers explicites avec `-g '*.cs'` ou des listes de chemins littéraux; les plages PowerShell sont bornées après vérification de la position; le patch inventaire a été recalé sur le contenu réellement relu.
+- Vérification: Les tests inventaire passent `20/20` en standard et `21/21` avec stub, les tests packaging passent `11/11`, et `git diff --check` sera relancé au contrôle final.
+- Résolution: Incidents d'outillage documentés et sans risque runtime résiduel.
+- Occurrences supplémentaires: Les revues read-only finales inventaire/packaging et profils ont reproduit le même `os error 123` avec `src/DonJEnemySpawner/*.cs`, puis `tests/DonJEnemySpawner.Tests/*.cs`; aucun fichier n'a été modifié et les recherches ont été reprises sur les dossiers avec un filtre `-g`.
+- Contrôle documentaire final: une expression `rg` a utilisé une backreference `\1`, non supportée par le moteur par défaut. La recherche a été simplifiée sans `--pcre2`; aucun fichier n'a été modifié.
+
+## 2026-08-29 03:26:19 +02:00 - Build ciblée interrompue par une édition concurrente du WAL financier
+- Statut: Résolu après stabilisation du fichier partagé.
+- Contexte: La revue indépendante venait d'ajouter un test stub reproduisant un livelock de bascule de protagoniste quand une restauration de suppression policière est déjà engagée.
+- Symptôme: La compilation ciblée s'est arrêtée dans `DonJEnemySpawner.Justice.Persistence.Runtime.cs(989,47)` avec `CS0103`, car la variable locale `diskRevision` n'existait pas encore dans une portion simultanément remaniée pour le WAL financier.
+- Sources vérifiées:
+  - sortie de la commande de test ciblée de la revue profils;
+  - `bug-reports\20260829-032646-build-concurrent-wal-financier-cs0103`;
+  - diff courant de `src\DonJEnemySpawner\DonJEnemySpawner.Justice.Persistence.Runtime.cs`;
+  - diff indépendant de `DonJEnemySpawner.Justice.Profiles.cs` et `JusticePlayerProfilePersistenceTests.cs`.
+- Extraits utiles:
+  - `error CS0103: Le nom 'diskRevision' n'existe pas dans le contexte actuel`;
+  - le défaut de compilation est extérieur aux deux fichiers du correctif de profil et correspond à un hunk encore incomplet de l'agent financier.
+- Analyse / hypothèse: Il s'agit d'un état transitoire du worktree partagé, pas d'un échec du scénario runtime. Lancer le test avant la fin de l'édition concurrente ne permet pas d'évaluer le correctif.
+- Action menée: Aucune modification de contournement n'est appliquée dans le test ou les profils. La revue attend l'intégration complète du WAL financier, puis relancera la compilation et le scénario stub sur l'état cohérent.
+- Vérification: Les deux nouveaux scénarios profils passent `2/2`, la classe complète `35/35`, le build Release final termine avec zéro avertissement/zéro erreur, puis les suites standard/stub passent intégralement.
+- Résolution: État transitoire supprimé; aucun effet sur GTA, ses sauvegardes ou le package.
+
+## 2026-08-29 03:30:08 +02:00 - Attente synchrone obsolète dans le test de restauration policière
+- Statut: Résolu et validé.
+- Contexte: Validation complète des profils après correction du livelock de bascule et de la course sur le compteur d'échecs du repository.
+- Symptôme: Les deux nouveaux scénarios stub passent `2/2`, mais la classe profils réussit `34/35`: `PlayerProfiles_InactivePoliceTokensAreRestoredAndClearedAfterCrash` attend encore que le premier appel de restauration efface immédiatement les jetons, alors que l'architecture asynchrone doit d'abord rendre son snapshot durable puis finaliser le WAL au tick suivant.
+- Sources vérifiées:
+  - `bug-reports\20260829-033008-test-profils-police-wal-asynchrone`;
+  - `bug-reports\20260829-033048-test-profils-wal-compacte-avant-assertion`;
+  - sortie de la suite ciblée `JusticePlayerProfilePersistenceTests`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.Profiles.cs`, `DonJEnemySpawner.Justice.Custody.cs` et `DonJEnemySpawner.Justice.Persistence.Runtime.cs`;
+  - `tests\DonJEnemySpawner.Tests\JusticePlayerProfilePersistenceTests.cs`.
+- Extraits utiles:
+  - suite ciblée: `échec : 1, réussite : 34, total : 35`;
+  - le premier appel réarme volontairement les jetons runtime tant que la barrière `SetJusticeCustodyPoliceSuppression` n'a pas atteint sa `DiskRevision`.
+- Une seconde passe a encore réussi `34/35`: le nouveau scénario lisait obligatoirement la dernière frame après la bascule, mais le writer avait déjà confirmé puis compacté le WAL; le slot `1` était pourtant correctement actif et aucune frame `Rejected` n'avait été observée.
+- Analyse / hypothèse: Le test conservait le contrat de l'ancien précommit XML synchrone. Le runtime actuel ne doit ni bloquer GTA sur le writer, ni prétendre la restauration durable avant sa révision disque.
+- Action menée: Le scénario historique est réaligné sur le protocole réel: premier appel, attente de la révision disque réservée au harness, puis second appel qui finalise le petit WAL et acquitte les jetons. Le nouveau test accepte également qu'une transaction terminale ait déjà été compactée; si une frame subsiste, il interdit toujours explicitement l'état `Rejected`.
+- Vérification: Les deux nouveaux tests de livelock/course passent `2/2`; la classe profils passe `35/35`, puis les suites globales standard/stub réussissent.
+- Résolution: Écart de test sans mutation GTA; le contrat asynchrone reste inchangé.
+
+## 2026-08-29 03:35:02 +02:00 - Contrat source de débit obsolète après durcissement du WAL financier
+- Statut: Résolu et validé.
+- Contexte: Revue finale read-only combinant les garde-fous d'inventaire et de packaging pendant l'intégration du nouveau protocole de débit.
+- Symptôme: La sélection ciblée réussit `30/31`; seul `FineDebit_PersistsSucceededRejectedAndUnknownOutcomes` échoue parce qu'il exige encore le marqueur `PersistJusticeCriticalPrecommitRedundantly()`, supprimé du chemin financier au profit de la nouvelle barrière snapshot durable puis WAL `Attempted` juste avant l'effet cash.
+- Sources vérifiées:
+  - `bug-reports\20260829-033502-test-custody-contrat-precommit-financier-obsolete`;
+  - sortie de la sélection `JusticeCustodyHardeningTests|PackagingSafetyTests`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.Custody.cs` et `DonJEnemySpawner.Justice.Persistence.Runtime.cs`;
+  - `tests\DonJEnemySpawner.Tests\JusticeCustodyHardeningTests.cs`.
+- Extraits utiles:
+  - `échec : 1, réussite : 30, total : 31`;
+  - assertion manquante: ancien appel textuel `PersistJusticeCriticalPrecommitRedundantly()`.
+- Analyse / hypothèse: Le test inspecte une implémentation remplacée volontairement. Conserver cet appel pour satisfaire le texte réintroduirait précisément le précommit XML synchrone dénoncé par JUS-003.
+- Action menée: Le contrat doit vérifier l'ordre effectif `snapshot durable -> WAL Prepared/Attempted -> SET cash`, l'identité transactionnelle stable et l'absence de replay après une frame `Attempted`, sans dépendre du nom de l'ancien helper.
+- Vérification: Le build Release passe avec zéro avertissement et zéro erreur; paiements + contrat FineDebit passent `18/18`, inventaire + packaging `31/31`, puis les suites de sécurité globales réussissent.
+- Résolution: Aucun effet GTA ni déploiement; écart de test circonscrit au contrat source historique.
+
+## 2026-08-29 03:36:23 +02:00 - Fenêtre sans binaire chargeable lors du retrait anticipé des alias historiques
+- Statut: Corrigé, testé et revu sans finding P0–P2 résiduel.
+- Contexte: Relecture indépendante de `tools\deploy-game-ready.ps1` après l'ajout du rollback des alias verrouillés.
+- Symptôme: Les anciens alias étaient déplacés vers des backups cachés avant la publication du nouveau triplet. Une interruption brutale du processus ou de Windows à cette frontière, sur une installation ne contenant que `DonJEnemySpawner.ENdll`, pouvait donc laisser temporairement zéro ENdll chargeable; le `catch` PowerShell ne peut pas réparer un processus tué.
+- Sources vérifiées:
+  - `bug-reports\20260829-033623-deploy-interruption-avant-publication-alias`;
+  - `tools\deploy-game-ready.ps1`, séquence de staging, remplacement et alias;
+  - `tests\DonJEnemySpawner.Tests\PackagingSafetyTests.cs`;
+  - critères JUS-001/JUS-002 de l'audit Justice avancée.
+- Extraits utiles:
+  - l'ancienne séquence déplaçait les alias aux lignes de transaction précédant `Install-StagedFile` pour `DonJCustomNpcPlacer.ENdll`;
+  - les tests couvraient une exception normale sur alias verrouillé, mais pas l'ordre garantissant qu'un nouveau binaire vérifié existe avant leur retrait.
+- Analyse / hypothèse: Le rollback était correct pour une exception interceptable, mais l'ordre de commit ne résistait pas à une coupure de processus. La priorité est qu'un ENdll valide reste présent; un intervalle où nouveau nom et alias coexistent pendant GTA fermé est moins dangereux qu'un intervalle sans aucun binaire.
+- Action menée: Le déploiement publie et relit d'abord ENdll, PDB et manifest. Il ne met les alias à l'abri qu'après validation du nouveau triplet. Un alias verrouillé restaure les alias déjà déplacés puis déclenche le rollback inverse des trois nouveaux fichiers. Un test de contrat vérifie cet ordre en plus du scénario de verrou.
+- Vérification: `PackagingSafetyTests` passe `12/12` après ajout du contrat du harness; le groupe inventaire + packaging passe `31/31`, les hashes build/package sont identiques et les deux chaînes de sécurité réussissent.
+- Résolution: Ordre de publication corrigé; aucun déploiement live n'a été exécuté pendant la découverte.
+
+## 2026-08-29 03:44:43 +02:00 - Reprise financière depuis un backup Prepared et contrats runtime obsolètes
+- Statut: Corrigé et validé globalement.
+- Contexte: Tests déterministes du nouveau protocole financier `snapshot Prepared durable -> WAL Attempted -> effet cash`, puis régression complète des contrats Justice runtime.
+- Symptôme: La première passe paiement réussissait `13/15`: `VoluntaryPayment_CancelledPreparedIntentCannotBeResurrectedFromBackup` et l'ancien `VoluntaryPayment_SecondPrecommitFailureReloadsPersistedIntentIdempotently` supposaient encore un WAL immédiat/une reprise en un seul appel. Le scénario backup a révélé un risque réel: un abandon avant armement ne laissait aucune frame terminale; si le primaire final devenait corrompu, son `.bak` encore `Prepared` pouvait ressusciter l'intention et débiter. La passe `JusticeRuntimeContractTests` réussissait ensuite `67/70`: deux marqueurs FineDebit historiques et `JusticeEscape_PersistsDiscardIntentBeforeRemovalThenCommitsFugitiveState` attendaient des helpers remplacés.
+- Sources vérifiées:
+  - `bug-reports\20260829-033933-tests-paiement-wal-backup-prepared`;
+  - `bug-reports\20260829-034443-runtime-contracts-finance-evasion-inventaire`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.Payment.cs`, `DonJEnemySpawner.Justice.Custody.cs` et `DonJEnemySpawner.Justice.Persistence.Runtime.cs`;
+  - `tests\DonJEnemySpawner.Tests\JusticeVoluntaryPaymentTests.cs`, `JusticeRuntimeContractTests.cs`, `JusticeCustodyHardeningTests.cs` et `JusticeWalRecoveryTests.cs`.
+- Extraits utiles:
+  - paiement initial: `échec : 2, réussite : 13, total : 15`;
+  - contrats runtime intermédiaires: `échec : 3, réussite : 67, total : 70`;
+  - le chemin d'abandon avant `TryArm` possédait un snapshot `Prepared` mais aucun tombstone WAL empêchant sa reprise depuis le backup.
+- Analyse / hypothèse: La durabilité du primaire ne suffit pas si le backup précédent reste sémantiquement ouvert. Par ailleurs, les trois inspections source décrivaient l'ancien précommit redondant et un reset d'évasion inconditionnel, incompatibles avec la persistance asynchrone et la conservation d'un inventaire `EffectMayHaveApplied`.
+- Action menée: Chaque effet financier utilise un identifiant stable et des champs immuables liés au slot, à la génération, à l'identité, au schéma et à l'épisode. Le snapshot `Prepared` doit atteindre `DiskRevision`; les frames `Prepared` puis `Attempted` précèdent immédiatement `STAT_SET_INT`; une reprise `Attempted/Ambiguous` ne rejoue jamais le SET. Même une annulation sans effet écrit désormais `Prepared -> Rejected`, et les tombstones `Rejected/Confirmed` restent présents jusqu'à un remplacement disque supplémentaire qui avance aussi le backup. Le test perdu après ACK est renommé `VoluntaryPayment_LostPreparedAcknowledgementRetriesWithoutDoubleDebit`; des coupures sur ACK Prepared, troncature Attempted et précondition `FineDue` durable sont ajoutées. L'évasion conserve et restaure tout snapshot dont l'effet a pu s'appliquer au lieu de le jeter.
+- Vérification: Build Release `0` avertissement/`0` erreur; paiements + contrat FineDebit `18/18`; WAL/Custody/Audit `46/46`; cinq scénarios financiers critiques `5/5`; évasion + inventaire `23/23`; classe `JusticeRuntimeContractTests` `70/70`.
+- Résolution: Résurrection de débit depuis backup fermée, aucun replay après `Attempted`, ambiguïté d'inventaire préservée; aucun cash ni fichier GTA live touché pendant les tests.
+
+## 2026-08-29 03:49:48 +02:00 - Refus attendu d'un package sale traité comme échec fatal par le harness
+- Statut: Corrigé et validé par les deux chaînes de sécurité.
+- Contexte: Première validation globale après intégration complète des correctifs de l'audit Justice avancée depuis un worktree volontairement modifié.
+- Symptôme: La build stub réussit sans avertissement et les tests passent `476/476`. Le package local `sourceDirty=true` est correctement refusé par `deploy-game-ready.ps1`, mais son stderr natif devient un `NativeCommandError` sous `$ErrorActionPreference = "Stop"`; `run-safety-checks.ps1` s'arrête donc avant de vérifier que le code non nul était précisément le résultat attendu.
+- Sources vérifiées:
+  - `bug-reports\20260829-034935-safety-failure`;
+  - `TestResults\safety-20260829-034734\safety-tests.trx`;
+  - `TestResults\safety-20260829-034734\game-ready\manifest.json` et `deploy-dirty-refusal.log`;
+  - `tools\run-safety-checks.ps1` et `tools\deploy-game-ready.ps1`.
+- Extraits utiles:
+  - tests: `échec : 0, réussite : 476, total : 476`;
+  - manifest: `sourceDirty: true`, schéma Justice `2`, SHA-256 ENdll `0B3F584A48B722A06C3C380F105672013307F204022124E79FC2038F6A070029`;
+  - sortie finale: `NativeCommandError` sur `Manifest game-ready invalide`, qui est le refus de sécurité attendu.
+- Analyse / hypothèse: Le produit, le package et le garde de déploiement se comportent correctement. Seul le harness confondait le stderr d'un test négatif avec une panne avant de pouvoir lire `$LASTEXITCODE`.
+- Action menée: La branche locale attendue capture temporairement ce sous-processus sous `ErrorActionPreference=Continue`, mémorise son code, restaure impérativement la politique stricte en `finally`, puis échoue uniquement si le package sale a été accepté. Un test de contrat vérifie l'ordre assouplissement local, invocation, capture et restauration.
+- Vérification: Test packaging ciblé `12/12`; relance stub `477/477` dans `TestResults\safety-20260829-035146`; relance standard `467/467` dans `TestResults\safety-20260829-035409`; build Release séparé zéro avertissement/zéro erreur et test séparé `467/467`.
+- Résolution: Défaut limité au harness et corrigé; aucun déploiement live ni mutation des sauvegardes GTA.

@@ -400,9 +400,14 @@ private enum MainMenuAction
     JusticeCharges,
     JusticeRecord,
     JusticeFine,
+    JusticeFineDispute,
     JusticePayFine,
+    JusticeResolveFineDispute,
     JusticeSentence,
     JusticeRecidivism,
+    JusticePoliceMode,
+    JusticeRecovery,
+    JusticeDiagnostic,
     JusticeResetProfile,
 
     CleanNpcs,
@@ -810,78 +815,194 @@ private enum EnemyBehavior
 
     private void OnTick(object sender, EventArgs e)
     {
+        // Je route chaque domaine par un enum et un switch : aucun delegate n'est créé à chaque frame.
+        bool RunTickStage(RuntimeTickStage stage)
+        {
+            try
+            {
+                switch (stage)
+                {
+                    case RuntimeTickStage.Relationships:
+                        RefreshPlayerRelationshipIfNeeded();
+                        break;
+
+                    case RuntimeTickStage.JusticeEarly:
+                        UpdateJusticeEarly();
+                        break;
+
+                    case RuntimeTickStage.CartelEarly:
+                        UpdateCartelContactAndConvoy();
+                        break;
+
+                    case RuntimeTickStage.Terminator:
+                        UpdateTerminatorMode();
+                        break;
+
+                    case RuntimeTickStage.CustomModelRequest:
+                        if (_customModelInputRequested)
+                        {
+                            _customModelInputRequested = false;
+                            EditCustomModelName();
+                        }
+                        break;
+
+                    case RuntimeTickStage.SaveRequest:
+                        if (_saveRequested)
+                        {
+                            _saveRequested = false;
+                            SaveCurrentSetupWithPrompt();
+                        }
+                        break;
+
+                    case RuntimeTickStage.LoadRequest:
+                        if (_loadRequested)
+                        {
+                            _loadRequested = false;
+                            LoadSetupWithPrompt();
+                        }
+                        break;
+
+                    case RuntimeTickStage.Placement:
+                        if (_placementMode)
+                        {
+                            UpdatePlacementMode();
+                        }
+                        break;
+
+                    case RuntimeTickStage.MenuAnimation:
+                        UpdateMenuAnimation();
+                        break;
+
+                    case RuntimeTickStage.Menu:
+                        if (ShouldRenderMenu)
+                        {
+                            if (_menuVisible)
+                            {
+                                DisableMenuGameplayControls();
+                            }
+
+                            DrawMenu();
+                        }
+                        break;
+
+                    case RuntimeTickStage.PendingSpawn:
+                        ProcessPendingSpawn();
+                        break;
+
+                    case RuntimeTickStage.PlayerHostility:
+                        UpdatePlayerHostilityMemory(Game.Player.Character);
+                        break;
+
+                    case RuntimeTickStage.JusticeLate:
+                        UpdateJusticeSystem();
+                        break;
+
+                    case RuntimeTickStage.JusticeRecovery:
+                        UpdateJusticeFailSafeMaintenance();
+                        break;
+
+                    case RuntimeTickStage.Npcs:
+                        UpdateNpcs();
+                        break;
+
+                    case RuntimeTickStage.CartelLate:
+                        UpdateCartelConvoyLate();
+                        break;
+
+                    case RuntimeTickStage.Vehicles:
+                        UpdatePlacedVehicles();
+                        break;
+
+                    case RuntimeTickStage.Objects:
+                        UpdatePlacedObjects();
+                        break;
+
+                    case RuntimeTickStage.ObjectInteractions:
+                        UpdatePlacedObjectInteractions();
+                        break;
+
+                    case RuntimeTickStage.Portals:
+                        UpdateInteriorPortals();
+                        break;
+
+                    case RuntimeTickStage.Status:
+                        DrawStatus();
+                        break;
+
+                    case RuntimeTickStage.JusticeDamageFlush:
+                        FlushJusticeConsumedDamageFronts();
+                        break;
+
+                    default:
+                        return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ReportRuntimeTickStageFailure(stage, ex);
+                return false;
+            }
+        }
+
         try
         {
-            RefreshPlayerRelationshipIfNeeded();
-            UpdateJusticeEarly();
-            UpdateCartelContactAndConvoy();
-            UpdateTerminatorMode();
+            RunTickStage(RuntimeTickStage.Relationships);
+            bool justiceEarlySucceeded = RunTickStage(RuntimeTickStage.JusticeEarly);
+            RunTickStage(RuntimeTickStage.CartelEarly);
+            RunTickStage(RuntimeTickStage.Terminator);
             _autoRespawnsThisTick = 0;
 
-            if (_customModelInputRequested)
-            {
-                _customModelInputRequested = false;
-                EditCustomModelName();
-            }
-
-            if (_saveRequested)
-            {
-                _saveRequested = false;
-                SaveCurrentSetupWithPrompt();
-            }
-
-            if (_loadRequested)
-            {
-                _loadRequested = false;
-                LoadSetupWithPrompt();
-            }
-
-            if (_placementMode)
-            {
-                UpdatePlacementMode();
-            }
-
-            UpdateMenuAnimation();
+            RunTickStage(RuntimeTickStage.CustomModelRequest);
+            RunTickStage(RuntimeTickStage.SaveRequest);
+            RunTickStage(RuntimeTickStage.LoadRequest);
+            RunTickStage(RuntimeTickStage.Placement);
+            RunTickStage(RuntimeTickStage.MenuAnimation);
 
             // Je masque seulement le HUD Terminator pendant la transition du menu
             // afin que les deux interfaces ne se superposent jamais.
-            if (!ShouldRenderMenu)
+            try
             {
-                DrawTerminatorModeHud();
-                DrawJusticeCustodyStatusLine();
-            }
-
-            if (ShouldRenderMenu)
-            {
-                if (_menuVisible)
+                if (!ShouldRenderMenu)
                 {
-                    DisableMenuGameplayControls();
+                    DrawTerminatorModeHud();
+                    DrawJusticeCustodyStatusLine();
                 }
-
-                DrawMenu();
+            }
+            catch (Exception ex)
+            {
+                ReportRuntimeTickStageFailure(RuntimeTickStage.Hud, ex);
             }
 
-            ProcessPendingSpawn();
-            UpdatePlayerHostilityMemory(Game.Player.Character);
-            UpdateJusticeSystem();
-            UpdateNpcs();
-            UpdateCartelConvoyLate();
-            UpdatePlacedVehicles();
-            UpdatePlacedObjects();
-            UpdatePlacedObjectInteractions();
-            UpdateInteriorPortals();
-            DrawStatus();
-        }
-        catch (Exception ex)
-        {
-            LogException("OnTick", ex);
-            ShowStatus("Erreur " + TrainerTitle + ": " + ex.Message, 7000);
+            RunTickStage(RuntimeTickStage.Menu);
+            RunTickStage(RuntimeTickStage.PendingSpawn);
+            RunTickStage(RuntimeTickStage.PlayerHostility);
+
+            if (justiceEarlySucceeded)
+            {
+                RunTickStage(RuntimeTickStage.JusticeLate);
+            }
+            else
+            {
+                // Je n'avance jamais le dossier sur un état Early incomplet;
+                // je ne conserve ici que les reprises de sécurité Justice.
+                RunTickStage(RuntimeTickStage.JusticeRecovery);
+            }
+
+            RunTickStage(RuntimeTickStage.Npcs);
+            RunTickStage(RuntimeTickStage.CartelLate);
+            RunTickStage(RuntimeTickStage.Vehicles);
+            RunTickStage(RuntimeTickStage.Objects);
+            RunTickStage(RuntimeTickStage.ObjectInteractions);
+            RunTickStage(RuntimeTickStage.Portals);
+            RunTickStage(RuntimeTickStage.Status);
         }
         finally
         {
             // Je consomme les fronts de dégâts après toutes les IA du tick afin
             // qu'un ancien flag GTA ne puisse jamais recréer un crime plus tard.
-            FlushJusticeConsumedDamageFronts();
+            RunTickStage(RuntimeTickStage.JusticeDamageFlush);
         }
     }
 
@@ -964,32 +1085,66 @@ private enum EnemyBehavior
     private void OnAborted(object sender, EventArgs e)
     {
         LogInfo("Arret", TrainerTitle + " arrete.");
-        CancelPendingDangerAction();
-        ReleaseMenuUi();
-        StopPlacementMode(false);
-        DisableTerminatorMode(false);
-        ShutdownJusticeSystem();
-        ForceDeleteHighSecurityEscortEntitiesAndRecords(true);
 
-        for (int i = 0; i < _spawnedNpcs.Count; i++)
+        // Je restaure d'abord les effets gameplay critiques, puis j'isole chaque nettoyage.
+        void RunShutdownStep(RuntimeShutdownStage stage)
         {
-            RemoveNpcBlip(_spawnedNpcs[i]);
+            try
+            {
+                switch (stage)
+                {
+                    case RuntimeShutdownStage.Justice:
+                        ShutdownJusticeSystem();
+                        break;
+
+                    case RuntimeShutdownStage.Terminator:
+                        DisableTerminatorMode(false);
+                        break;
+
+                    case RuntimeShutdownStage.Placement:
+                        StopPlacementMode(false);
+                        break;
+
+                    case RuntimeShutdownStage.Menu:
+                        ReleaseMenuUi();
+                        break;
+
+                    case RuntimeShutdownStage.DangerAction:
+                        CancelPendingDangerAction();
+                        break;
+
+                    case RuntimeShutdownStage.HighSecurityEscort:
+                        ForceDeleteHighSecurityEscortEntitiesAndRecords(true);
+                        break;
+
+                    case RuntimeShutdownStage.NpcBlips:
+                        RemoveAllNpcBlipsForShutdown();
+                        break;
+
+                    case RuntimeShutdownStage.VehicleBlips:
+                        RemoveAllVehicleBlipsForShutdown();
+                        break;
+
+                    case RuntimeShutdownStage.Relationships:
+                        RemoveRuntimeRelationshipGroupsForShutdown();
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                ReportRuntimeShutdownFailure(stage, ex);
+            }
         }
 
-        for (int i = 0; i < _placedVehicles.Count; i++)
-        {
-            RemovePlacedVehicleBlip(_placedVehicles[i]);
-        }
-
-        try
-        {
-            if (_hostileGroupHash != 0) World.RemoveRelationshipGroup(_hostileGroupHash);
-            if (_neutralGroupHash != 0) World.RemoveRelationshipGroup(_neutralGroupHash);
-            if (_allyGroupHash != 0) World.RemoveRelationshipGroup(_allyGroupHash);
-        }
-        catch
-        {
-        }
+        RunShutdownStep(RuntimeShutdownStage.Justice);
+        RunShutdownStep(RuntimeShutdownStage.Terminator);
+        RunShutdownStep(RuntimeShutdownStage.Placement);
+        RunShutdownStep(RuntimeShutdownStage.Menu);
+        RunShutdownStep(RuntimeShutdownStage.DangerAction);
+        RunShutdownStep(RuntimeShutdownStage.HighSecurityEscort);
+        RunShutdownStep(RuntimeShutdownStage.NpcBlips);
+        RunShutdownStep(RuntimeShutdownStage.VehicleBlips);
+        RunShutdownStep(RuntimeShutdownStage.Relationships);
     }
 
     private void OnKeyUp(object sender, KeyEventArgs e)
@@ -1299,6 +1454,10 @@ private void ChangeMainMenuValue(int direction, List<MainMenuEntry> entries)
         case MainMenuAction.JusticeProfile:
             ChangeJusticeMenuSelectedProfile(direction);
             break;
+
+        case MainMenuAction.JusticePoliceMode:
+            CycleJusticePoliceIntegrationMode(direction);
+            break;
     }
 
     List<MainMenuEntry> refreshedEntries = BuildMainMenuEntries();
@@ -1409,6 +1568,7 @@ private void ActivateMainMenuItem(List<MainMenuEntry> entries)
         case MainMenuAction.JusticeSeverity:
         case MainMenuAction.JusticeWarrant:
         case MainMenuAction.JusticeFine:
+        case MainMenuAction.JusticeFineDispute:
         case MainMenuAction.JusticeSentence:
         case MainMenuAction.JusticeRecidivism:
             ShowStatus("Les details Justice sont regroupes dans le panneau droit.", 2200);
@@ -1416,6 +1576,29 @@ private void ActivateMainMenuItem(List<MainMenuEntry> entries)
 
         case MainMenuAction.JusticePayFine:
             RequestJusticeSelectedProfileFinePaymentConfirmation();
+            break;
+
+        case MainMenuAction.JusticeResolveFineDispute:
+            if (CanJusticeResolveSelectedFineDispute())
+            {
+                RequestDangerConfirmation(entry.Action);
+            }
+            else
+            {
+                ShowStatus("Justice : aucun montant litigieux à résoudre.", 3000);
+            }
+            break;
+
+        case MainMenuAction.JusticePoliceMode:
+            ShowStatus("Utilise Gauche/Droite pour régler la compatibilité police.", 3000);
+            break;
+
+        case MainMenuAction.JusticeRecovery:
+            RecoverJusticeControlsAndInventoryFromMenu();
+            break;
+
+        case MainMenuAction.JusticeDiagnostic:
+            ShowJusticeDiagnosticStatus();
             break;
 
         case MainMenuAction.JusticeResetProfile:
@@ -8770,16 +8953,9 @@ private void DrawMenu()
 
         string backupPath = targetPath + ".bak";
 
-        try
-        {
-            File.Replace(tempPath, targetPath, backupPath, true);
-        }
-        catch
-        {
-            File.Copy(targetPath, backupPath, true);
-            File.Delete(targetPath);
-            File.Move(tempPath, targetPath);
-        }
+        // Je refuse un fallback Delete+Move : si Replace n'est pas supporté,
+        // le primaire existant reste intact et l'échec remonte à l'appelant.
+        File.Replace(tempPath, targetPath, backupPath, true);
     }
 
     private static void DeleteFileIfExistsSafe(string path)

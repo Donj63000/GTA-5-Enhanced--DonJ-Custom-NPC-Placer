@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Windows.Forms;
 using System.Xml;
@@ -12,6 +13,18 @@ using GTA.Native;
 
 public sealed partial class DonJEnemySpawner
 {
+    [Flags]
+    private enum JusticeDeferredRuntimeFront
+    {
+        None = 0,
+        DeathStarted = 1 << 0,
+        ArrestStarted = 1 << 1,
+        ArrestEnded = 1 << 2,
+        WantedLost = 1 << 3,
+        WantedRaised = 1 << 4,
+        IdentityChanged = 1 << 5
+    }
+
     private enum JusticeWantedClearResult
     {
         Succeeded,
@@ -36,6 +49,7 @@ public sealed partial class DonJEnemySpawner
     private const int JusticeMaximumVictimCandidatesPerEvent = 8;
     private const int JusticeMaximumVehiclesPerEvent = 16;
     private const int JusticeMaximumPendingIncidents = 32;
+    private const int JusticeMaximumConfirmedIncidentsPerTick = 6;
     private const int JusticeMaximumRecentVictims = 32;
     private const int JusticeMaximumAllyTokens = 48;
     private const int JusticeMaximumTrackedIdentities = 160;
@@ -318,6 +332,10 @@ public sealed partial class DonJEnemySpawner
     private bool _justiceAmnestyPrecommitRedundant;
     private int _justiceLastCanonicalPlayerSlot = -1;
     private int _justiceLastCanonicalPlayerModelHash;
+    private JusticeDeferredRuntimeFront _justiceDeferredRuntimeFronts;
+    private int _justiceDeferredRuntimeFrontPlayerSlot = -1;
+    private int _justiceDeferredRuntimeFrontPlayerModelHash;
+    private bool _justiceDeferredRuntimeFrontHadPursuit;
 
     private void InitializeJusticeSystem()
     {
@@ -351,6 +369,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         NormalizeLoadedJusticeState();
+        InitializeJusticePersistenceServices();
         PrewarmJusticeRuntimeBuffers();
         _justiceLastWantedLevel = GetJusticeWantedLevelSafe();
         if (loaded)
@@ -365,7 +384,9 @@ public sealed partial class DonJEnemySpawner
         LogInfo(
             "Justice",
             loaded
-                ? "Etat judiciaire charge (v1), activation=" + (_justiceEnabled ? "oui" : "non") + "."
+                ? "Etat judiciaire charge, schéma=" +
+                  _justiceLoadedSchemaMajor.ToString(CultureInfo.InvariantCulture) +
+                  ", activation=" + (_justiceEnabled ? "oui" : "non") + "."
                 : "Aucun etat judiciaire exploitable; Justice reste desactivee par defaut.");
     }
 
@@ -391,15 +412,24 @@ public sealed partial class DonJEnemySpawner
         bool arrestStateValid = TryGetJusticePlayerBeingArrestedSafe(out arrested);
         bool preserveArrestLatch = false;
 
-        if (_justiceBackupRepairPending &&
-            (_justiceMonotonicTimeMs < _justiceNextBackupRepairAtMs ||
-             !TryRepairJusticePrimaryFromLoadedBackup()))
+        if (_justiceBackupRepairPending)
         {
-            // Je ne consomme aucun front et ne fais évoluer aucun dossier tant
-            // que le primaire restauré depuis .bak n'est pas redevenu durable.
-            // La frame suivant la réparation verra encore les transitions GTA.
-            _justiceProfileContextBlocked = true;
-            return;
+            ObserveJusticeFrontsWhilePersistenceBlocked(
+                player,
+                wantedLevel,
+                dead,
+                arrestStateValid,
+                arrested);
+            if (_justiceMonotonicTimeMs < _justiceNextBackupRepairAtMs ||
+                !TryRepairJusticePrimaryFromLoadedBackup())
+            {
+                // Je bloque les mutations métier, mais les fronts scalaires sont
+                // désormais mémorisés avec l'identité du héros qui les a produits.
+                _justiceProfileContextBlocked = true;
+                return;
+            }
+
+            ReconcileJusticeFrontsAfterPersistenceRepair(player, wantedLevel);
         }
 
         if (IsJusticeRuntimeSuspended(player))
@@ -696,6 +726,141 @@ public sealed partial class DonJEnemySpawner
         _justiceLastWantedLevel = wantedLevel;
     }
 
+    private void ObserveJusticeFrontsWhilePersistenceBlocked(
+        Ped player,
+        int wantedLevel,
+        bool dead,
+        bool arrestStateValid,
+        bool arrested)
+    {
+        JusticeDeferredRuntimeFront observed = JusticeDeferredRuntimeFront.None;
+        if (dead && !_justiceWasDead)
+        {
+            observed |= JusticeDeferredRuntimeFront.DeathStarted;
+        }
+        if (arrestStateValid)
+        {
+            if (arrested && !_justiceWasBeingArrested)
+            {
+                observed |= JusticeDeferredRuntimeFront.ArrestStarted;
+            }
+            else if (!arrested && _justiceWasBeingArrested)
+            {
+                observed |= JusticeDeferredRuntimeFront.ArrestEnded;
+            }
+        }
+        if (_justiceLastWantedLevel > 0 && wantedLevel == 0)
+        {
+            observed |= JusticeDeferredRuntimeFront.WantedLost;
+        }
+        else if (_justiceLastWantedLevel == 0 && wantedLevel > 0)
+        {
+            observed |= JusticeDeferredRuntimeFront.WantedRaised;
+        }
+
+        if (observed != JusticeDeferredRuntimeFront.None)
+        {
+            int observedSlot = GetCurrentSinglePlayerCashSlotSafe();
+            if (observedSlot < 0)
+            {
+                observedSlot = _justiceLastCanonicalPlayerSlot;
+            }
+            int observedModel = GetJusticePedModelHashSafe(player);
+            if (_justiceDeferredRuntimeFronts != JusticeDeferredRuntimeFront.None &&
+                (_justiceDeferredRuntimeFrontPlayerSlot != observedSlot ||
+                 _justiceDeferredRuntimeFrontPlayerModelHash != observedModel))
+            {
+                _justiceDeferredRuntimeFronts |=
+                    JusticeDeferredRuntimeFront.IdentityChanged;
+            }
+            else
+            {
+                _justiceDeferredRuntimeFrontPlayerSlot = observedSlot;
+                _justiceDeferredRuntimeFrontPlayerModelHash = observedModel;
+            }
+            _justiceDeferredRuntimeFronts |= observed;
+            _justiceDeferredRuntimeFrontHadPursuit |=
+                _justicePursuitActive || _justiceLastWantedLevel > 0;
+        }
+
+        if (arrestStateValid)
+        {
+            _justiceWasBeingArrested = arrested;
+        }
+        _justiceWasDead = dead;
+        _justiceLastWantedLevel = wantedLevel;
+        _justiceDamageFrontPrimingPending = true;
+    }
+
+    private void ReconcileJusticeFrontsAfterPersistenceRepair(
+        Ped player,
+        int wantedLevel)
+    {
+        JusticeDeferredRuntimeFront fronts = _justiceDeferredRuntimeFronts;
+        if (fronts == JusticeDeferredRuntimeFront.None)
+        {
+            return;
+        }
+
+        int currentSlot = GetCurrentSinglePlayerCashSlotSafe();
+        if (currentSlot < 0)
+        {
+            currentSlot = _justiceLastCanonicalPlayerSlot;
+        }
+        int currentModel = GetJusticePedModelHashSafe(player);
+        bool identityCompatible =
+            (fronts & JusticeDeferredRuntimeFront.IdentityChanged) == 0 &&
+            IsJusticeCanonicalProfileSlot(currentSlot) &&
+            currentSlot == _justiceDeferredRuntimeFrontPlayerSlot &&
+            currentModel != 0 &&
+            currentModel == _justiceDeferredRuntimeFrontPlayerModelHash;
+
+        if (identityCompatible && _justiceEnabled && HasActiveJusticeCase() &&
+            !JusticeIsCustodyActive)
+        {
+            if ((fronts & JusticeDeferredRuntimeFront.DeathStarted) != 0 &&
+                _justiceDeferredRuntimeFrontHadPursuit)
+            {
+                if (_justiceCaseState.Phase == JusticePhase.AtLarge)
+                {
+                    _justiceCaseState.Phase = JusticePhase.Wanted;
+                }
+                _justicePursuitDeathObservedDuringSuspension = true;
+                _justiceSuspendedPursuitDeathPlayerSlot = currentSlot;
+                _justiceSuspendedPursuitDeathPlayerModelHash = currentModel;
+                JusticeMarkStateDirty();
+            }
+
+            bool arrestWasObserved =
+                (fronts & (JusticeDeferredRuntimeFront.ArrestStarted |
+                           JusticeDeferredRuntimeFront.ArrestEnded)) != 0;
+            if (arrestWasObserved)
+            {
+                // Je demande une preuve BUSTED avant toute capture. Si elle reste
+                // illisible, le chemin borné existant conservera seulement le mandat.
+                _justiceArrestCompletionProbePending = true;
+                _justiceArrestCompletionProbeStartedAtMs = _justiceMonotonicTimeMs;
+            }
+            if ((fronts & JusticeDeferredRuntimeFront.WantedLost) != 0 ||
+                (fronts & JusticeDeferredRuntimeFront.ArrestEnded) != 0)
+            {
+                _justiceWantedLossPending = true;
+            }
+        }
+        else
+        {
+            LogWarning(
+                "Justice.Reparation",
+                "Fronts différés ignorés : identité du protagoniste ambiguë ou dossier inactif.");
+        }
+
+        _justiceDeferredRuntimeFronts = JusticeDeferredRuntimeFront.None;
+        _justiceDeferredRuntimeFrontPlayerSlot = -1;
+        _justiceDeferredRuntimeFrontPlayerModelHash = 0;
+        _justiceDeferredRuntimeFrontHadPursuit = false;
+        _justiceLastWantedLevel = wantedLevel;
+    }
+
     private bool ObserveJusticeCriticalFrontsBeforeTransactionReturn(
         Ped player,
         int wantedLevel,
@@ -818,6 +983,14 @@ public sealed partial class DonJEnemySpawner
         bool profileContextCompatible = !_justiceProfileContextBlocked &&
             IsJusticeRuntimeProfileContextCompatible();
         bool runtimeSuspended = IsJusticeRuntimeSuspended(player);
+        if ((runtimeSuspended || !profileContextCompatible) &&
+            (_justicePoliceSuppressionActive || _justicePoliceIgnoreApplied ||
+             _justicePoliceDispatchDisabled))
+        {
+            // Je rends mes flags globaux avant de laisser une mission, une
+            // cinématique ou un autre protagoniste prendre la main.
+            SetJusticeCustodyPoliceSuppression(false);
+        }
         AdvanceJusticeInactiveCustodyProfiles(
             nowRaw,
             runtimeSuspended || IsJusticePlayerDeadSafe(player) ||
@@ -902,6 +1075,24 @@ public sealed partial class DonJEnemySpawner
         PersistJusticeStateIfDue();
     }
 
+    private void UpdateJusticeFailSafeMaintenance()
+    {
+        if (!_justiceInitialized)
+        {
+            return;
+        }
+
+        Ped player = Game.Player.Character;
+        int now = GetJusticeRawGameTimeSafe();
+        RepairJusticeOrphanedCustodyControls(player);
+        RetryJusticePoliceSuppressionRestore(player, now);
+        RetryJusticeDeferredInventoryRestore(player, now);
+
+        // Je ne fais progresser ni dossier, ni peine, ni détection ici. Seuls
+        // les états déjà préparés et les restaurations de sécurité sont persistés.
+        PersistJusticeStateIfDue();
+    }
+
     private bool ShouldProcessJusticeRuntimeIncidents()
     {
         if (_justiceMonotonicTimeMs < _justiceNextIncidentProcessingAtMs)
@@ -930,9 +1121,36 @@ public sealed partial class DonJEnemySpawner
             LogException("Justice.ArretDetention", ex);
         }
 
-        SnapshotActiveJusticePlayerProfile();
-        JusticeFlushStateNow();
-        FlushJusticeConsumedDamageFronts();
+        try
+        {
+            SnapshotActiveJusticePlayerProfile();
+            if (!JusticeFlushStateNow())
+            {
+                LogWarning(
+                    "Justice.Arret",
+                    "La sauvegarde finale Justice a échoué; le WAL et l'état sale restent récupérables.");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogException("Justice.ArretSauvegarde", ex);
+        }
+        try
+        {
+            ShutdownJusticePersistenceServices();
+        }
+        catch (Exception ex)
+        {
+            LogException("Justice.ArretRepository", ex);
+        }
+        try
+        {
+            FlushJusticeConsumedDamageFronts();
+        }
+        catch (Exception ex)
+        {
+            LogException("Justice.ArretDegats", ex);
+        }
         _justicePendingIncidents.Clear();
         _justiceRecentVictims.Clear();
         _justiceRecentVehicles.Clear();
@@ -943,6 +1161,10 @@ public sealed partial class DonJEnemySpawner
         _justiceWitnessSnapshotCount = 0;
         _justiceDamagePairBaselineCount = 0;
         _justiceDamagePairReplacementIndex = 0;
+        _justiceDeferredRuntimeFronts = JusticeDeferredRuntimeFront.None;
+        _justiceDeferredRuntimeFrontPlayerSlot = -1;
+        _justiceDeferredRuntimeFrontPlayerModelHash = 0;
+        _justiceDeferredRuntimeFrontHadPursuit = false;
         _justiceDamageFrontPrimingPending = false;
         _justiceDeathDetectionBarrierInitialized = false;
         _justiceAimTargetHandle = 0;
@@ -1502,7 +1724,9 @@ public sealed partial class DonJEnemySpawner
         {
             return;
         }
+        long metricStartedAt = BeginJusticeMetric();
         _justiceNextFrontScanAtMs = _justiceMonotonicTimeMs + JusticeScalarScanIntervalMs;
+        CaptureJusticeWorldSnapshot(player);
         _justiceEventDetectionPass++;
         if (_justiceEventDetectionPass <= 0)
         {
@@ -1595,6 +1819,7 @@ public sealed partial class DonJEnemySpawner
         _justiceWasInCombat = inCombat;
         _justiceWasJacking = jacking;
         _justiceWasSpottedInStolenVehicle = spottedInStolenVehicle;
+        CompleteJusticeMetric(_justiceCrimeDetectionMetrics, metricStartedAt);
     }
 
     private static bool ShouldKeepJusticeCrimeScanOpen(
@@ -1628,6 +1853,7 @@ public sealed partial class DonJEnemySpawner
         _justiceNextFrontScanAtMs = _justiceMonotonicTimeMs + JusticeScalarScanIntervalMs;
 
         SynchronizeJusticeScalarFrontsCore(player);
+        CaptureJusticeWorldSnapshot(player);
         SynchronizeJusticeDamageFronts(player);
     }
 
@@ -1819,7 +2045,7 @@ public sealed partial class DonJEnemySpawner
             return JusticeEmptyPedCandidates;
         }
 
-        Ped[] nearby = GetNearbyPedsSafe(actor, JusticeWitnessRadius);
+        Ped[] nearby = GetJusticeSnapshotPeds();
         JusticeActorWitnessSnapshot target;
         if (_justiceWitnessSnapshotCount < _justiceWitnessSnapshots.Count)
         {
@@ -1852,7 +2078,8 @@ public sealed partial class DonJEnemySpawner
                  index++)
             {
                 Ped candidate = nearby[index];
-                if (!IsJusticePotentialVictimCandidate(candidate, actor))
+                if (!IsJusticeSnapshotEntityWithin(candidate, actor, JusticeWitnessRadius) ||
+                    !IsJusticePotentialVictimCandidate(candidate, actor))
                 {
                     continue;
                 }
@@ -1897,14 +2124,15 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        Ped[] nearbyPeds = GetNearbyPedsSafe(player, JusticeWitnessRadius);
+        Ped[] nearbyPeds = GetJusticeSnapshotPeds();
         int humans = 0;
         Vehicle playerVehicle = GetJusticeCurrentVehicleSafe(player);
         Vehicle lastVehicle = GetJusticeLastVehicleSafe(player);
         for (int index = 0; index < nearbyPeds.Length && humans < JusticeMaximumWitnessesPerEvent; index++)
         {
             Ped candidate = nearbyPeds[index];
-            if (!IsJusticePotentialVictimCandidate(candidate, player))
+            if (!IsJusticeSnapshotEntityWithin(candidate, player, JusticeWitnessRadius) ||
+                !IsJusticePotentialVictimCandidate(candidate, player))
             {
                 continue;
             }
@@ -1923,21 +2151,13 @@ public sealed partial class DonJEnemySpawner
             }
         }
 
-        Vehicle[] vehicles;
-        try
-        {
-            vehicles = World.GetNearbyVehicles(player, JusticeWitnessRadius) ?? new Vehicle[0];
-        }
-        catch
-        {
-            vehicles = new Vehicle[0];
-        }
+        Vehicle[] vehicles = GetJusticeSnapshotVehicles();
 
         int vehicleCount = Math.Min(vehicles.Length, JusticeMaximumVehiclesPerEvent);
         for (int index = 0; index < vehicleCount; index++)
         {
             Vehicle vehicle = vehicles[index];
-            if (Entity.Exists(vehicle) &&
+            if (IsJusticeSnapshotEntityWithin(vehicle, player, JusticeWitnessRadius) &&
                 (!Entity.Exists(playerVehicle) || vehicle.Handle != playerVehicle.Handle) &&
                 (!Entity.Exists(lastVehicle) || vehicle.Handle != lastVehicle.Handle))
             {
@@ -2477,15 +2697,7 @@ public sealed partial class DonJEnemySpawner
         Ped[] witnessCandidates,
         bool acceptUnbaselinedDamage)
     {
-        Vehicle[] vehicles;
-        try
-        {
-            vehicles = World.GetNearbyVehicles(player, JusticeWitnessRadius) ?? new Vehicle[0];
-        }
-        catch
-        {
-            vehicles = new Vehicle[0];
-        }
+        Vehicle[] vehicles = GetJusticeSnapshotVehicles();
 
         Vehicle currentVehicle = GetJusticeCurrentVehicleSafe(player);
         Vehicle lastVehicle = GetJusticeLastVehicleSafe(player);
@@ -2493,7 +2705,7 @@ public sealed partial class DonJEnemySpawner
         for (int index = 0; index < count; index++)
         {
             Vehicle vehicle = vehicles[index];
-            if (!Entity.Exists(vehicle) ||
+            if (!IsJusticeSnapshotEntityWithin(vehicle, player, JusticeWitnessRadius) ||
                 (Entity.Exists(currentVehicle) && vehicle.Handle == currentVehicle.Handle) ||
                 (Entity.Exists(lastVehicle) && vehicle.Handle == lastVehicle.Handle))
             {
@@ -2999,6 +3211,7 @@ public sealed partial class DonJEnemySpawner
 
     private void ProcessJusticePendingIncidents()
     {
+        long metricStartedAt = BeginJusticeMetric();
         int confirmedCount = 0;
         for (int index = _justicePendingIncidents.Count - 1; index >= 0; index--)
         {
@@ -3012,6 +3225,13 @@ public sealed partial class DonJEnemySpawner
             if (pending.Incident.IsExpired(_justiceMonotonicTimeMs))
             {
                 _justicePendingIncidents.RemoveAt(index);
+                continue;
+            }
+
+            if (confirmedCount >= JusticeMaximumConfirmedIncidentsPerTick)
+            {
+                // Je reporte le surplus au tick suivant : une foule ne peut pas
+                // concentrer toutes les mutations judiciaires sur une frame.
                 continue;
             }
 
@@ -3098,6 +3318,7 @@ public sealed partial class DonJEnemySpawner
         {
             _justiceConfirmedIncidentBuffer[index] = null;
         }
+        CompleteJusticeMetric(_justiceIncidentProcessingMetrics, metricStartedAt);
     }
 
     private void OnJusticeChargeConfirmed(JusticeCharge charge)
@@ -3451,14 +3672,18 @@ public sealed partial class DonJEnemySpawner
         }
 
         _justiceNextWarrantScanAtMs = _justiceMonotonicTimeMs + JusticeWarrantScanIntervalMs;
-        Ped[] nearby = GetNearbyPedsSafe(player, JusticeWarrantRecognitionRadius);
+        Ped[] nearby = GetJusticeSnapshotPeds();
         Ped recognizer = null;
         int humans = 0;
 
         for (int index = 0; index < nearby.Length && humans < JusticeMaximumWitnessesPerEvent; index++)
         {
             Ped candidate = nearby[index];
-            if (!IsJusticeHumanCandidate(candidate, player))
+            if (!IsJusticeSnapshotEntityWithin(
+                    candidate,
+                    player,
+                    JusticeWarrantRecognitionRadius) ||
+                !IsJusticeHumanCandidate(candidate, player))
             {
                 continue;
             }
@@ -3830,7 +4055,8 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        if (_justiceCaseState.EscapeWantedMinimumAttempted)
+        if (_justiceCaseState.EscapeWantedMinimumAttempted &&
+            !IsJusticeCriticalBarrierPending(nameof(RetryJusticeEscapeWantedMinimum)))
         {
             // Après un redémarrage, un essai précommitté mais non acquitté est
             // ambigu : je privilégie at-most-once et ne remonte jamais des
@@ -3845,8 +4071,11 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        _justiceCaseState.EscapeWantedMinimumAttempted = true;
-        JusticeMarkStateDirty();
+        if (!_justiceCaseState.EscapeWantedMinimumAttempted)
+        {
+            _justiceCaseState.EscapeWantedMinimumAttempted = true;
+            JusticeMarkStateDirty();
+        }
         if (!PersistJusticeCriticalPrecommitRedundantly())
         {
             return;
@@ -5847,10 +6076,10 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        JusticeFlushStateNow();
+        QueueJusticeStateCheckpoint();
     }
 
-    private bool JusticeFlushStateNow()
+    private bool JusticeFlushStateSynchronouslyLegacy()
     {
         if (_justiceInitialized &&
             _justiceMonotonicTimeMs < _justiceNextStateFlushAttemptAtMs)
@@ -5938,6 +6167,10 @@ public sealed partial class DonJEnemySpawner
                 writer.WriteStartElement("JusticeState");
                 writer.WriteAttributeString("version", JusticeStateVersion.ToString(CultureInfo.InvariantCulture));
                 writer.WriteAttributeString("enabled", _justiceEnabled ? "true" : "false");
+                writer.WriteAttributeString(
+                    "policeIntegrationMode",
+                    ((int)_justicePoliceIntegrationMode).ToString(
+                        CultureInfo.InvariantCulture));
                 writer.WriteAttributeString(
                     "activePlayerSlot",
                     _justiceActivePlayerProfileSlot.ToString(CultureInfo.InvariantCulture));
@@ -6041,6 +6274,21 @@ public sealed partial class DonJEnemySpawner
     {
         try
         {
+            byte[] serialized = File.ReadAllBytes(path);
+            JusticePersistenceSnapshot v2Snapshot;
+            string v2Error;
+            if (new JusticeXmlPersistenceCodec().TryDeserialize(
+                    serialized,
+                    out v2Snapshot,
+                    out v2Error))
+            {
+                string semanticError;
+                return v2Snapshot != null &&
+                       TryValidateJusticePersistenceSnapshotSemantics(
+                           v2Snapshot,
+                           out semanticError);
+            }
+
             XmlReaderSettings settings = new XmlReaderSettings
             {
                 DtdProcessing = DtdProcessing.Prohibit,
@@ -6067,6 +6315,7 @@ public sealed partial class DonJEnemySpawner
             JusticeCaseState caseState = ReadJusticeCaseXml(caseElement);
             JusticeRecordState recordState = ReadJusticeRecordXml(recordElement);
             bool rootEnabled;
+            int policeIntegrationMode;
             int nextIdentityGeneration;
             bool pendingDeathCapture;
             int pendingDeathCaptureSlot;
@@ -6088,6 +6337,13 @@ public sealed partial class DonJEnemySpawner
                     "enabled",
                     caseState == null ? false : caseState.Enabled,
                     out rootEnabled) ||
+                !TryReadJusticeIntStrict(
+                    root,
+                    "policeIntegrationMode",
+                    (int)JusticePoliceIntegrationMode.FreeroamBestEffort,
+                    (int)JusticePoliceIntegrationMode.Disabled,
+                    (int)JusticePoliceIntegrationMode.Force,
+                    out policeIntegrationMode) ||
                 !TryReadJusticeBoolStrict(
                     root,
                     "pendingDeathCapture",
@@ -6207,6 +6463,9 @@ public sealed partial class DonJEnemySpawner
         writer.WriteAttributeString(
             "voluntaryFinePaid",
             Math.Max(0L, state.VoluntaryFinePaid).ToString(CultureInfo.InvariantCulture));
+        writer.WriteAttributeString(
+            "fineInDispute",
+            Math.Max(0L, state.FineInDispute).ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString("sentenceSeconds", state.SentenceSeconds.ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString("hasWarrant", state.HasWarrant ? "true" : "false");
         writer.WriteAttributeString(
@@ -6411,13 +6670,18 @@ public sealed partial class DonJEnemySpawner
         {
             string primary = Path.Combine(directories[index], JusticeStateFileName);
             bool primaryExists = File.Exists(primary);
+            string backup = primary + ".bak";
+            bool backupExists = File.Exists(backup);
             if (!backupOnly && primaryExists && TryReadJusticeStateFile(primary))
             {
                 return true;
             }
+            if (!backupOnly && primaryExists && backupExists &&
+                TryRecoverJusticeInactiveProfiles(primary, backup))
+            {
+                return true;
+            }
 
-            string backup = primary + ".bak";
-            bool backupExists = File.Exists(backup);
             if (backupExists && TryReadJusticeStateFile(backup))
             {
                 LogWarning("Justice.Chargement", "Backup Justice restauré depuis " + backup + ".");
@@ -6456,6 +6720,202 @@ public sealed partial class DonJEnemySpawner
         return false;
     }
 
+    private bool TryRecoverJusticeInactiveProfiles(string primary, string backup)
+    {
+        try
+        {
+            FileInfo primaryInfo = new FileInfo(primary);
+            FileInfo backupInfo = new FileInfo(backup);
+            if (!primaryInfo.Exists || !backupInfo.Exists ||
+                primaryInfo.Length <= 0L || backupInfo.Length <= 0L ||
+                primaryInfo.Length > JusticeStateMaximumFileBytes ||
+                backupInfo.Length > JusticeStateMaximumFileBytes)
+            {
+                return false;
+            }
+
+            string walProofError;
+            if (!TryProveJusticeInactiveProfileRecoveryWalClosed(
+                    primary,
+                    out walProofError))
+            {
+                LogWarning(
+                    "Justice.Chargement",
+                    "Isolation d'un profil inactif refusée : " + walProofError);
+                return false;
+            }
+
+            JusticeXmlPersistenceCodec codec = new JusticeXmlPersistenceCodec();
+            JusticePersistenceSnapshot recovered;
+            string recoveryError;
+            if (!codec.TryRecoverInactiveProfiles(
+                    File.ReadAllBytes(primary),
+                    File.ReadAllBytes(backup),
+                    out recovered,
+                    out recoveryError) ||
+                recovered == null)
+            {
+                return false;
+            }
+
+            string semanticError;
+            if (!TryValidateJusticePersistenceSnapshotSemantics(
+                    recovered,
+                    out semanticError))
+            {
+                LogWarning(
+                    "Justice.Chargement",
+                    "Profil inactif isolé mais snapshot fusionné incohérent : " +
+                    semanticError);
+                return false;
+            }
+
+            byte[] repaired = codec.Serialize(recovered);
+            if (!TryProveJusticeInactiveProfileRecoveryWalClosed(
+                    primary,
+                    out walProofError))
+            {
+                LogWarning(
+                    "Justice.Chargement",
+                    "Isolation d'un profil inactif annulée avant publication : " +
+                    walProofError);
+                return false;
+            }
+
+            string persistenceError;
+            if (!TryWriteAndVerifyJusticeRecoveredPrimary(
+                    primary,
+                    repaired,
+                    new JusticeAtomicFileStore(),
+                    out persistenceError))
+            {
+                LogWarning(
+                    "Justice.Chargement",
+                    "Snapshot fusionné non confirmé après relecture : " +
+                    persistenceError);
+                return false;
+            }
+            if (!TryReadJusticeStateFile(primary))
+            {
+                return false;
+            }
+
+            LogWarning(
+                "Justice.Chargement",
+                "Profil Justice inactif corrompu isolé et restauré depuis le backup; " +
+                "le profil actif du primaire a été conservé.");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            LogWarning(
+                "Justice.Chargement",
+                "Isolation d'un profil inactif impossible : " +
+                exception.GetType().Name + ".");
+            return false;
+        }
+    }
+
+    internal static bool TryProveJusticeInactiveProfileRecoveryWalClosed(
+        string primaryPath,
+        out string error)
+    {
+        error = string.Empty;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(primaryPath))
+            {
+                throw new ArgumentException("Le chemin primaire Justice est absent.", "primaryPath");
+            }
+
+            string primary = Path.GetFullPath(primaryPath);
+            string directory = Path.GetDirectoryName(primary);
+            if (string.IsNullOrEmpty(directory))
+            {
+                throw new InvalidDataException("Le dossier du primaire Justice est introuvable.");
+            }
+
+            string walPath = Path.Combine(directory, JusticeWalFileName);
+            JusticeWalRecoveryResult recovery = JusticeWriteAheadLog.Recover(walPath);
+            if (recovery.Status != JusticeWalRecoveryStatus.Clean)
+            {
+                throw new InvalidDataException(
+                    "le WAL n'est pas intégralement prouvé (" +
+                    recovery.Status.ToString() + ").");
+            }
+
+            Dictionary<string, JusticeWalRecord> latest =
+                new Dictionary<string, JusticeWalRecord>(StringComparer.Ordinal);
+            for (int index = 0; index < recovery.Records.Count; index++)
+            {
+                JusticeWalRecord record = recovery.Records[index];
+                latest[record.TransactionId] = record;
+            }
+            foreach (JusticeWalRecord record in latest.Values)
+            {
+                if (!record.IsTerminal)
+                {
+                    throw new InvalidDataException(
+                        "une transaction WAL reste ouverte (" +
+                        record.TransactionId + ").");
+                }
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.GetType().Name + ": " + exception.Message;
+            return false;
+        }
+    }
+
+    internal static bool TryWriteAndVerifyJusticeRecoveredPrimary(
+        string primaryPath,
+        byte[] repaired,
+        IJusticeAtomicFileStore fileStore,
+        out string error)
+    {
+        error = string.Empty;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(primaryPath))
+            {
+                throw new ArgumentException("Le chemin primaire Justice est absent.", "primaryPath");
+            }
+            if (repaired == null || repaired.Length == 0)
+            {
+                throw new InvalidDataException("Le snapshot Justice réparé est vide.");
+            }
+            if (fileStore == null)
+            {
+                throw new ArgumentNullException("fileStore");
+            }
+
+            fileStore.WriteAtomically(
+                primaryPath,
+                null,
+                repaired,
+                JusticeNoOpPersistenceFaultInjector.Instance);
+            byte[] persisted = fileStore.ReadAllBytes(primaryPath);
+            bool exactBytes = AreJusticePersistenceBytesEqual(repaired, persisted);
+            bool exactHash = persisted != null && string.Equals(
+                JusticeXmlPersistenceCodec.ComputeSha256Hex(repaired),
+                JusticeXmlPersistenceCodec.ComputeSha256Hex(persisted),
+                StringComparison.OrdinalIgnoreCase);
+            if (!exactBytes || !exactHash)
+            {
+                throw new InvalidDataException(
+                    "les octets ou le SHA-256 relus diffèrent du snapshot fusionné validé.");
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.GetType().Name + ": " + exception.Message;
+            return false;
+        }
+    }
+
     internal static bool ShouldContinueJusticeStateSearch(
         int directoryIndex,
         bool primaryExists,
@@ -6488,6 +6948,15 @@ public sealed partial class DonJEnemySpawner
             Directory.CreateDirectory(Path.GetDirectoryName(primary));
             tempPath = primary + "." + Guid.NewGuid().ToString("N") + ".repair.tmp";
             File.Copy(backup, tempPath, true);
+            if (!IsJusticeTemporaryStateSemanticallyValid(tempPath) ||
+                !string.Equals(
+                    ComputeJusticeFileSha256Hex(tempPath),
+                    ComputeJusticeFileSha256Hex(backup),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                ScheduleJusticeBackupRepairRetry("copie temporaire invalide");
+                return false;
+            }
             if (File.Exists(primary))
             {
                 // Je remplace le primaire sans générer de nouveau backup : la
@@ -6500,12 +6969,14 @@ public sealed partial class DonJEnemySpawner
             }
             tempPath = null;
 
-            FileInfo primaryInfo = new FileInfo(primary);
-            FileInfo backupInfo = new FileInfo(backup);
-            if (!primaryInfo.Exists || primaryInfo.Length <= 0L ||
-                primaryInfo.Length != backupInfo.Length)
+            if (!File.Exists(primary) ||
+                !IsJusticeTemporaryStateSemanticallyValid(primary) ||
+                !string.Equals(
+                    ComputeJusticeFileSha256Hex(primary),
+                    ComputeJusticeFileSha256Hex(backup),
+                    StringComparison.OrdinalIgnoreCase))
             {
-                ScheduleJusticeBackupRepairRetry("copie primaire incomplète");
+                ScheduleJusticeBackupRepairRetry("copie primaire invalide après relecture");
                 return false;
             }
 
@@ -6528,6 +6999,25 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
+    private static string ComputeJusticeFileSha256Hex(string path)
+    {
+        using (FileStream stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read))
+        using (SHA256 algorithm = SHA256.Create())
+        {
+            byte[] hash = algorithm.ComputeHash(stream);
+            StringBuilder builder = new StringBuilder(hash.Length * 2);
+            for (int index = 0; index < hash.Length; index++)
+            {
+                builder.Append(hash[index].ToString("x2", CultureInfo.InvariantCulture));
+            }
+            return builder.ToString();
+        }
+    }
+
     private void ScheduleJusticeBackupRepairRetry(string reason)
     {
         _justiceNextBackupRepairAtMs = _justiceMonotonicTimeMs + 5000L;
@@ -6547,6 +7037,8 @@ public sealed partial class DonJEnemySpawner
         JusticeCaseState oldCase = _justiceCaseState;
         JusticeRecordState oldRecord = _justiceRecordState;
         bool oldEnabled = _justiceEnabled;
+        JusticePoliceIntegrationMode oldPoliceIntegrationMode =
+            _justicePoliceIntegrationMode;
         int oldNextIdentityGeneration = _justiceNextIdentityGeneration;
         bool oldPendingDeathCapture = _justicePursuitDeathObservedDuringSuspension;
         int oldPendingDeathCaptureSlot = _justiceSuspendedPursuitDeathPlayerSlot;
@@ -6564,6 +7056,7 @@ public sealed partial class DonJEnemySpawner
         bool oldProfileSelectionPending = _justiceProfileSelectionPending;
         bool oldLegacyProfileReloadPending = _justiceLegacyProfileReloadPending;
         string oldCustodyXml = CaptureCurrentJusticeCustodyXmlSafe();
+        JusticePersistenceSnapshot loadedV2Snapshot = null;
 
         try
         {
@@ -6587,6 +7080,18 @@ public sealed partial class DonJEnemySpawner
             }
 
             XmlElement root = document.DocumentElement;
+            string v2Error;
+            if (root != null && root.HasAttribute("schemaMajor"))
+            {
+                if (!TryNormalizeJusticeV2DocumentForLegacyReader(
+                        document,
+                        out root,
+                        out loadedV2Snapshot,
+                        out v2Error))
+                {
+                    return false;
+                }
+            }
             if (root == null || !string.Equals(root.Name, "JusticeState", StringComparison.Ordinal) ||
                 ReadJusticeInt(root, "version", -1) != JusticeStateVersion)
             {
@@ -6637,6 +7142,17 @@ public sealed partial class DonJEnemySpawner
             }
             if (loadedEnabled != loadedCase.Enabled ||
                 (!loadedEnabled && IsLoadedJusticeCaseActive(loadedCase)))
+            {
+                return false;
+            }
+            int loadedPoliceIntegrationMode;
+            if (!TryReadJusticeIntStrict(
+                    root,
+                    "policeIntegrationMode",
+                    (int)JusticePoliceIntegrationMode.FreeroamBestEffort,
+                    (int)JusticePoliceIntegrationMode.Disabled,
+                    (int)JusticePoliceIntegrationMode.Force,
+                    out loadedPoliceIntegrationMode))
             {
                 return false;
             }
@@ -6763,6 +7279,11 @@ public sealed partial class DonJEnemySpawner
             {
                 return false;
             }
+            if (loadedV2Snapshot != null &&
+                !TryHydrateJusticeV2CustodySnapshots(loadedProfiles))
+            {
+                return false;
+            }
 
             int currentCanonicalSlot = GetJusticeCanonicalPlayerSlotSafe();
             if (oldProfiles == null && _justiceCanonicalPlayerSlotOverride == null)
@@ -6841,12 +7362,15 @@ public sealed partial class DonJEnemySpawner
             _justiceProfileSelectionPending = selectionPending;
             _justiceLegacyProfileReloadPending = false;
             _justiceNextIdentityGeneration = loadedNextIdentityGeneration;
+            _justicePoliceIntegrationMode =
+                (JusticePoliceIntegrationMode)loadedPoliceIntegrationMode;
             if (!ActivateJusticePlayerProfile(selectedProfileSlot))
             {
                 ResetJusticeCustodyPersistentFields(false);
                 _justiceCaseState = oldCase;
                 _justiceRecordState = oldRecord;
                 _justiceEnabled = oldEnabled;
+                _justicePoliceIntegrationMode = oldPoliceIntegrationMode;
                 _justiceNextIdentityGeneration = oldNextIdentityGeneration;
                 _justicePursuitDeathObservedDuringSuspension = oldPendingDeathCapture;
                 _justiceSuspendedPursuitDeathPlayerSlot = oldPendingDeathCaptureSlot;
@@ -6867,6 +7391,21 @@ public sealed partial class DonJEnemySpawner
             }
             MergeJusticeInactiveProfilePoliceSuppressionRecovery();
             _justiceDamageFrontPrimingPending = _justiceEnabled;
+            if (loadedV2Snapshot != null)
+            {
+                _justicePersistenceRevision = loadedV2Snapshot.Revision;
+                _justiceLoadedSchemaMajor = JusticeXmlPersistenceCodec.SchemaMajor;
+                _justiceV1MigrationSourcePath = string.Empty;
+                LoadJusticeProfilePersistenceGenerations(loadedV2Snapshot);
+            }
+            else
+            {
+                _justicePersistenceRevision = 0L;
+                _justiceLoadedSchemaMajor = JusticeStateVersion;
+                _justiceV1MigrationSourcePath = Path.GetFullPath(path);
+                _justiceProfilePersistenceGenerations =
+                    new long[JusticePlayerProfileCount];
+            }
             if (!hasProfiles)
             {
                 // La lecture v1 reste immédiate, puis le prochain palier durable
@@ -6881,6 +7420,7 @@ public sealed partial class DonJEnemySpawner
             _justiceCaseState = oldCase;
             _justiceRecordState = oldRecord;
             _justiceEnabled = oldEnabled;
+            _justicePoliceIntegrationMode = oldPoliceIntegrationMode;
             _justiceNextIdentityGeneration = oldNextIdentityGeneration;
             _justicePursuitDeathObservedDuringSuspension = oldPendingDeathCapture;
             _justiceSuspendedPursuitDeathPlayerSlot = oldPendingDeathCaptureSlot;
@@ -6916,6 +7456,7 @@ public sealed partial class DonJEnemySpawner
         int activeScore;
         long fineDue;
         long voluntaryFinePaid;
+        long fineInDispute;
         int sentenceSeconds;
         if (!TryReadJusticeBoolStrict(element, "enabled", false, out enabled) ||
             !TryReadJusticeIntStrict(
@@ -6939,6 +7480,13 @@ public sealed partial class DonJEnemySpawner
                 0L,
                 JusticePolicy.MaxActiveFine,
                 out voluntaryFinePaid) ||
+            !TryReadJusticeLongStrict(
+                element,
+                "fineInDispute",
+                0L,
+                0L,
+                JusticePolicy.MaxActiveFine,
+                out fineInDispute) ||
             !TryReadJusticeIntStrict(
                 element,
                 "sentenceSeconds",
@@ -6967,6 +7515,7 @@ public sealed partial class DonJEnemySpawner
             ActiveScore = activeScore,
             FineDue = fineDue,
             VoluntaryFinePaid = voluntaryFinePaid,
+            FineInDispute = fineInDispute,
             SentenceSeconds = sentenceSeconds,
             HasWarrant = hasWarrant,
             EscapeWantedMinimumPending = escapeWantedMinimumPending,
@@ -7309,13 +7858,18 @@ public sealed partial class DonJEnemySpawner
             JusticePolicy.MaxActiveSentenceSeconds);
         long pendingFine = JusticePolicy.CalculatePendingFine(state);
         int pendingSentence = JusticePolicy.CalculatePendingSentence(state);
+        long settledFine = JusticePolicy.SaturatingAdd(
+            voluntaryFinePaid,
+            fineInDispute,
+            JusticePolicy.MaxActiveFine);
         long maximumFineDueAfterVoluntaryPayments = Math.Max(
             0L,
-            computedFine - Math.Min(computedFine, voluntaryFinePaid));
+            computedFine - Math.Min(computedFine, settledFine));
         long minimumPendingFineAfterVoluntaryPayments = Math.Max(
             0L,
-            pendingFine - Math.Min(pendingFine, voluntaryFinePaid));
-        if (voluntaryFinePaid > computedFine ||
+            pendingFine - Math.Min(pendingFine, settledFine));
+        if (!JusticePolicy.IsFineLedgerValid(state) ||
+            settledFine > computedFine ||
             activeScore != (int)computedScore ||
             fineDue > maximumFineDueAfterVoluntaryPayments ||
             sentenceSeconds > maximumPersistedSentence ||
@@ -7329,7 +7883,8 @@ public sealed partial class DonJEnemySpawner
         }
 
         bool hasDossier = state.Charges.Count > 0 || state.ActiveScore > 0 ||
-                          state.FineDue > 0L || state.SentenceSeconds > 0;
+                          state.FineDue > 0L || state.FineInDispute > 0L ||
+                          state.SentenceSeconds > 0;
         bool custodyPhase = state.Phase == JusticePhase.Captured ||
                             state.Phase == JusticePhase.Transporting ||
                             state.Phase == JusticePhase.Incarcerated ||
@@ -7503,7 +8058,10 @@ public sealed partial class DonJEnemySpawner
                 ? long.MaxValue
                 : JusticePolicy.CalculateRemainingConvictionFine(
                     currentConviction.Fine,
-                    caseState.VoluntaryFinePaid);
+                    JusticePolicy.SaturatingAdd(
+                        caseState.VoluntaryFinePaid,
+                        caseState.FineInDispute,
+                        JusticePolicy.MaxActiveFine));
             if (visibleMatches != 1 || currentConviction == null ||
                 caseState.FineDue < remainingConvictionFine ||
                 caseState.SentenceSeconds < currentConviction.SentenceSeconds)
@@ -7920,6 +8478,7 @@ public sealed partial class DonJEnemySpawner
             _justiceCaseState.VoluntaryFinePaid,
             0L,
             JusticePolicy.MaxActiveFine);
+        JusticePolicy.NormalizeFineLedger(_justiceCaseState);
         _justiceCaseState.SentenceSeconds = ClampJusticeInt(
             _justiceCaseState.SentenceSeconds,
             0,

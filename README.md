@@ -634,8 +634,8 @@ You can change it from the mod menu.
 </p>
 
 > [!TIP]
-> For the simplest setup, the repository contains a direct **`Mode-pour-jeu-ici`** folder.
-> This is the "game-ready mod" folder: it contains the mod files ready to place in GTA V Enhanced and the [`INSTALLATION_SIMPLE.txt`](Mode-pour-jeu-ici/INSTALLATION_SIMPLE.txt) guide.
+> For the simplest and safest setup, download the verified **`DonJCustomNpcPlacer-game-ready`** artifact produced by the latest successful `Safety` workflow.
+> The package is generated only after the Release build and tests pass. Its `manifest.json` records the exact commit, assembly version, Justice schema, sizes, and SHA-256 hashes.
 
 ### Before You Start
 
@@ -709,26 +709,27 @@ Grand Theft Auto V Enhanced
 
 ### 2. Install the DonJ Mod
 
-The simplest method is to use the ready-to-copy folder provided in this repository.
+The simplest method is to use the package generated and verified by GitHub Actions. Binaries stored manually in a source checkout must not be used as releases.
 
-1. On GitHub, click the green **Code** button.
-2. Click **Download ZIP**.
-3. Open the downloaded file.
-4. Open the project folder.
-5. Open this folder:
+1. Open the repository's **Actions** page on GitHub.
+2. Open the latest successful **Safety** run for the version you want.
+3. In **Artifacts**, download:
 
 ```text
-Mode-pour-jeu-ici
+DonJCustomNpcPlacer-game-ready
 ```
 
-6. Copy the files inside it:
+4. Extract the downloaded archive.
+5. The verified package contains:
 
 ```text
 DonJCustomNpcPlacer.ENdll
 DonJCustomNpcPlacer.pdb
+INSTALLATION_SIMPLE.txt
+manifest.json
 ```
 
-7. Paste them into this folder:
+6. Copy `DonJCustomNpcPlacer.ENdll` and, optionally, `DonJCustomNpcPlacer.pdb` into:
 
 ```text
 Grand Theft Auto V Enhanced\Scripts
@@ -740,11 +741,19 @@ Steam example:
 C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts
 ```
 
-> [!IMPORTANT]
-> Do not copy the entire `Mode-pour-jeu-ici` folder into `Scripts`.
-> Open `Mode-pour-jeu-ici`, then copy the files inside it directly into `Scripts`.
+7. Copy `manifest.json` into that same `Scripts` folder and rename the copy to:
 
-The [`Mode-pour-jeu-ici/INSTALLATION_SIMPLE.txt`](Mode-pour-jeu-ici/INSTALLATION_SIMPLE.txt) file also contains these steps in a simple text version.
+```text
+DonJCustomNpcPlacer.manifest.json
+```
+
+The stable name lets the runtime diagnostic compare the loaded `.ENdll` with the exact hash and commit published by CI.
+
+> [!IMPORTANT]
+> Do not copy the package folder or `INSTALLATION_SIMPLE.txt` into `Scripts`.
+> Copy the `.ENdll`, the renamed manifest, and the optional matching `.pdb` from the same verified package.
+
+The package's `INSTALLATION_SIMPLE.txt` file also contains these steps in a simple text version. The repository keeps [the guide template](Mode-pour-jeu-ici/INSTALLATION_SIMPLE.txt), but no release binary is maintained manually there.
 
 ---
 
@@ -1094,7 +1103,7 @@ If Windows blocks PowerShell script execution on your machine, run the same suit
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1
 ```
 
-This command restores, builds, and tests in `Release`, deploys the `.ENdll` to a temporary folder, and verifies that old `DonJEnemySpawner.*` files do not reappear in the pipeline.
+This command restores, builds, and tests in `Release` without touching the live game, creates the canonical game-ready package, installs that package into an isolated temporary GTA tree, and verifies the build/package/deployment SHA-256 chain. It also verifies that old `DonJEnemySpawner.*` files do not reappear.
 
 The generated file is here:
 
@@ -1102,12 +1111,26 @@ The generated file is here:
 src\DonJEnemySpawner\bin\Release\DonJCustomNpcPlacer.ENdll
 ```
 
-In `Release` configuration, the project can also automatically deploy the file to the `Scripts` folder if the GTA path is correctly detected.
+An ordinary `Release` build never modifies the GTA installation. Deployment is deliberately opt-in.
 
-To force a custom GTA folder:
+To build and deliberately deploy to a validated GTA folder:
 
 ```powershell
-dotnet build GTA5modDEV.sln -c Release /p:GtaRoot="D:\Jeux\Grand Theft Auto V Enhanced"
+dotnet build GTA5modDEV.sln -c Release `
+  /p:DeployToGta=true `
+  /p:GtaRoot="D:\Jeux\Grand Theft Auto V Enhanced"
+```
+
+The deployment first creates and verifies a package, stages the new files inside the destination volume, checks their hashes, and only then replaces and re-reads the active `.ENdll`, PDB, and `DonJCustomNpcPlacer.manifest.json`. Legacy aliases are moved only after that verified triplet exists. If an alias is locked or any earlier validation/replacement fails, moved aliases and the previous active files are rolled back in reverse order instead of being deleted first.
+
+To create a local package without deploying it:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package-game-ready.ps1 `
+  -Configuration Release `
+  -OutputDirectory .\artifacts\game-ready `
+  -DependencyDirectory .\tests\DonJEnemySpawner.Tests\bin\Release `
+  -Force
 ```
 
 ---

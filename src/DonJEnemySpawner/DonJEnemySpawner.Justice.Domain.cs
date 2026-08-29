@@ -120,6 +120,18 @@ internal enum JusticeOperationKind
     ResetProfile
 }
 
+// Je distingue l'etat metier d'un paiement du resultat brut renvoye par la
+// native GTA. Une ecriture ambigue ne peut ainsi plus etre confondue avec un
+// debit confirme pendant la reprise d'une transaction.
+internal enum JusticePaymentResolution
+{
+    Prepared,
+    Attempted,
+    Confirmed,
+    Rejected,
+    Ambiguous
+}
+
 internal sealed class JusticeCrimeDefinition
 {
     internal JusticeCrimeDefinition(
@@ -598,6 +610,11 @@ internal sealed class JusticeCaseState
     // à la prochaine infraction ou après un rechargement.
     internal long VoluntaryFinePaid { get; set; }
 
+    // Je sors du solde exigible tout debit dont le resultat est impossible a
+    // prouver. Cette somme reste visible et persistable, mais elle ne doit etre
+    // ni rejouee ni comptee comme un paiement confirme.
+    internal long FineInDispute { get; set; }
+
     internal int SentenceSeconds { get; set; }
 
     internal bool HasWarrant { get; set; }
@@ -709,10 +726,12 @@ internal sealed class JusticeCaseState
         }
 
         ActiveScore = (int)Math.Min(JusticePolicy.MaxActiveScore, score);
-        FineDue = Math.Max(
-            0L,
-            Math.Min(JusticePolicy.MaxActiveFine, fine) -
-            Math.Min(Math.Max(0L, VoluntaryFinePaid), fine));
+        long boundedFine = Math.Min(JusticePolicy.MaxActiveFine, fine);
+        long accountedFine = JusticePolicy.SaturatingAdd(
+            Math.Max(0L, Math.Min(JusticePolicy.MaxActiveFine, VoluntaryFinePaid)),
+            Math.Max(0L, Math.Min(JusticePolicy.MaxActiveFine, FineInDispute)),
+            JusticePolicy.MaxActiveFine);
+        FineDue = Math.Max(0L, boundedFine - Math.Min(accountedFine, boundedFine));
         SentenceSeconds = (int)Math.Min(JusticePolicy.MaxActiveSentenceSeconds, sentence);
     }
 
@@ -723,6 +742,7 @@ internal sealed class JusticeCaseState
         ActiveScore = 0;
         FineDue = 0L;
         VoluntaryFinePaid = 0L;
+        FineInDispute = 0L;
         SentenceSeconds = 0;
         HasWarrant = false;
         EscapeWantedMinimumPending = false;
@@ -754,6 +774,7 @@ internal sealed class JusticePlayerProfileState
         CaseState = new JusticeCaseState();
         RecordState = new JusticeRecordState();
         CustodyXml = string.Empty;
+        CustodySnapshot = null;
         PendingDeathCapturePlayerSlot = -1;
     }
 
@@ -764,6 +785,10 @@ internal sealed class JusticePlayerProfileState
     internal JusticeRecordState RecordState { get; set; }
 
     internal string CustodyXml { get; set; }
+
+    // Une capture runtime reste typée et immuable. CustodyXml n'est conservé que
+    // pour les profils venant d'un fichier historique ou v2 déjà matérialisé.
+    internal JusticeCustodyPersistenceSnapshot CustodySnapshot { get; set; }
 
     internal bool PendingDeathCapture { get; set; }
 
@@ -1843,10 +1868,7 @@ internal sealed class JusticePolicy
         }
         RememberAppliedConvictionId(record, convictionId);
         record.Convictions.Add(conviction);
-        while (record.Convictions.Count > MaxConvictions)
-        {
-            record.Convictions.RemoveAt(0);
-        }
+        TrimVisibleConvictions(record);
         record.MarkLedgerChanged();
 
         record.RecidivismIndex = Clamp(
@@ -2469,6 +2491,62 @@ internal sealed class JusticePolicy
         return (int)Math.Min(MaxActiveSentenceSeconds, total);
     }
 
+    internal static long MoveFineToDispute(JusticeCaseState caseState, long requestedAmount)
+    {
+        if (caseState == null)
+        {
+            throw new ArgumentNullException("caseState");
+        }
+
+        NormalizeFineLedger(caseState);
+        long availableCapacity = Math.Max(
+            0L,
+            MaxActiveFine - caseState.VoluntaryFinePaid - caseState.FineInDispute);
+        long moved = Math.Min(
+            Math.Max(0L, requestedAmount),
+            Math.Min(caseState.FineDue, availableCapacity));
+        caseState.FineDue -= moved;
+        caseState.FineInDispute += moved;
+        return moved;
+    }
+
+    internal static void NormalizeFineLedger(JusticeCaseState caseState)
+    {
+        if (caseState == null)
+        {
+            throw new ArgumentNullException("caseState");
+        }
+
+        caseState.VoluntaryFinePaid = Math.Max(
+            0L,
+            Math.Min(MaxActiveFine, caseState.VoluntaryFinePaid));
+        caseState.FineInDispute = Math.Max(
+            0L,
+            Math.Min(
+                MaxActiveFine - caseState.VoluntaryFinePaid,
+                caseState.FineInDispute));
+        caseState.FineDue = Math.Max(
+            0L,
+            Math.Min(
+                MaxActiveFine - caseState.VoluntaryFinePaid - caseState.FineInDispute,
+                caseState.FineDue));
+    }
+
+    internal static bool IsFineLedgerValid(JusticeCaseState caseState)
+    {
+        if (caseState == null || caseState.FineDue < 0L ||
+            caseState.FineDue > MaxActiveFine || caseState.VoluntaryFinePaid < 0L ||
+            caseState.VoluntaryFinePaid > MaxActiveFine || caseState.FineInDispute < 0L ||
+            caseState.FineInDispute > MaxActiveFine)
+        {
+            return false;
+        }
+
+        return caseState.VoluntaryFinePaid <= MaxActiveFine - caseState.FineInDispute &&
+               caseState.FineDue <= MaxActiveFine -
+                   caseState.VoluntaryFinePaid - caseState.FineInDispute;
+    }
+
     private static void RecalculateCaseAfterChargeMutation(
         JusticeCaseState caseState,
         long fineDueBeforeMutation,
@@ -2949,6 +3027,42 @@ internal sealed class JusticePolicy
                     "Impossible de borner les condamnations appliquées Justice.");
             }
             record.AppliedConvictionIds.RemoveAt(removableIndex);
+        }
+    }
+
+    internal static void TrimVisibleConvictions(JusticeRecordState record)
+    {
+        if (record == null)
+        {
+            throw new ArgumentNullException("record");
+        }
+
+        while (record.Convictions.Count > MaxConvictions)
+        {
+            int removableIndex = -1;
+            for (int index = 0; index < record.Convictions.Count; index++)
+            {
+                JusticeConviction candidate = record.Convictions[index];
+                bool isPinned = candidate != null &&
+                    !string.IsNullOrWhiteSpace(record.PinnedConvictionId) &&
+                    string.Equals(
+                        candidate.ConvictionId,
+                        record.PinnedConvictionId,
+                        StringComparison.Ordinal);
+                if (!isPinned)
+                {
+                    removableIndex = index;
+                    break;
+                }
+            }
+
+            if (removableIndex < 0)
+            {
+                throw new InvalidOperationException(
+                    "Impossible de borner l'historique visible des condamnations Justice.");
+            }
+
+            record.Convictions.RemoveAt(removableIndex);
         }
     }
 

@@ -3,6 +3,7 @@ obj/
 .vs/
 TestResults/
 bug-reports/
+artifacts/game-ready/
 AGENTS.md
 mod.zip
 src.zip

@@ -194,14 +194,27 @@ public sealed class JusticeRuntimeEdgeContractTests
     }
 
     [TestMethod]
-    public void WitnessCandidates_AreCapturedOncePerPlayerPassAndBoundedPerActor()
+    public void WitnessCandidates_ReuseOneSharedWorldSnapshotAndStayBoundedPerActor()
     {
         string source = ReadSource("DonJEnemySpawner.Justice.cs");
-        string capture = ExtractMethodBody(source, "GetJusticeWitnessCandidatesForActor");
+        string worldSnapshot = ReadSource("DonJEnemySpawner.Justice.WorldSnapshot.cs");
+        string worldCapture = ExtractMethodBody(worldSnapshot, "CaptureJusticeWorldSnapshot");
         Assert.AreEqual(
             1,
+            CountOccurrences(worldCapture, "GetNearbyPedsSafe"),
+            "Une passe Justice doit effectuer une seule requête peds GTA.");
+        Assert.AreEqual(
+            1,
+            CountOccurrences(worldCapture, "GetNearbyVehiclesSafe"),
+            "Une passe Justice doit effectuer une seule requête véhicules GTA.");
+
+        string capture = ExtractMethodBody(source, "GetJusticeWitnessCandidatesForActor");
+        Assert.AreEqual(
+            0,
             CountOccurrences(capture, "GetNearbyPedsSafe"),
-            "Je ne lance qu'une recherche GTA de proximité pour un acteur et une passe.");
+            "Un acteur doit filtrer le snapshot partagé sans relancer de requête GTA.");
+        StringAssert.Contains(capture, "GetJusticeSnapshotPeds()");
+        StringAssert.Contains(capture, "IsJusticeSnapshotEntityWithin");
         StringAssert.Contains(capture, "JusticeMaximumWitnessesPerEvent");
 
         string playerPass = ExtractMethodBody(source, "ScanJusticeEventVictims");
@@ -215,6 +228,9 @@ public sealed class JusticeRuntimeEdgeContractTests
         Assert.IsFalse(
             evidence.IndexOf("GetNearbyPedsSafe", StringComparison.Ordinal) >= 0,
             "Chaque victime doit réutiliser la photographie de témoins déjà bornée.");
+        Assert.IsFalse(
+            evidence.IndexOf("GetNearbyVehiclesSafe", StringComparison.Ordinal) >= 0,
+            "La qualification des preuves ne doit jamais déclencher un second scan véhicules.");
         StringAssert.Contains(evidence, "witnessCandidates");
     }
 

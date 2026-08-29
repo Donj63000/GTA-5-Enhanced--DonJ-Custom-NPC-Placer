@@ -16,6 +16,8 @@ public sealed partial class DonJEnemySpawner
     private bool _justiceLegacyProfileReloadPending;
     private bool _justiceProfileContextBlocked;
     private bool _justiceProfileSwitchPersistencePending;
+    private long _justiceProfileSwitchPersistenceRevision;
+    private long _justiceProfileSwitchPersistenceWriteFailures;
     private bool _justiceActiveProfileResetPending;
     private bool _justiceActiveProfileResetPrecommitRedundant;
     private Func<int> _justiceCanonicalPlayerSlotOverride;
@@ -455,7 +457,13 @@ public sealed partial class DonJEnemySpawner
     private string GetJusticeMenuSelectedFineDisplay()
     {
         JusticeCaseState state = GetJusticeMenuSelectedCaseState();
-        return FormatJusticeMoney(state == null ? 0L : state.FineDue);
+        if (state == null || state.FineInDispute <= 0L)
+        {
+            return FormatJusticeMoney(state == null ? 0L : state.FineDue);
+        }
+
+        return FormatJusticeMoney(state.FineDue) + " · litige " +
+               FormatJusticeMoney(state.FineInDispute);
     }
 
     private string GetJusticeMenuSelectedSentenceDisplay()
@@ -752,6 +760,8 @@ public sealed partial class DonJEnemySpawner
             _justiceActivePlayerProfileSlot);
         _justiceProfileContextBlocked = _justiceProfileSelectionPending;
         _justiceProfileSwitchPersistencePending = false;
+        _justiceProfileSwitchPersistenceRevision = 0L;
+        _justiceProfileSwitchPersistenceWriteFailures = 0L;
         _justiceActiveProfileResetPending = false;
         _justiceActiveProfileResetPrecommitRedundant = false;
     }
@@ -805,6 +815,22 @@ public sealed partial class DonJEnemySpawner
             return true;
         }
 
+        bool mustResumePoliceRestorationBarrier =
+            _justiceCriticalBarrierRevision > 0L &&
+            string.Equals(
+                _justiceCriticalBarrierCaller,
+                nameof(SetJusticeCustodyPoliceSuppression),
+                StringComparison.Ordinal) &&
+            (_justicePoliceIgnoreApplied || _justicePoliceDispatchDisabled ||
+             _justicePoliceSuppressionActive ||
+             _justicePoliceSuppressionRestorePending);
+        if (!mustResumePoliceRestorationBarrier &&
+            !TryRejectJusticeCriticalBarrierForProfileChange(slot))
+        {
+            _justiceProfileContextBlocked = true;
+            return false;
+        }
+
         int switchAt = GetJusticeRawGameTimeSafe();
         bool parkedCustody = false;
         if (HasJusticeCustodyRecoveryState())
@@ -816,6 +842,14 @@ public sealed partial class DonJEnemySpawner
                 return false;
             }
             parkedCustody = true;
+        }
+        if (mustResumePoliceRestorationBarrier &&
+            _justiceCriticalBarrierRevision > 0L)
+        {
+            // Je ne rejette jamais le WAL qui acquitte une restauration police
+            // déjà tentée. Le même caller doit le terminer avant le basculement.
+            _justiceProfileContextBlocked = true;
+            return false;
         }
 
         FinalizeJusticePursuitStateBeforeProfileSwitch(GetJusticeWantedLevelSafe());
@@ -835,6 +869,8 @@ public sealed partial class DonJEnemySpawner
         _justiceWasDead = IsJusticePlayerDeadSafe(player);
         _justiceProfileSelectionPending = false;
         _justiceProfileSwitchPersistencePending = true;
+        _justiceProfileSwitchPersistenceRevision = 0L;
+        _justiceProfileSwitchPersistenceWriteFailures = 0L;
         JusticeMarkStateDirty();
         if (!PersistPendingJusticeProfileSwitch())
         {
@@ -866,17 +902,76 @@ public sealed partial class DonJEnemySpawner
     {
         if (!_justiceProfileSwitchPersistencePending)
         {
+            _justiceProfileSwitchPersistenceRevision = 0L;
+            _justiceProfileSwitchPersistenceWriteFailures = 0L;
             return true;
         }
 
+        InitializeJusticePersistenceServices();
+        JusticeRepository repository = _justiceRepository;
+        if (repository == null || _justicePersistenceServicesUnavailable)
+        {
+            return false;
+        }
+
+        bool firstEnqueue = _justiceProfileSwitchPersistenceRevision <= 0L;
+        if (firstEnqueue)
+        {
+            long writeFailuresBeforeEnqueue =
+                repository.GetDiagnostics().WriteFailures;
+            JusticeMarkStateDirty();
+            if (!JusticeFlushStateNow())
+            {
+                return false;
+            }
+
+            _justiceProfileSwitchPersistenceRevision =
+                _justiceLastQueuedPersistenceRevision;
+            _justiceProfileSwitchPersistenceWriteFailures =
+                writeFailuresBeforeEnqueue;
+            return false;
+        }
+
+        bool retryWasDue = _justiceNextStateFlushAttemptAtMs <= 0L ||
+            _justiceMonotonicTimeMs >= _justiceNextStateFlushAttemptAtMs;
+        ObserveJusticeRepositoryFailure();
+        JusticeRepositoryDiagnostics diagnostics = repository.GetDiagnostics();
+        if (_justiceProfileSwitchPersistenceRevision > 0L &&
+            diagnostics.DiskRevision >= _justiceProfileSwitchPersistenceRevision)
+        {
+            FinalizeJusticeWalTransactionsWhoseSnapshotIsDurable();
+            _justiceProfileSwitchPersistencePending = false;
+            _justiceProfileSwitchPersistenceRevision = 0L;
+            _justiceProfileSwitchPersistenceWriteFailures = 0L;
+            return true;
+        }
+
+        bool failedQueuedRevision =
+            diagnostics.WriteFailures > _justiceProfileSwitchPersistenceWriteFailures;
+        if (!failedQueuedRevision || !retryWasDue)
+        {
+            return false;
+        }
+
+        // Après un rejet du writer, je remplace son snapshot fautif par une
+        // révision fraîche. Le premier enqueue reste toujours non bloquant et
+        // le contexte du nouveau héros demeure gelé jusqu'à DiskRevision.
+        if (failedQueuedRevision)
+        {
+            _justiceNextStateFlushAttemptAtMs = 0L;
+        }
+        long writeFailuresBeforeRetry = diagnostics.WriteFailures;
         JusticeMarkStateDirty();
         if (!JusticeFlushStateNow())
         {
             return false;
         }
 
-        _justiceProfileSwitchPersistencePending = false;
-        return true;
+        _justiceProfileSwitchPersistenceRevision =
+            _justiceLastQueuedPersistenceRevision;
+        _justiceProfileSwitchPersistenceWriteFailures =
+            writeFailuresBeforeRetry;
+        return false;
     }
 
     private bool ActivateJusticePlayerProfile(int slot)
@@ -918,7 +1013,10 @@ public sealed partial class DonJEnemySpawner
         _justiceLastCanonicalPlayerModelHash = profile.LastCanonicalPlayerModel;
         _justiceActivePlayerProfileSlot = slot;
 
-        if (!ReadJusticeCustodyXmlFragment(profile.CustodyXml))
+        bool custodyRestored = profile.CustodySnapshot != null
+            ? RestoreJusticeCustodyPersistenceSnapshot(profile.CustodySnapshot)
+            : ReadJusticeCustodyXmlFragment(profile.CustodyXml);
+        if (!custodyRestored)
         {
             return false;
         }
@@ -947,7 +1045,9 @@ public sealed partial class DonJEnemySpawner
             _justicePlayerProfiles[_justiceActivePlayerProfileSlot];
         profile.CaseState = _justiceCaseState;
         profile.RecordState = _justiceRecordState;
-        profile.CustodyXml = CaptureCurrentJusticeCustodyXml();
+        // Je conserve un graphe typé profondément détaché. La matérialisation XML
+        // est réservée au worker de persistance et ne bloque plus le thread GTA.
+        profile.CustodySnapshot = CaptureJusticeCustodyPersistenceSnapshot();
         profile.PendingDeathCapture = _justicePursuitDeathObservedDuringSuspension;
         profile.PendingDeathCapturePlayerSlot =
             _justiceSuspendedPursuitDeathPlayerSlot;
@@ -1174,6 +1274,68 @@ public sealed partial class DonJEnemySpawner
         return JusticeReadCustodyXml(document.DocumentElement);
     }
 
+    private bool TryHydrateJusticeV2CustodySnapshots(
+        JusticePlayerProfileState[] profiles)
+    {
+        if (profiles == null || profiles.Length != JusticePlayerProfileCount)
+        {
+            return false;
+        }
+
+        JusticeCaseState previousCase = _justiceCaseState;
+        JusticeRecordState previousRecord = _justiceRecordState;
+        string previousCustody = CaptureCurrentJusticeCustodyXmlSafe();
+        bool hydrated = true;
+        bool restored = true;
+        try
+        {
+            for (int slot = 0; slot < profiles.Length; slot++)
+            {
+                JusticePlayerProfileState profile = profiles[slot];
+                if (profile == null || profile.CaseState == null ||
+                    profile.RecordState == null)
+                {
+                    hydrated = false;
+                    break;
+                }
+
+                _justiceCaseState = profile.CaseState;
+                _justiceRecordState = profile.RecordState;
+                XmlElement custody = LoadJusticeXmlFragment(
+                    profile.CustodyXml).DocumentElement;
+                if (custody == null ||
+                    !ReadJusticeCustodyXmlFragment(profile.CustodyXml))
+                {
+                    hydrated = false;
+                    break;
+                }
+
+                profile.CustodySnapshot =
+                    CaptureLoadedJusticeCustodyPersistenceSnapshot(
+                        custody.SelectSingleNode("ActivityCooldowns") != null);
+            }
+        }
+        catch
+        {
+            hydrated = false;
+        }
+        finally
+        {
+            _justiceCaseState = previousCase;
+            _justiceRecordState = previousRecord;
+            try
+            {
+                restored = ReadJusticeCustodyXmlFragment(previousCustody);
+            }
+            catch
+            {
+                restored = false;
+            }
+        }
+
+        return hydrated && restored;
+    }
+
     private static XmlDocument LoadJusticeXmlFragment(string xml)
     {
         XmlReaderSettings settings = new XmlReaderSettings
@@ -1254,7 +1416,14 @@ public sealed partial class DonJEnemySpawner
                 profile.LastCanonicalPlayerModel.ToString(CultureInfo.InvariantCulture));
             WriteJusticeCaseXml(writer, profile.CaseState);
             WriteJusticeRecordXml(writer, profile.RecordState);
-            WriteJusticeCustodyXmlFragment(writer, profile.CustodyXml);
+            if (profile.CustodySnapshot != null)
+            {
+                WriteJusticeCustodyPersistenceXml(writer, profile.CustodySnapshot);
+            }
+            else
+            {
+                WriteJusticeCustodyXmlFragment(writer, profile.CustodyXml);
+            }
             writer.WriteEndElement();
         }
         writer.WriteEndElement();
@@ -1555,6 +1724,15 @@ public sealed partial class DonJEnemySpawner
         {
             return true;
         }
+        if (profile.CustodySnapshot != null)
+        {
+            JusticeCustodyPersistenceSnapshot custody = profile.CustodySnapshot;
+            return custody.Active || custody.PoliceSuppressionApplied ||
+                   custody.PoliceDispatchDisabled || custody.InventoryRemoved ||
+                   custody.DeferredInventoryRestore || custody.InventorySnapshot != null ||
+                   custody.FineDebitIntent != null || custody.DisciplineIntent != null ||
+                   custody.VoluntaryPaymentIntent != null;
+        }
         if (string.IsNullOrWhiteSpace(profile.CustodyXml))
         {
             return false;
@@ -1614,7 +1792,18 @@ public sealed partial class DonJEnemySpawner
             }
 
             JusticePlayerProfileState profile = _justicePlayerProfiles[slot];
-            if (profile == null || string.IsNullOrWhiteSpace(profile.CustodyXml))
+            if (profile == null)
+            {
+                continue;
+            }
+
+            if (profile.CustodySnapshot != null)
+            {
+                ignoreRecovery |= profile.CustodySnapshot.PoliceSuppressionApplied;
+                dispatchRecovery |= profile.CustodySnapshot.PoliceDispatchDisabled;
+                continue;
+            }
+            if (string.IsNullOrWhiteSpace(profile.CustodyXml))
             {
                 continue;
             }
@@ -1663,6 +1852,8 @@ public sealed partial class DonJEnemySpawner
         }
 
         string[] replacements = new string[_justicePlayerProfiles.Length];
+        JusticeCustodyPersistenceSnapshot[] typedReplacements =
+            new JusticeCustodyPersistenceSnapshot[_justicePlayerProfiles.Length];
         try
         {
             for (int slot = 0; slot < _justicePlayerProfiles.Length; slot++)
@@ -1673,7 +1864,23 @@ public sealed partial class DonJEnemySpawner
                 }
 
                 JusticePlayerProfileState profile = _justicePlayerProfiles[slot];
-                if (profile == null || string.IsNullOrWhiteSpace(profile.CustodyXml))
+                if (profile == null)
+                {
+                    continue;
+                }
+
+                if (profile.CustodySnapshot != null)
+                {
+                    if (profile.CustodySnapshot.PoliceSuppressionApplied ||
+                        profile.CustodySnapshot.PoliceDispatchDisabled)
+                    {
+                        typedReplacements[slot] =
+                            CloneJusticeCustodyPersistenceSnapshotWithoutPoliceTokens(
+                                profile.CustodySnapshot);
+                    }
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(profile.CustodyXml))
                 {
                     continue;
                 }
@@ -1709,6 +1916,10 @@ public sealed partial class DonJEnemySpawner
 
         for (int slot = 0; slot < replacements.Length; slot++)
         {
+            if (typedReplacements[slot] != null)
+            {
+                _justicePlayerProfiles[slot].CustodySnapshot = typedReplacements[slot];
+            }
             if (replacements[slot] != null)
             {
                 _justicePlayerProfiles[slot].CustodyXml = replacements[slot];

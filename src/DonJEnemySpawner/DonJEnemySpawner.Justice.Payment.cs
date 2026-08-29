@@ -14,10 +14,14 @@ public sealed partial class DonJEnemySpawner
         internal int DebitAmount;
         internal int CashBefore;
         internal int CashAfter;
+        internal long FineInDisputeBefore;
         internal long PreparedAtUtcTicks;
         internal bool DebitAttempted;
         internal long AttemptedAtUtcTicks;
         internal JusticeCashWriteResult CashWriteResult = JusticeCashWriteResult.Unknown;
+        internal JusticePaymentResolution Resolution =
+            JusticePaymentResolution.Prepared;
+        internal long AmbiguousAmount;
         internal bool DebtCommitted;
     }
 
@@ -157,13 +161,14 @@ public sealed partial class DonJEnemySpawner
             DebitAmount = (int)planned,
             CashBefore = cash,
             CashAfter = cash - (int)planned,
+            FineInDisputeBefore = Math.Max(0L, _justiceCaseState.FineInDispute),
             PreparedAtUtcTicks = DateTime.UtcNow.Ticks
         };
         JusticeMarkStateDirty();
 
-        // Les deux écritures placent l'intention dans le primaire puis son .bak
-        // avant le moindre STAT_SET_INT. Si le disque refuse, aucun dollar ne part.
-        if (!PersistJusticeCriticalPrecommitRedundantly())
+        // Je rends d'abord le snapshot Prepared durable. Le petit WAL financier
+        // ne sera armé qu'à la reprise, immédiatement avant l'unique SET.
+        if (!EnsureJusticeFinancialPreparedSnapshot("VoluntaryFinePayment"))
         {
             // Je conserve l'intention en mémoire car la première écriture a pu
             // atteindre le primaire avant l'échec de la copie redondante. La
@@ -208,14 +213,37 @@ public sealed partial class DonJEnemySpawner
 
         if (intent.DebtCommitted)
         {
+            if (!intent.DebitAttempted &&
+                intent.Resolution == JusticePaymentResolution.Rejected &&
+                !PersistJusticeFinancialOutcomeWithoutEffect(
+                    "VoluntaryFinePayment"))
+            {
+                return false;
+            }
             return FinalizeJusticeVoluntaryPaymentIntent(intent);
         }
 
-        // Je réaffirme toujours le WAL avant de consulter ou modifier le cash.
+        // Je ne consulte le cash qu'après confirmation disque du snapshot Prepared.
         JusticeMarkStateDirty();
-        if (!JusticeFlushStateNow())
+        if (!EnsureJusticeFinancialPreparedSnapshot("VoluntaryFinePayment"))
         {
+            ShowStatus(
+                "Paiement en attente : sauvegarde Justice indisponible, aucun débit effectué.",
+                4200);
             return false;
+        }
+
+        if (!intent.DebitAttempted &&
+            intent.Resolution == JusticePaymentResolution.Rejected)
+        {
+            intent.DebtCommitted = true;
+            JusticeMarkStateDirty();
+            if (!PersistJusticeFinancialOutcomeWithoutEffect(
+                    "VoluntaryFinePayment"))
+            {
+                return false;
+            }
+            return FinalizeJusticeVoluntaryPaymentIntent(intent);
         }
 
         if (!intent.DebitAttempted)
@@ -231,20 +259,36 @@ public sealed partial class DonJEnemySpawner
                     "solde modifié avant débit, paiement annulé.");
             }
 
-            intent.DebitAttempted = true;
-            intent.AttemptedAtUtcTicks = DateTime.UtcNow.Ticks;
-            intent.CashWriteResult = JusticeCashWriteResult.Unknown;
-            JusticeMarkStateDirty();
-            if (!PersistJusticeCriticalPrecommitRedundantly())
+            bool attemptWasAlreadyDurable;
+            if (!TryArmJusticeFinancialAttempt(
+                    "VoluntaryFinePayment",
+                    out attemptWasAlreadyDurable))
             {
                 return false;
             }
 
-            intent.CashWriteResult = TryWriteJusticeSinglePlayerCash(
-                intent.Slot,
-                intent.CashAfter);
+            intent.DebitAttempted = true;
+            intent.AttemptedAtUtcTicks = DateTime.UtcNow.Ticks;
+            intent.CashWriteResult = JusticeCashWriteResult.Unknown;
+            intent.Resolution = JusticePaymentResolution.Attempted;
             JusticeMarkStateDirty();
-            if (!PersistJusticeCriticalPrecommitRedundantly())
+
+            if (!attemptWasAlreadyDurable)
+            {
+                intent.CashWriteResult = TryWriteJusticeSinglePlayerCash(
+                    intent.Slot,
+                    intent.CashAfter);
+            }
+            if (intent.CashWriteResult == JusticeCashWriteResult.Succeeded)
+            {
+                intent.Resolution = JusticePaymentResolution.Confirmed;
+            }
+            else if (intent.CashWriteResult == JusticeCashWriteResult.Rejected)
+            {
+                intent.Resolution = JusticePaymentResolution.Rejected;
+            }
+            JusticeMarkStateDirty();
+            if (!JusticeFlushStateNow())
             {
                 return false;
             }
@@ -262,39 +306,43 @@ public sealed partial class DonJEnemySpawner
                     return false;
                 }
 
-                // Je ne rejoue jamais une écriture déjà tentée. Après le délai
-                // persistant, je présume le débit appliqué afin d'éviter tout
-                // double prélèvement et de sortir durablement de la reprise.
-                intent.CashWriteResult = JusticeCashWriteResult.Succeeded;
+                // Je ne rejoue jamais une écriture déjà tentée. Sans preuve du
+                // solde final, le montant quitte la dette exigible mais reste
+                // explicitement litigieux dans le dossier.
+                intent.Resolution = JusticePaymentResolution.Ambiguous;
+                intent.AmbiguousAmount = intent.DebitAmount;
                 LogWarning(
                     "Justice.Paiement",
-                    "Réconciliation expirée sans lecture cash; débit volontaire présumé appliqué (at-most-once).");
+                    "Réconciliation expirée sans lecture cash; paiement volontaire marqué ambigu.");
             }
             else if (observedCash == intent.CashAfter)
             {
                 intent.CashWriteResult = JusticeCashWriteResult.Succeeded;
+                intent.Resolution = JusticePaymentResolution.Confirmed;
             }
             else if (observedCash == intent.CashBefore)
             {
                 intent.CashWriteResult = JusticeCashWriteResult.Rejected;
+                intent.Resolution = JusticePaymentResolution.Rejected;
             }
             else
             {
-                // Une écriture tentée n'est jamais rejouée. Si le solde a encore
-                // bougé, je considère le débit appliqué pour garantir at-most-once.
-                intent.CashWriteResult = JusticeCashWriteResult.Succeeded;
+                // Une écriture tentée n'est jamais rejouée. Un troisième solde
+                // ne prouve cependant pas que notre STAT_SET_INT a réussi.
+                intent.Resolution = JusticePaymentResolution.Ambiguous;
+                intent.AmbiguousAmount = intent.DebitAmount;
                 LogWarning(
                     "Justice.Paiement",
-                    "Solde ambigu après STAT_SET_INT; débit présumé appliqué sans nouvelle écriture.");
+                    "Solde ambigu après STAT_SET_INT; montant isolé sans nouvelle écriture.");
             }
             JusticeMarkStateDirty();
-            if (!PersistJusticeCriticalPrecommitRedundantly())
+            if (!JusticeFlushStateNow())
             {
                 return false;
             }
         }
 
-        if (intent.CashWriteResult == JusticeCashWriteResult.Succeeded)
+        if (intent.Resolution == JusticePaymentResolution.Confirmed)
         {
             _justiceCaseState.VoluntaryFinePaid = JusticePolicy.SaturatingAdd(
                 _justiceCaseState.VoluntaryFinePaid,
@@ -303,6 +351,12 @@ public sealed partial class DonJEnemySpawner
             _justiceCaseState.FineDue = Math.Max(
                 0L,
                 _justiceCaseState.FineDue - intent.DebitAmount);
+        }
+        else if (intent.Resolution == JusticePaymentResolution.Ambiguous)
+        {
+            intent.AmbiguousAmount = JusticePolicy.MoveFineToDispute(
+                _justiceCaseState,
+                intent.AmbiguousAmount);
         }
 
         intent.DebtCommitted = true;
@@ -324,21 +378,16 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        // Je transforme d'abord l'abandon en décision financière terminale. Le
-        // primaire et le backup savent ainsi qu'aucun STAT_SET_INT ne doit être
-        // émis, même si le primaire est ensuite corrompu avant l'effacement final.
-        intent.DebitAttempted = true;
-        intent.AttemptedAtUtcTicks = DateTime.UtcNow.Ticks;
+        // Je transforme l'abandon en décision terminale sans fabriquer de tentative
+        // cash. Un éventuel WAL Prepared est rejeté après le snapshot de résultat.
+        intent.DebitAttempted = false;
+        intent.AttemptedAtUtcTicks = 0L;
         intent.CashWriteResult = JusticeCashWriteResult.Rejected;
-        JusticeMarkStateDirty();
-        if (!PersistJusticeCriticalPrecommitRedundantly())
-        {
-            return false;
-        }
-
+        intent.Resolution = JusticePaymentResolution.Rejected;
         intent.DebtCommitted = true;
         JusticeMarkStateDirty();
-        if (!JusticeFlushStateNow())
+        if (!PersistJusticeFinancialOutcomeWithoutEffect(
+                "VoluntaryFinePayment"))
         {
             return false;
         }
@@ -368,14 +417,14 @@ public sealed partial class DonJEnemySpawner
         _justiceVoluntaryFinePaymentIntent = null;
         _justiceNextVoluntaryPaymentResumeAt = 0;
         JusticeMarkStateDirty();
-        if (!PersistJusticeCriticalPrecommitRedundantly())
+        if (!JusticeFlushStateNow())
         {
             _justiceVoluntaryFinePaymentIntent = intent;
             JusticeMarkStateDirty();
             return false;
         }
 
-        if (intent.CashWriteResult == JusticeCashWriteResult.Succeeded)
+        if (intent.Resolution == JusticePaymentResolution.Confirmed)
         {
             ShowStatus(
                 "Justice : " + FormatJusticeMoney(intent.DebitAmount) +
@@ -385,6 +434,18 @@ public sealed partial class DonJEnemySpawner
                 "Justice.Paiement",
                 "Paiement volontaire confirmé id=" + intent.PaymentId +
                 ", montant=" + intent.DebitAmount.ToString(CultureInfo.InvariantCulture) + ".");
+        }
+        else if (intent.Resolution == JusticePaymentResolution.Ambiguous)
+        {
+            ShowStatus(
+                "Justice : " + FormatJusticeMoney(intent.AmbiguousAmount) +
+                " en litige · aucun nouveau débit automatique.",
+                5200);
+            LogWarning(
+                "Justice.Paiement",
+                "Paiement volontaire ambigu id=" + intent.PaymentId +
+                ", montant=" + intent.AmbiguousAmount.ToString(
+                    CultureInfo.InvariantCulture) + ".");
         }
         else
         {
@@ -410,6 +471,10 @@ public sealed partial class DonJEnemySpawner
         writer.WriteAttributeString("cashBefore", intent.CashBefore.ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString("cashAfter", intent.CashAfter.ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString(
+            "fineInDisputeBefore",
+            Math.Max(0L, intent.FineInDisputeBefore).ToString(
+                CultureInfo.InvariantCulture));
+        writer.WriteAttributeString(
             "preparedAtUtcTicks",
             Math.Max(0L, intent.PreparedAtUtcTicks).ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString("debitAttempted", intent.DebitAttempted ? "true" : "false");
@@ -417,6 +482,11 @@ public sealed partial class DonJEnemySpawner
             "attemptedAtUtcTicks",
             Math.Max(0L, intent.AttemptedAtUtcTicks).ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString("cashWriteResult", intent.CashWriteResult.ToString());
+        writer.WriteAttributeString("resolution", intent.Resolution.ToString());
+        writer.WriteAttributeString(
+            "ambiguousAmount",
+            Math.Max(0L, intent.AmbiguousAmount).ToString(
+                CultureInfo.InvariantCulture));
         writer.WriteAttributeString("debtCommitted", intent.DebtCommitted ? "true" : "false");
         writer.WriteEndElement();
     }
@@ -436,10 +506,13 @@ public sealed partial class DonJEnemySpawner
         int debitAmount = -1;
         int cashBefore = -1;
         int cashAfter = -1;
+        long fineInDisputeBefore = 0L;
         long preparedAtUtcTicks = 0L;
         bool debitAttempted = false;
         long attemptedAtUtcTicks = 0L;
         JusticeCashWriteResult cashWriteResult = JusticeCashWriteResult.Unknown;
+        JusticePaymentResolution resolution = JusticePaymentResolution.Prepared;
+        long ambiguousAmount = 0L;
         bool debtCommitted = false;
         bool valid = IsCanonicalJusticeVoluntaryPaymentId(paymentId) &&
             TryReadJusticeIntStrict(element, "slot", -1, 0, 2, out slot) &&
@@ -453,6 +526,13 @@ public sealed partial class DonJEnemySpawner
             TryReadJusticeIntStrict(element, "debitAmount", -1, 1, int.MaxValue, out debitAmount) &&
             TryReadJusticeIntStrict(element, "cashBefore", -1, 0, int.MaxValue, out cashBefore) &&
             TryReadJusticeIntStrict(element, "cashAfter", -1, 0, int.MaxValue, out cashAfter) &&
+            TryReadJusticeLongStrict(
+                element,
+                "fineInDisputeBefore",
+                0L,
+                0L,
+                JusticePolicy.MaxActiveFine,
+                out fineInDisputeBefore) &&
             TryReadJusticeLongStrict(
                 element,
                 "preparedAtUtcTicks",
@@ -469,6 +549,18 @@ public sealed partial class DonJEnemySpawner
                 DateTime.MaxValue.Ticks,
                 out attemptedAtUtcTicks) &&
             TryReadJusticeCashWriteResult(element, out cashWriteResult) &&
+            TryReadJusticePaymentResolution(
+                element,
+                debitAttempted,
+                cashWriteResult,
+                out resolution) &&
+            TryReadJusticeLongStrict(
+                element,
+                "ambiguousAmount",
+                0L,
+                0L,
+                JusticePolicy.MaxActiveFine,
+                out ambiguousAmount) &&
             TryReadJusticeBoolStrict(element, "debtCommitted", false, out debtCommitted);
 
         valid &= debitAmount <= cashBefore && cashAfter == cashBefore - debitAmount &&
@@ -476,14 +568,33 @@ public sealed partial class DonJEnemySpawner
                      ? attemptedAtUtcTicks == 0L &&
                        cashWriteResult == JusticeCashWriteResult.Unknown && !debtCommitted
                      : attemptedAtUtcTicks > 0L) &&
-                 (!debtCommitted || cashWriteResult != JusticeCashWriteResult.Unknown);
+                 (!debtCommitted ||
+                  resolution == JusticePaymentResolution.Confirmed ||
+                  resolution == JusticePaymentResolution.Rejected ||
+                  resolution == JusticePaymentResolution.Ambiguous) &&
+                 (resolution != JusticePaymentResolution.Ambiguous ||
+                  (cashWriteResult == JusticeCashWriteResult.Unknown &&
+                   ambiguousAmount == debitAmount)) &&
+                 (resolution == JusticePaymentResolution.Ambiguous ||
+                  ambiguousAmount == 0L);
 
         long expectedFine = fineBefore;
-        if (debtCommitted && cashWriteResult == JusticeCashWriteResult.Succeeded)
+        long expectedDispute = fineInDisputeBefore;
+        if (debtCommitted &&
+            (resolution == JusticePaymentResolution.Confirmed ||
+             resolution == JusticePaymentResolution.Ambiguous))
         {
             expectedFine = Math.Max(0L, fineBefore - debitAmount);
         }
-        valid &= caseState.FineDue == expectedFine;
+        if (debtCommitted && resolution == JusticePaymentResolution.Ambiguous)
+        {
+            expectedDispute = JusticePolicy.SaturatingAdd(
+                fineInDisputeBefore,
+                ambiguousAmount,
+                JusticePolicy.MaxActiveFine);
+        }
+        valid &= caseState.FineDue == expectedFine &&
+                 caseState.FineInDispute == expectedDispute;
         if (!valid)
         {
             return null;
@@ -497,12 +608,41 @@ public sealed partial class DonJEnemySpawner
             DebitAmount = debitAmount,
             CashBefore = cashBefore,
             CashAfter = cashAfter,
+            FineInDisputeBefore = fineInDisputeBefore,
             PreparedAtUtcTicks = preparedAtUtcTicks,
             DebitAttempted = debitAttempted,
             AttemptedAtUtcTicks = attemptedAtUtcTicks,
             CashWriteResult = cashWriteResult,
+            Resolution = resolution,
+            AmbiguousAmount = ambiguousAmount,
             DebtCommitted = debtCommitted
         };
+    }
+
+    private static bool TryReadJusticePaymentResolution(
+        XmlElement element,
+        bool debitAttempted,
+        JusticeCashWriteResult cashWriteResult,
+        out JusticePaymentResolution resolution)
+    {
+        resolution = JusticePaymentResolution.Prepared;
+        string text = (element.GetAttribute("resolution") ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            // Le lecteur v1 conserve les transactions historiques : leur ancien
+            // résultat explicite est migré sans inventer un litige rétroactif.
+            resolution = !debitAttempted
+                ? JusticePaymentResolution.Prepared
+                : cashWriteResult == JusticeCashWriteResult.Succeeded
+                    ? JusticePaymentResolution.Confirmed
+                    : cashWriteResult == JusticeCashWriteResult.Rejected
+                        ? JusticePaymentResolution.Rejected
+                        : JusticePaymentResolution.Attempted;
+            return true;
+        }
+
+        return Enum.TryParse(text, true, out resolution) &&
+               Enum.IsDefined(typeof(JusticePaymentResolution), resolution);
     }
 
     private static bool IsCanonicalJusticeVoluntaryPaymentId(string paymentId)
@@ -516,5 +656,70 @@ public sealed partial class DonJEnemySpawner
         }
         Guid parsed;
         return Guid.TryParseExact(paymentId.Substring(prefix.Length), "N", out parsed);
+    }
+
+    private string GetJusticeSelectedFineDisputeDisplay()
+    {
+        JusticeCaseState state = GetJusticeMenuSelectedCaseState();
+        return state == null || state.FineInDispute <= 0L
+            ? "Aucun"
+            : FormatJusticeMoney(state.FineInDispute) + " · résolution requise";
+    }
+
+    private bool CanJusticeResolveSelectedFineDispute()
+    {
+        JusticeCaseState state = GetJusticeMenuSelectedCaseState();
+        return state != null && state.FineInDispute > 0L;
+    }
+
+    private void ResolveJusticeFineDisputeInPlayerFavor(
+        int profileSlot,
+        long confirmedAmount)
+    {
+        if (!IsJusticeCanonicalProfileSlot(profileSlot))
+        {
+            ShowStatus("Justice : profil du litige invalide.", 3500);
+            return;
+        }
+        EnsureJusticePlayerProfilesInitialized();
+        JusticeCaseState state = _justicePlayerProfiles[profileSlot].CaseState;
+        long currentDispute = state == null ? 0L : Math.Max(0L, state.FineInDispute);
+        if (state == null || currentDispute <= 0L ||
+            confirmedAmount <= 0L || confirmedAmount != currentDispute)
+        {
+            ShowStatus("Justice : le litige a changé, confirmation annulée.", 4200);
+            return;
+        }
+        if (profileSlot == _justiceActivePlayerProfileSlot &&
+            (_justiceFineDebitIntent != null ||
+             _justiceVoluntaryFinePaymentIntent != null))
+        {
+            ShowStatus("Justice : une transaction de paiement est encore ouverte.", 4200);
+            return;
+        }
+
+        // Je matérialise ici la politique explicitement choisie « favoriser le
+        // joueur ». Le montant quitte le litige sans nouveau débit ; il est
+        // comptabilisé comme réglé uniquement pour empêcher sa renaissance.
+        state.FineInDispute = 0L;
+        state.VoluntaryFinePaid = JusticePolicy.SaturatingAdd(
+            state.VoluntaryFinePaid,
+            currentDispute,
+            JusticePolicy.MaxActiveFine);
+        JusticePolicy.NormalizeFineLedger(state);
+        state.RecalculateTotals();
+        JusticeMarkStateDirty();
+        bool persisted = JusticeFlushStateNow();
+        LogWarning(
+            "Justice.Paiement.Litige",
+            "Résolution explicite en faveur du joueur; profil=" +
+            profileSlot.ToString(CultureInfo.InvariantCulture) +
+            ", montant=" + currentDispute.ToString(CultureInfo.InvariantCulture) +
+            ", persistance=" + (persisted ? "confirmée" : "en attente") + ".");
+        ShowStatus(
+            persisted
+                ? "Justice : litige annulé explicitement, aucun nouveau débit."
+                : "Justice : litige résolu en mémoire, sauvegarde à retenter.",
+            5500);
     }
 }

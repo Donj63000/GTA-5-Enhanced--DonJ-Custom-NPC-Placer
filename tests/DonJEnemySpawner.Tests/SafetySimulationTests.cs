@@ -48,8 +48,9 @@ public class SafetySimulationTests
             script,
             "Justice",
             "JusticeEnabled", "JusticeProfile", "JusticeStatus", "JusticeLastCrime", "JusticeSeverity",
-            "JusticeWarrant", "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticePayFine",
-            "JusticeSentence", "JusticeRecidivism", "JusticeResetProfile");
+            "JusticeWarrant", "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticeFineDispute",
+            "JusticePayFine", "JusticeResolveFineDispute", "JusticeSentence", "JusticeRecidivism",
+            "JusticePoliceMode", "JusticeRecovery", "JusticeDiagnostic", "JusticeResetProfile");
         AssertCategoryActions(
             script,
             "Tools",
@@ -685,8 +686,17 @@ public class SafetySimulationTests
         StringAssert.Contains(projectXml, "CreateLocalEndll");
         StringAssert.Contains(projectXml, "DeployAsEndll");
         StringAssert.Contains(projectXml, "$(TargetDir)$(AssemblyName).ENdll");
-        StringAssert.Contains(projectXml, "$(GtaScriptsDir)\\$(AssemblyName).ENdll");
-        StringAssert.Contains(projectXml, "$(GtaScriptsDir)\\DonJEnemySpawner.ENdll");
+        StringAssert.Contains(projectXml, "<DeployToGta Condition=\"'$(DeployToGta)' == ''\">false</DeployToGta>");
+        StringAssert.Contains(projectXml, "'$(DeployToGta)' == 'true'");
+        StringAssert.Contains(projectXml, "PackageGameReadyScript");
+        StringAssert.Contains(projectXml, "DeployGameReadyScript");
+
+        string deployScript = File.ReadAllText(Path.Combine(GetRepositoryRoot(), "tools", "deploy-game-ready.ps1"));
+        StringAssert.Contains(deployScript, "File]::Replace");
+        StringAssert.Contains(deployScript, "DonJCustomNpcPlacer.ENdll");
+        StringAssert.Contains(deployScript, "DonJEnemySpawner.ENdll");
+        StringAssert.Contains(deployScript, "manifest.json");
+        StringAssert.Contains(deployScript, "DonJCustomNpcPlacer.manifest.json");
 
         string safetyScript = File.ReadAllText(Path.Combine(GetRepositoryRoot(), "tools", "run-safety-checks.ps1"));
         StringAssert.Contains(safetyScript, "dotnet");
@@ -694,7 +704,14 @@ public class SafetySimulationTests
         StringAssert.Contains(safetyScript, "build");
         StringAssert.Contains(safetyScript, "test");
         StringAssert.Contains(safetyScript, "GtaScriptsDir");
+        StringAssert.Contains(safetyScript, "package-game-ready.ps1");
+        StringAssert.Contains(safetyScript, "deploy-game-ready.ps1");
+        StringAssert.Contains(safetyScript, "buildEndllHash");
+        StringAssert.Contains(safetyScript, "packageEndllHash");
+        StringAssert.Contains(safetyScript, "deployedEndllHash");
+        StringAssert.Contains(safetyScript, "deployedManifestHash");
         StringAssert.Contains(safetyScript, "DonJCustomNpcPlacer.ENdll");
+        StringAssert.Contains(safetyScript, "DonJCustomNpcPlacer.manifest.json");
         StringAssert.Contains(safetyScript, "DonJEnemySpawner.ENdll");
         StringAssert.Contains(safetyScript, "UseStubApi");
     }

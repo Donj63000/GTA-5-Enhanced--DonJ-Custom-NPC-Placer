@@ -2817,29 +2817,43 @@ public class DonJEnemySpawnerTests
     }
 
     [TestMethod]
-    public void ProjectFile_DeploysReleaseBuildAsEndll()
+    public void ProjectFile_DeploysReleaseBuildAsEndllOnlyWhenExplicitlyRequested()
     {
         XDocument document = XDocument.Load(GetProjectFilePath());
 
         XElement localEndllTarget = FindTarget(document, "CreateLocalEndll");
+        XElement validateTarget = FindTarget(document, "ValidateDeployTarget");
+        XElement packageTarget = FindTarget(document, "CreateGtaDeployPackage");
         XElement deployTarget = FindTarget(document, "DeployAsEndll");
 
         Assert.IsNotNull(localEndllTarget, "La cible MSBuild CreateLocalEndll est introuvable.");
+        Assert.IsNotNull(validateTarget, "La cible MSBuild ValidateDeployTarget est introuvable.");
+        Assert.IsNotNull(packageTarget, "La cible MSBuild CreateGtaDeployPackage est introuvable.");
         Assert.IsNotNull(deployTarget, "La cible MSBuild DeployAsEndll est introuvable.");
+        Assert.AreEqual("false", GetPropertyValue(document, "DeployToGta"));
 
         string localTargetXml = localEndllTarget.ToString(SaveOptions.DisableFormatting);
+        string validateTargetXml = validateTarget.ToString(SaveOptions.DisableFormatting);
+        string packageTargetXml = packageTarget.ToString(SaveOptions.DisableFormatting);
         string targetXml = deployTarget.ToString(SaveOptions.DisableFormatting);
 
         StringAssert.Contains(localTargetXml, "$(TargetDir)$(AssemblyName).ENdll");
         StringAssert.Contains(localTargetXml, "$(TargetPath)");
-        StringAssert.Contains(targetXml, "$(GtaScriptsDir)\\$(AssemblyName).ENdll");
-        StringAssert.Contains(targetXml, "$(GtaScriptsDir)\\$(AssemblyName).dll");
-        StringAssert.Contains(targetXml, "$(GtaScriptsDir)\\$(AssemblyName).pdb");
-        StringAssert.Contains(targetXml, "$(GtaScriptsDir)\\DonJEnemySpawner.ENdll");
-        StringAssert.Contains(targetXml, "$(GtaScriptsDir)\\DonJEnemySpawner.dll");
-        StringAssert.Contains(targetXml, "$(GtaScriptsDir)\\DonJEnemySpawner.pdb");
+        StringAssert.Contains(validateTargetXml, "GTA5_Enhanced.exe");
+        StringAssert.Contains(validateTargetXml, "$(GtaScriptsDir)");
+        Assert.AreEqual(
+            @"$(RepositoryRoot)\tools\package-game-ready.ps1",
+            GetPropertyValue(document, "PackageGameReadyScript"));
+        StringAssert.Contains(packageTargetXml, "$(GtaDeployPackageDirectory)");
+        Assert.AreEqual(
+            @"$(RepositoryRoot)\tools\deploy-game-ready.ps1",
+            GetPropertyValue(document, "DeployGameReadyScript"));
+        StringAssert.Contains(targetXml, "'$(DeployToGta)' == 'true'");
+        StringAssert.Contains(targetXml, "'$(Configuration)' == 'Release'");
         StringAssert.Contains(targetXml, "DonJ Custom NPC Placer deploye vers");
-        StringAssert.Contains(targetXml, "SkipUnchangedFiles=\"false\"");
+        Assert.IsFalse(
+            deployTarget.Descendants("Delete").Any(),
+            "La cible MSBuild ne doit jamais supprimer le binaire GTA avant le remplacement verifie.");
     }
 
     [TestMethod]

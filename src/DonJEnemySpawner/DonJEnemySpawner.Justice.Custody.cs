@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Xml;
 using GTA;
@@ -11,6 +12,13 @@ using GTA.Math;
 using GTA.Native;
 using GtaControl = GTA.Control;
 using Keys = System.Windows.Forms.Keys;
+
+internal enum JusticePoliceIntegrationMode
+{
+    Disabled,
+    FreeroamBestEffort,
+    Force
+}
 
 public sealed partial class DonJEnemySpawner
 {
@@ -55,6 +63,8 @@ public sealed partial class DonJEnemySpawner
     private const int JusticeCustodyMaxWeapons = 160;
     private const int JusticeCustodyMaxDlcWeaponDefinitions = 512;
     private const int JusticeCustodyMaxComponentsPerWeapon = 128;
+    private const int JusticeCustodyInventoryCaptureMaximumAttempts = 3;
+    private const int JusticeCustodyInventoryRemovalMaximumAttempts = 5;
     private const int JusticeCustodyMaximumSentenceSeconds = 30 * 60;
     private const int JusticeCustodyPrisonThresholdSeconds = 5 * 60;
     private const int JusticeCustodyFineConversionMaximumSeconds = 5 * 60;
@@ -82,6 +92,32 @@ public sealed partial class DonJEnemySpawner
         Unknown,
         Succeeded,
         Rejected
+    }
+
+    private enum JusticeInventoryCustodyState
+    {
+        None,
+        CapturePending,
+        SnapshotPersisted,
+        RemovalPending,
+        RemovedVerified,
+        UnsupportedPreserved,
+        RestorePending,
+        RestoreAmbiguous
+    }
+
+    private enum JusticeInventoryPreparationResult
+    {
+        Ready,
+        RetryableFailure,
+        UnsupportedLoadout
+    }
+
+    private enum JusticeInventoryRemovalResult
+    {
+        NotAttempted,
+        RemovedVerified,
+        EffectMayHaveApplied
     }
 
     private sealed class JusticeCustodyVolume
@@ -273,6 +309,10 @@ public sealed partial class DonJEnemySpawner
         internal bool DebitAttempted;
         internal long AttemptedAtUtcTicks;
         internal JusticeCashWriteResult CashWriteResult = JusticeCashWriteResult.Unknown;
+        internal JusticePaymentResolution Resolution =
+            JusticePaymentResolution.Prepared;
+        internal long FineInDisputeBefore;
+        internal long AmbiguousAmount;
     }
 
     private sealed class JusticeDisciplineIntent
@@ -351,6 +391,8 @@ public sealed partial class DonJEnemySpawner
     private bool _justicePoliceSuppressionRestorePending;
     private bool _justicePoliceSuppressionFailureLogged;
     private int _justiceNextPoliceSuppressionRestoreAt;
+    private JusticePoliceIntegrationMode _justicePoliceIntegrationMode =
+        JusticePoliceIntegrationMode.FreeroamBestEffort;
     private int _justiceCustodyTransferStartedAt;
     private int _justiceNextCustodyTransferAttemptAt;
     private int _justiceCustodyTransferFailureCount;
@@ -368,6 +410,9 @@ public sealed partial class DonJEnemySpawner
     private bool _justiceInventoryRemoved;
     private bool _justiceWeaponControlsLocked;
     private int _justiceNextInventoryPersistenceRetryAt;
+    private JusticeInventoryCustodyState _justiceInventoryCustodyState;
+    private int _justiceInventoryCaptureFailureCount;
+    private int _justiceInventoryRemovalFailureCount;
 
     private string _justiceActiveActivityId = string.Empty;
     private int _justiceActivityLastTickAt;
@@ -1060,28 +1105,20 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        if (!_justiceInventoryRemoved && _justiceWeaponSnapshot == null)
+        JusticeInventoryPreparationResult inventoryPreparation =
+            EnsureJusticeInventoryReadyForCustodyTransfer(player, now);
+        if (inventoryPreparation != JusticeInventoryPreparationResult.Ready)
         {
-            PrepareJusticeInventoryConfiscation(player);
-        }
-        else if (!_justiceInventoryRemoved)
-        {
-            // Je reprends un snapshot validé dont le retrait n'avait pas encore
-            // été commis. Le verrou et le retry restent actifs après un unload.
-            _justiceWeaponControlsLocked = true;
-            _justiceNextInventoryPersistenceRetryAt = 0;
-            SelectJusticeUnarmedSafe(player);
-            JusticeMarkStateDirty();
-        }
-        else if (_justiceInventoryRemoved)
-        {
-            // Je réapplique au chargement : RemoveAll est idempotent et évite
-            // qu'un arrêt de script ayant rendu provisoirement les armes les garde.
-            if (!RemoveJusticePlayerWeaponsSafe(player))
+            if (inventoryPreparation ==
+                JusticeInventoryPreparationResult.UnsupportedLoadout)
             {
-                _justiceWeaponControlsLocked = true;
-                _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(now, 1000);
+                EnterJusticeNonDestructiveCustodyFallback(player, now);
             }
+            else
+            {
+                HandleJusticeCustodyTransferFailure(player, now);
+            }
+            return;
         }
 
         bool transferred = false;
@@ -1620,13 +1657,16 @@ public sealed partial class DonJEnemySpawner
                 _justiceCaseState.SentenceSeconds,
                 fine,
                 stationPlanned),
-            StationPlanned = stationPlanned
+            StationPlanned = stationPlanned,
+            FineInDisputeBefore = Math.Max(
+                0L,
+                _justiceCaseState.FineInDispute)
         };
         JusticeMarkStateDirty();
 
-        // Je persiste l'intention avant tout effet externe. Chaque reprise refait
-        // ce flush avant de lire ou d'écrire le cash, y compris dans ce même tick.
-        if (!PersistJusticeCriticalPrecommitRedundantly())
+        // Je rends le snapshot Prepared durable avant de pouvoir armer le WAL qui
+        // précède l'unique écriture cash.
+        if (!EnsureJusticeFinancialPreparedSnapshot("FineDebit"))
         {
             return false;
         }
@@ -1652,7 +1692,11 @@ public sealed partial class DonJEnemySpawner
             // Le commit final est autoritaire. Je le reflushe avant de nettoyer
             // l'intention afin qu'un précédent échec disque ne soit jamais masqué.
             JusticeMarkStateDirty();
-            if (!JusticeFlushStateNow())
+            bool finalCommitPersisted = !intent.DebitAttempted &&
+                intent.Resolution == JusticePaymentResolution.Rejected
+                    ? PersistJusticeFinancialOutcomeWithoutEffect("FineDebit")
+                    : JusticeFlushStateNow();
+            if (!finalCommitPersisted)
             {
                 return false;
             }
@@ -1680,23 +1724,30 @@ public sealed partial class DonJEnemySpawner
             fineReadNow,
             JusticeCustodyFineCashReadRetryMs);
 
-        // Je réaffirme le précommit à chaque reprise. Si le primaire et son backup
-        // sont indisponibles, aucun débit GTA ne peut partir.
-        if (!PersistJusticeCriticalPrecommitRedundantly())
+        // Une intention non tentée ne peut même pas relire son plan cash tant que
+        // le snapshot Prepared correspondant n'est pas confirmé sur disque.
+        if (!intent.DebitAttempted &&
+            !EnsureJusticeFinancialPreparedSnapshot("FineDebit"))
         {
             return false;
         }
 
         int finalSentence = intent.SentenceIfDebited;
         int cash = 0;
-        bool resolvedWithoutCash = false;
+        bool resolvedWithoutCash = !intent.DebitAttempted &&
+            intent.Resolution == JusticePaymentResolution.Rejected;
         bool cashRead = false;
-        if (intent.DebitAttempted &&
+        if (resolvedWithoutCash)
+        {
+            finalSentence = intent.SentenceIfConverted;
+        }
+        else if (intent.DebitAttempted &&
             intent.CashWriteResult == JusticeCashWriteResult.Succeeded)
         {
             // Je fais confiance au résultat natif déjà durci plutôt qu'à une
             // variation de solde ultérieure qui pourrait créer un faux échec.
             finalSentence = intent.SentenceIfDebited;
+            intent.Resolution = JusticePaymentResolution.Confirmed;
             resolvedWithoutCash = true;
         }
         else if (intent.DebitAttempted &&
@@ -1705,13 +1756,14 @@ public sealed partial class DonJEnemySpawner
             // Un rejet explicite n'est jamais assimilé à un paiement : toute
             // l'amende reste due et est convertie sans réémettre STAT_SET_INT.
             finalSentence = intent.SentenceIfConverted;
+            intent.Resolution = JusticePaymentResolution.Rejected;
             resolvedWithoutCash = true;
         }
         else
         {
             cashRead = TryReadJusticeSinglePlayerCash(intent.Slot, out cash);
         }
-        if (!intent.CashPlanPrepared)
+        if (!resolvedWithoutCash && !intent.CashPlanPrepared)
         {
             if (!cashRead)
             {
@@ -1725,6 +1777,7 @@ public sealed partial class DonJEnemySpawner
                 // Après un délai durable, je choisis le fallback sans SET : le
                 // jugement avance, mais aucun compte de protagoniste n'est touché.
                 finalSentence = intent.SentenceIfConverted;
+                intent.Resolution = JusticePaymentResolution.Rejected;
                 resolvedWithoutCash = true;
                 ResetJusticeFineCashReadRetry();
                 ShowStatus(
@@ -1736,8 +1789,10 @@ public sealed partial class DonJEnemySpawner
             }
             else
             {
+                InvalidateJusticeFinancialPreparedSnapshot("FineDebit");
                 long plannedDebit = Math.Min(intent.FineAmount, Math.Max(0, cash));
                 intent.CashPlanPrepared = true;
+                intent.PreparedAtUtcTicks = DateTime.UtcNow.Ticks;
                 intent.DebitAmount = (int)plannedDebit;
                 intent.CashBefore = Math.Max(0, cash);
                 intent.CashAfter = intent.CashBefore - intent.DebitAmount;
@@ -1751,11 +1806,9 @@ public sealed partial class DonJEnemySpawner
                     intent.StationPlanned);
                 finalSentence = intent.SentenceIfDebited;
                 JusticeMarkStateDirty();
-                if (!PersistJusticeCriticalPrecommitRedundantly())
-                {
-                    return false;
-                }
                 ResetJusticeFineCashReadRetry();
+                EnsureJusticeFinancialPreparedSnapshot("FineDebit");
+                return false;
             }
         }
 
@@ -1768,6 +1821,7 @@ public sealed partial class DonJEnemySpawner
                 return false;
             }
             finalSentence = intent.SentenceIfConverted;
+            intent.Resolution = JusticePaymentResolution.Rejected;
             resolvedWithoutCash = true;
             ResetJusticeFineCashReadRetry();
             ShowStatus("Justice : cash inaccessible, amende convertie sans débit.", 4200);
@@ -1783,12 +1837,16 @@ public sealed partial class DonJEnemySpawner
             {
                 return false;
             }
+            intent.Resolution = JusticePaymentResolution.Ambiguous;
+            intent.AmbiguousAmount = intent.DebitAmount;
+            finalSentence = intent.SentenceIfDebited;
+            resolvedWithoutCash = true;
             ShowStatus(
-                "Justice : débit impossible à relire, considéré déjà appliqué pour éviter un double paiement.",
+                "Justice : débit impossible à relire, montant placé en litige.",
                 5200);
             LogWarning(
                 "Justice.Amende",
-                "Réconciliation expirée sans lecture; débit présumé appliqué (at-most-once)." );
+                "Réconciliation expirée sans lecture; paiement marqué ambigu (at-most-once)." );
             ResetJusticeFineCashReadRetry();
         }
         else if (!resolvedWithoutCash && intent.DebitAttempted && cash == intent.CashAfter)
@@ -1796,10 +1854,11 @@ public sealed partial class DonJEnemySpawner
             // CashAfter ne prouve le débit qu'après le précommit Attempted. Avant
             // celui-ci, une variation externe identique doit encore être rebasée.
             intent.CashWriteResult = JusticeCashWriteResult.Succeeded;
+            intent.Resolution = JusticePaymentResolution.Confirmed;
             finalSentence = intent.SentenceIfDebited;
             resolvedWithoutCash = true;
             JusticeMarkStateDirty();
-            if (!PersistJusticeCriticalPrecommitRedundantly())
+            if (!JusticeFlushStateNow())
             {
                 return false;
             }
@@ -1810,61 +1869,80 @@ public sealed partial class DonJEnemySpawner
             if (cash != intent.CashBefore)
             {
                 // Tant qu'aucune écriture n'est autorisée, un solde tiers est sûr à
-                // rebaser. Je persiste le nouveau plan avant son unique tentative.
-                int previousDebit = intent.DebitAmount;
-                int previousCashBefore = intent.CashBefore;
-                int previousCashAfter = intent.CashAfter;
-                int previousSentenceIfDebited = intent.SentenceIfDebited;
-                int previousSentenceIfConverted = intent.SentenceIfConverted;
-                long plannedDebit = Math.Min(intent.FineAmount, Math.Max(0, cash));
-                intent.DebitAmount = (int)plannedDebit;
-                intent.CashBefore = Math.Max(0, cash);
-                intent.CashAfter = intent.CashBefore - intent.DebitAmount;
-                intent.SentenceIfDebited = CalculateJusticeSentenceAfterFineConversion(
-                    _justiceCaseState.SentenceSeconds,
-                    intent.FineAmount - plannedDebit,
-                    intent.StationPlanned);
-                intent.SentenceIfConverted = CalculateJusticeSentenceAfterFineConversion(
-                    _justiceCaseState.SentenceSeconds,
-                    intent.FineAmount,
-                    intent.StationPlanned);
-                JusticeMarkStateDirty();
-                if (!PersistJusticeCriticalPrecommitRedundantly())
+                // rebaser tant qu'aucune frame WAL n'existe. Après Prepared, je
+                // rejette au contraire ce plan immuable sans jamais appeler SET.
+                if (HasJusticePreparedFinancialWal("FineDebit"))
                 {
-                    intent.DebitAmount = previousDebit;
-                    intent.CashBefore = previousCashBefore;
-                    intent.CashAfter = previousCashAfter;
-                    intent.SentenceIfDebited = previousSentenceIfDebited;
-                    intent.SentenceIfConverted = previousSentenceIfConverted;
+                    finalSentence = intent.SentenceIfConverted;
+                    intent.Resolution = JusticePaymentResolution.Rejected;
+                    resolvedWithoutCash = true;
                     JusticeMarkStateDirty();
+                }
+                else
+                {
+                    InvalidateJusticeFinancialPreparedSnapshot("FineDebit");
+                    long plannedDebit = Math.Min(intent.FineAmount, Math.Max(0, cash));
+                    intent.PreparedAtUtcTicks = DateTime.UtcNow.Ticks;
+                    intent.DebitAmount = (int)plannedDebit;
+                    intent.CashBefore = Math.Max(0, cash);
+                    intent.CashAfter = intent.CashBefore - intent.DebitAmount;
+                    intent.SentenceIfDebited = CalculateJusticeSentenceAfterFineConversion(
+                        _justiceCaseState.SentenceSeconds,
+                        intent.FineAmount - plannedDebit,
+                        intent.StationPlanned);
+                    intent.SentenceIfConverted = CalculateJusticeSentenceAfterFineConversion(
+                        _justiceCaseState.SentenceSeconds,
+                        intent.FineAmount,
+                        intent.StationPlanned);
+                    JusticeMarkStateDirty();
+                    EnsureJusticeFinancialPreparedSnapshot("FineDebit");
                     return false;
                 }
             }
 
-            if (intent.DebitAmount <= 0)
+            if (resolvedWithoutCash)
+            {
+                finalSentence = intent.SentenceIfConverted;
+            }
+            else if (intent.DebitAmount <= 0)
             {
                 finalSentence = intent.SentenceIfDebited;
+                intent.Resolution = JusticePaymentResolution.Rejected;
             }
             else
             {
-                // DebitAttempted est le jeton at-most-once. Je le durcis avant la
-                // seule écriture externe; aucune reprise Attempted ne réémettra SET.
-                intent.DebitAttempted = true;
-                intent.AttemptedAtUtcTicks = DateTime.UtcNow.Ticks;
-                intent.CashWriteResult = JusticeCashWriteResult.Unknown;
-                JusticeMarkStateDirty();
-                if (!PersistJusticeCriticalPrecommitRedundantly())
+                // Le WAL Attempted est le jeton at-most-once. Une reprise qui le
+                // retrouve durable ne réémet jamais STAT_SET_INT.
+                bool attemptWasAlreadyDurable;
+                if (!TryArmJusticeFinancialAttempt(
+                        "FineDebit",
+                        out attemptWasAlreadyDurable))
                 {
-                    intent.DebitAttempted = false;
-                    intent.AttemptedAtUtcTicks = 0L;
-                    intent.CashWriteResult = JusticeCashWriteResult.Unknown;
-                    JusticeMarkStateDirty();
                     return false;
                 }
 
-                intent.CashWriteResult = TryWriteJusticeSinglePlayerCash(intent.Slot, intent.CashAfter);
+                intent.DebitAttempted = true;
+                intent.AttemptedAtUtcTicks = DateTime.UtcNow.Ticks;
+                intent.CashWriteResult = JusticeCashWriteResult.Unknown;
+                intent.Resolution = JusticePaymentResolution.Attempted;
                 JusticeMarkStateDirty();
-                if (!PersistJusticeCriticalPrecommitRedundantly())
+
+                if (!attemptWasAlreadyDurable)
+                {
+                    intent.CashWriteResult = TryWriteJusticeSinglePlayerCash(
+                        intent.Slot,
+                        intent.CashAfter);
+                }
+                if (intent.CashWriteResult == JusticeCashWriteResult.Succeeded)
+                {
+                    intent.Resolution = JusticePaymentResolution.Confirmed;
+                }
+                else if (intent.CashWriteResult == JusticeCashWriteResult.Rejected)
+                {
+                    intent.Resolution = JusticePaymentResolution.Rejected;
+                }
+                JusticeMarkStateDirty();
+                if (!JusticeFlushStateNow())
                 {
                     // Je conserve le résultat en mémoire : le tick suivant le
                     // durcira avant toute résolution et ne réémettra jamais SET.
@@ -1905,10 +1983,11 @@ public sealed partial class DonJEnemySpawner
                     }
 
                     intent.CashWriteResult = JusticeCashWriteResult.Succeeded;
+                    intent.Resolution = JusticePaymentResolution.Confirmed;
                     finalSentence = intent.SentenceIfDebited;
                     resolvedWithoutCash = true;
                     JusticeMarkStateDirty();
-                    if (!PersistJusticeCriticalPrecommitRedundantly())
+                    if (!JusticeFlushStateNow())
                     {
                         return false;
                     }
@@ -1927,21 +2006,36 @@ public sealed partial class DonJEnemySpawner
                 return false;
             }
             ResetJusticeFineCashReadRetry();
+            intent.Resolution = JusticePaymentResolution.Ambiguous;
+            intent.AmbiguousAmount = intent.DebitAmount;
+            finalSentence = intent.SentenceIfDebited;
+            resolvedWithoutCash = true;
             ShowStatus(
-                "Justice : solde ambigu, débit considéré déjà appliqué pour éviter un double paiement.",
+                "Justice : solde ambigu, montant placé en litige sans nouveau débit.",
                 5200);
             LogWarning(
                 "Justice.Amende",
-                "Réconciliation expirée sur solde ambigu; débit présumé appliqué (at-most-once)." );
+                "Réconciliation expirée sur solde ambigu; paiement marqué ambigu (at-most-once)." );
         }
 
+        if (intent.Resolution == JusticePaymentResolution.Ambiguous &&
+            intent.AmbiguousAmount > 0L)
+        {
+            intent.AmbiguousAmount = JusticePolicy.MoveFineToDispute(
+                _justiceCaseState,
+                intent.AmbiguousAmount);
+        }
         _justiceCaseState.FineDue = 0L;
         _justiceCaseState.SentenceSeconds = Math.Max(
             0,
             Math.Min(JusticeCustodyMaximumSentenceSeconds, finalSentence));
         JusticePolicy.TryRegisterOperation(_justiceCaseState, operation);
         JusticeMarkStateDirty();
-        if (!JusticeFlushStateNow())
+        bool outcomePersisted = !intent.DebitAttempted &&
+            intent.Resolution == JusticePaymentResolution.Rejected
+                ? PersistJusticeFinancialOutcomeWithoutEffect("FineDebit")
+                : JusticeFlushStateNow();
+        if (!outcomePersisted)
         {
             return false;
         }
@@ -2508,6 +2602,35 @@ public sealed partial class DonJEnemySpawner
             _justicePoliceDispatchDisabled ||
             _justicePoliceSuppressionActive ||
             _justicePoliceSuppressionRestorePending;
+        if (suppress && _justicePoliceIntegrationMode ==
+                JusticePoliceIntegrationMode.Disabled)
+        {
+            if (restorationWasTracked)
+            {
+                SetJusticeCustodyPoliceSuppression(false);
+            }
+            return;
+        }
+        if (suppress && !CanJusticeMutateGlobalPoliceState())
+        {
+            // Une mission, une cinématique ou un changement de héros peut déjà
+            // posséder ces flags globaux. Je rends d'abord notre dernière écriture.
+            if (restorationWasTracked)
+            {
+                SetJusticeCustodyPoliceSuppression(false);
+            }
+            return;
+        }
+        if (suppress &&
+            _justicePoliceIntegrationMode ==
+                JusticePoliceIntegrationMode.FreeroamBestEffort &&
+            _justicePoliceIgnoreApplied && _justicePoliceDispatchDisabled &&
+            !_justicePoliceSuppressionRestorePending)
+        {
+            // Le mode par défaut applique une fois puis laisse les autres mods
+            // reprendre la main; seul Force réaffirme les natives au cadenceur.
+            return;
+        }
         if (suppress &&
             (!_justicePoliceIgnoreApplied || !_justicePoliceDispatchDisabled))
         {
@@ -2627,8 +2750,7 @@ public sealed partial class DonJEnemySpawner
     private void RetryJusticePoliceSuppressionRestore(Ped player, int now)
     {
         if (!_justicePoliceSuppressionRestorePending || !Entity.Exists(player) || player.IsDead ||
-            !JusticeCustodyHasReached(now, _justiceNextPoliceSuppressionRestoreAt) ||
-            IsJusticeRuntimeSuspended(player))
+            !JusticeCustodyHasReached(now, _justiceNextPoliceSuppressionRestoreAt))
         {
             return;
         }
@@ -2637,6 +2759,113 @@ public sealed partial class DonJEnemySpawner
             now,
             JusticeCustodyPoliceSuppressionIntervalMs);
         SetJusticeCustodyPoliceSuppression(false);
+    }
+
+    private bool CanJusticeMutateGlobalPoliceState()
+    {
+        Ped player = Game.Player.Character;
+        return Entity.Exists(player) && !player.IsDead &&
+               _justiceCaseState != null &&
+               _justiceCaseState.Phase == JusticePhase.Incarcerated &&
+               !_justiceCustodyTransferPending && !_justiceCustodyResumePending &&
+               IsJusticeCustodyPlayerIdentityCompatible(player) &&
+               !IsJusticeRuntimeSuspended(player);
+    }
+
+    private string GetJusticePoliceIntegrationModeDisplay()
+    {
+        switch (_justicePoliceIntegrationMode)
+        {
+            case JusticePoliceIntegrationMode.Disabled:
+                return "Désactivée";
+            case JusticePoliceIntegrationMode.Force:
+                return "Forcée (jeu libre)";
+            default:
+                return "Jeu libre · best-effort";
+        }
+    }
+
+    private void CycleJusticePoliceIntegrationMode(int direction)
+    {
+        int count = Enum.GetValues(typeof(JusticePoliceIntegrationMode)).Length;
+        int next = ((int)_justicePoliceIntegrationMode +
+                    (direction < 0 ? -1 : 1) + count) % count;
+        JusticePoliceIntegrationMode selected =
+            (JusticePoliceIntegrationMode)next;
+        if (selected == _justicePoliceIntegrationMode)
+        {
+            return;
+        }
+
+        _justicePoliceIntegrationMode = selected;
+        if (selected == JusticePoliceIntegrationMode.Disabled)
+        {
+            SetJusticeCustodyPoliceSuppression(false);
+        }
+        JusticeMarkStateDirty();
+        JusticeFlushStateNow();
+        ShowStatus(
+            "Justice · intégration police : " +
+            GetJusticePoliceIntegrationModeDisplay() + ".",
+            4200);
+    }
+
+    private void RecoverJusticeControlsAndInventoryFromMenu()
+    {
+        Ped player = Game.Player.Character;
+        bool inventoryRestored = false;
+        bool hasSnapshot = ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
+        if (hasSnapshot && Entity.Exists(player) && !player.IsDead &&
+            IsJusticeCustodyPlayerIdentityCompatible(player))
+        {
+            // Le merge ne supprime aucune arme : cette commande de diagnostic ne
+            // peut donc jamais aggraver un inventaire déjà partiellement restauré.
+            inventoryRestored = RestoreJusticeWeaponSnapshotMergeSafe(
+                player,
+                true,
+                true);
+            if (inventoryRestored)
+            {
+                _justiceDeferredInventoryRestore = true;
+                _justiceInventoryRemoved = false;
+                _justiceInventoryCustodyState =
+                    JusticeInventoryCustodyState.RestorePending;
+                _justiceNextDeferredInventoryRestoreAt = 0;
+                CommitJusticeDeferredInventoryRestore();
+            }
+            else
+            {
+                _justiceDeferredInventoryRestore = true;
+                _justiceInventoryCustodyState =
+                    JusticeInventoryCustodyState.RestoreAmbiguous;
+                _justiceNextDeferredInventoryRestoreAt = JusticeCustodyFutureTime(
+                    Game.GameTime,
+                    JusticeCustodyDeferredRestoreRetryMs);
+            }
+        }
+        else if (!hasSnapshot)
+        {
+            _justiceInventoryCustodyState =
+                JusticeInventoryCustodyState.UnsupportedPreserved;
+        }
+
+        _justiceWeaponControlsLocked = false;
+        _justiceNextInventoryPersistenceRetryAt = 0;
+        EnsureJusticeCustodyPlayerMobility(player);
+        SetJusticeCustodyPoliceSuppression(false);
+        SelectJusticeUnarmedSafe(player);
+        JusticeMarkStateDirty();
+        JusticeFlushStateNow();
+        LogWarning(
+            "Justice.Diagnostic",
+            inventoryRestored
+                ? "Récupération manuelle : contrôles, police et inventaire fusionné."
+                : "Récupération manuelle : contrôles et police restaurés, aucun retrait effectué.");
+        ShowStatus(
+            inventoryRestored
+                ? "Justice : inventaire et contrôles restaurés."
+                : "Justice : contrôles libérés; snapshot conservé si disponible.",
+            5000);
     }
 
     private bool TryJusticeEmergencyTeleport(
@@ -2845,15 +3074,36 @@ public sealed partial class DonJEnemySpawner
         // Je retire aussi toute arme ramassée pendant la détention. L'intention
         // de confiscation est déjà persistée, et l'identité du joueur a été
         // validée avant d'entrer dans cette branche.
+        bool preserveAmbiguousInventoryRecovery = false;
         if (Entity.Exists(player) && IsJusticeCustodyPlayerIdentityCompatible(player))
         {
-            if (!RemoveJusticePlayerWeaponsSafe(player))
+            JusticeInventoryRemovalResult removalResult =
+                ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot)
+                    ? RemoveJusticePlayerWeaponsSafe(player)
+                    : JusticeInventoryRemovalResult.NotAttempted;
+            if (removalResult == JusticeInventoryRemovalResult.EffectMayHaveApplied)
             {
-                _justiceInventoryRemoved = true;
-                _justiceWeaponControlsLocked = true;
-                _justiceEscapePersistenceRetryAt = JusticeCustodyFutureTime(now, 1000);
-                ShowStatus("Évasion en attente : confiscation des armes à retenter…", 2200);
-                return;
+                RegisterJusticeInventoryRemovalFailure(removalResult, now);
+                preserveAmbiguousInventoryRecovery = true;
+                ShowStatus(
+                    "Évasion : confiscation non vérifiable, restitution du snapshot planifiée.",
+                    4200);
+            }
+            else if (removalResult != JusticeInventoryRemovalResult.RemovedVerified)
+            {
+                if (!RegisterJusticeEscapeInventoryRemovalFailure(now))
+                {
+                    _justiceEscapePersistenceRetryAt = JusticeCustodyFutureTime(now, 1000);
+                    ShowStatus("Évasion en attente : confiscation des armes à retenter…", 2200);
+                    return;
+                }
+
+                // Après la borne, je termine l'évasion sans mentir sur RemoveAll :
+                // les armes et les contrôles restent au joueur, puis le mandat
+                // fugitif prend le relais sans créer de soft-lock permanent.
+                ShowStatus(
+                    "Évasion : inventaire préservé après échec de confiscation; mandat maintenu.",
+                    4200);
             }
         }
 
@@ -2865,7 +3115,11 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        _justiceWeaponSnapshot = null;
+        if (!preserveAmbiguousInventoryRecovery)
+        {
+            _justiceWeaponSnapshot = null;
+            _justiceInventoryCustodyState = JusticeInventoryCustodyState.None;
+        }
         _justiceInventoryRemoved = false;
         _justiceWeaponControlsLocked = false;
         _justiceNextInventoryPersistenceRetryAt = 0;
@@ -2884,7 +3138,7 @@ public sealed partial class DonJEnemySpawner
             _justiceCaseState,
             _justiceCaseState.CustodyEpisodeId);
         _justiceCaseState.CustodyEpisodeId = string.Empty;
-        ResetJusticeCustodyPersistentFields(false);
+        ResetJusticeCustodyPersistentFields(preserveAmbiguousInventoryRecovery);
         JusticeMarkStateDirty();
         if (JusticeFlushStateNow())
         {
@@ -2893,6 +3147,34 @@ public sealed partial class DonJEnemySpawner
             RetryJusticeEscapeWantedMinimum(GetJusticeWantedLevelSafe());
         }
         LogInfo("Justice.Evasion", "Évasion confirmée après sortie continue de la zone autorisée.");
+    }
+
+    private bool RegisterJusticeEscapeInventoryRemovalFailure(int now)
+    {
+        _justiceInventoryRemovalFailureCount = Math.Min(
+            JusticeCustodyInventoryRemovalMaximumAttempts,
+            _justiceInventoryRemovalFailureCount + 1);
+        _justiceInventoryRemoved = false;
+        _justiceWeaponControlsLocked = false;
+
+        bool fallbackRequired =
+            _justiceInventoryRemovalFailureCount >=
+                JusticeCustodyInventoryRemovalMaximumAttempts ||
+            !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
+        _justiceInventoryCustodyState = fallbackRequired
+            ? JusticeInventoryCustodyState.UnsupportedPreserved
+            : JusticeInventoryCustodyState.RemovalPending;
+        _justiceNextInventoryPersistenceRetryAt = fallbackRequired
+            ? 0
+            : JusticeCustodyFutureTime(now, 1000);
+        JusticeMarkStateDirty();
+        if (fallbackRequired)
+        {
+            LogWarning(
+                "Justice.Inventaire",
+                "Confiscation d'évasion abandonnée après la borne; inventaire et contrôles préservés.");
+        }
+        return fallbackRequired;
     }
 
     private void CompleteJusticeLegalRelease(Ped player)
@@ -3449,7 +3731,36 @@ public sealed partial class DonJEnemySpawner
         return true;
     }
 
-    private void PrepareJusticeInventoryConfiscation(Ped player)
+    private JusticeInventoryPreparationResult EnsureJusticeInventoryReadyForCustodyTransfer(
+        Ped player,
+        int now)
+    {
+        if (_justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.RemovedVerified &&
+            _justiceInventoryRemoved &&
+            ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
+        {
+            // Après un reload, je réapplique le retrait idempotent avant le
+            // téléport. Une restitution provisoire d'OnAborted ne fuit pas en prison.
+            JusticeInventoryRemovalResult removalResult =
+                RemoveJusticePlayerWeaponsSafe(player);
+            if (removalResult == JusticeInventoryRemovalResult.RemovedVerified)
+            {
+                return JusticeInventoryPreparationResult.Ready;
+            }
+
+            return RegisterJusticeInventoryRemovalFailure(removalResult, now);
+        }
+
+        if (ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
+        {
+            return RetryJusticeInventoryConfiscationIfDue(player, now);
+        }
+
+        return PrepareJusticeInventoryConfiscation(player);
+    }
+
+    private JusticeInventoryPreparationResult PrepareJusticeInventoryConfiscation(Ped player)
     {
         JusticeWeaponSnapshot snapshot;
         if (!TryCaptureJusticeWeaponSnapshot(player, out snapshot) ||
@@ -3457,89 +3768,218 @@ public sealed partial class DonJEnemySpawner
         {
             _justiceWeaponSnapshot = null;
             _justiceInventoryRemoved = false;
-            _justiceWeaponControlsLocked = true;
-            _justiceNextInventoryPersistenceRetryAt = 0;
-            SelectJusticeUnarmedSafe(player);
+            _justiceWeaponControlsLocked = false;
+            _justiceInventoryCaptureFailureCount++;
+            bool unsupported = _justiceInventoryCaptureFailureCount >=
+                JusticeCustodyInventoryCaptureMaximumAttempts;
+            _justiceInventoryCustodyState = unsupported
+                ? JusticeInventoryCustodyState.UnsupportedPreserved
+                : JusticeInventoryCustodyState.CapturePending;
+            _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(
+                Game.GameTime,
+                unsupported ? 0 : 1000);
+            JusticeMarkStateDirty();
             LogWarning(
                 "Justice.Inventaire",
-                "Snapshot non validable : inventaire préservé et contrôles d'arme bloqués.");
-            return;
+                unsupported
+                    ? "Inventaire incompatible après trois essais : aucune arme retirée, fallback non destructif."
+                    : "Snapshot momentanément indisponible : inventaire et contrôles préservés avant retry.");
+            return unsupported
+                ? JusticeInventoryPreparationResult.UnsupportedLoadout
+                : JusticeInventoryPreparationResult.RetryableFailure;
         }
 
         _justiceWeaponSnapshot = snapshot;
-        _justiceInventoryRemoved = true;
+        _justiceInventoryCaptureFailureCount = 0;
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.SnapshotPersisted;
+        _justiceInventoryRemoved = false;
         _justiceWeaponControlsLocked = false;
-        JusticeOperation operation = CreateJusticeCustodyOperation(JusticeOperationKind.ConfiscateInventory);
+        JusticeOperation operation =
+            CreateJusticeCustodyOperation(JusticeOperationKind.ConfiscateInventory);
         JusticePolicy.TryRegisterOperation(_justiceCaseState, operation);
         JusticeMarkStateDirty();
 
         if (!PersistJusticeCriticalPrecommitRedundantly())
         {
-            _justiceCaseState.CompletedOperationIds.Remove(operation.OperationId);
-            _justiceInventoryRemoved = false;
-            _justiceWeaponControlsLocked = true;
-            _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(Game.GameTime, 5000);
+            _justiceNextInventoryPersistenceRetryAt =
+                JusticeCustodyFutureTime(Game.GameTime, 100);
             JusticeMarkStateDirty();
-            SelectJusticeUnarmedSafe(player);
             LogWarning(
                 "Justice.Inventaire",
-                "Snapshot non persisté : aucun retrait destructif n'a été effectué.");
-            return;
+                "Snapshot en attente de confirmation disque : aucun retrait destructif n'a été effectué.");
+            return JusticeInventoryPreparationResult.RetryableFailure;
         }
 
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.RemovalPending;
         _justiceNextInventoryPersistenceRetryAt = 0;
-        if (!RemoveJusticePlayerWeaponsSafe(player))
+        JusticeInventoryRemovalResult removalResult =
+            RemoveJusticePlayerWeaponsSafe(player);
+        if (removalResult != JusticeInventoryRemovalResult.RemovedVerified)
         {
-            _justiceWeaponControlsLocked = true;
-            _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(Game.GameTime, 1000);
-            LogWarning("Justice.Inventaire", "Confiscation refusée par GTA; retry sécurisé actif.");
+            LogWarning(
+                "Justice.Inventaire",
+                removalResult == JusticeInventoryRemovalResult.EffectMayHaveApplied
+                    ? "Confiscation non vérifiable : snapshot conservé pour restitution différée."
+                    : "Confiscation refusée par GTA; le joueur reste hors prison avec ses contrôles.");
+            return RegisterJusticeInventoryRemovalFailure(
+                removalResult,
+                Game.GameTime);
         }
+
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.RemovedVerified;
+        _justiceInventoryRemoved = true;
+        _justiceWeaponControlsLocked = false;
+        _justiceInventoryRemovalFailureCount = 0;
+        JusticeMarkStateDirty();
+        return JusticeInventoryPreparationResult.Ready;
     }
 
-    private void RetryJusticeInventoryConfiscationIfDue(Ped player, int now)
+    private JusticeInventoryPreparationResult RetryJusticeInventoryConfiscationIfDue(
+        Ped player,
+        int now)
     {
-        if (!_justiceWeaponControlsLocked ||
-            !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot) ||
-            !JusticeCustodyHasReached(now, _justiceNextInventoryPersistenceRetryAt))
+        if (!ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
         {
-            return;
+            _justiceInventoryCustodyState = JusticeInventoryCustodyState.UnsupportedPreserved;
+            _justiceInventoryRemoved = false;
+            _justiceWeaponControlsLocked = false;
+            return JusticeInventoryPreparationResult.UnsupportedLoadout;
+        }
+        if (!JusticeCustodyHasReached(now, _justiceNextInventoryPersistenceRetryAt))
+        {
+            return JusticeInventoryPreparationResult.RetryableFailure;
+        }
+        if (_justiceInventoryRemovalFailureCount >=
+            JusticeCustodyInventoryRemovalMaximumAttempts)
+        {
+            _justiceInventoryCustodyState = JusticeInventoryCustodyState.UnsupportedPreserved;
+            _justiceInventoryRemoved = false;
+            _justiceWeaponControlsLocked = false;
+            return JusticeInventoryPreparationResult.UnsupportedLoadout;
         }
 
-        JusticeOperation operation = CreateJusticeCustodyOperation(JusticeOperationKind.ConfiscateInventory);
-        JusticePolicy.TryRegisterOperation(_justiceCaseState, operation);
-        _justiceInventoryRemoved = true;
+        JusticeOperation operation =
+            CreateJusticeCustodyOperation(JusticeOperationKind.ConfiscateInventory);
+        if (!HasJusticeOperation(operation.Kind, operation.EpisodeId))
+        {
+            JusticePolicy.TryRegisterOperation(_justiceCaseState, operation);
+        }
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.SnapshotPersisted;
+        _justiceInventoryRemoved = false;
+        _justiceWeaponControlsLocked = false;
         JusticeMarkStateDirty();
         if (!PersistJusticeCriticalPrecommitRedundantly())
         {
-            _justiceCaseState.CompletedOperationIds.Remove(operation.OperationId);
-            _justiceInventoryRemoved = false;
-            _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(now, 5000);
-            return;
+            _justiceNextInventoryPersistenceRetryAt =
+                JusticeCustodyFutureTime(now, 100);
+            return JusticeInventoryPreparationResult.RetryableFailure;
         }
 
-        _justiceWeaponControlsLocked = false;
-        _justiceNextInventoryPersistenceRetryAt = 0;
-        if (!RemoveJusticePlayerWeaponsSafe(player))
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.RemovalPending;
+        JusticeInventoryRemovalResult removalResult =
+            RemoveJusticePlayerWeaponsSafe(player);
+        if (removalResult != JusticeInventoryRemovalResult.RemovedVerified)
         {
-            _justiceWeaponControlsLocked = true;
-            _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(now, 1000);
-            return;
+            return RegisterJusticeInventoryRemovalFailure(removalResult, now);
         }
+
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.RemovedVerified;
+        _justiceInventoryRemoved = true;
+        _justiceWeaponControlsLocked = false;
+        _justiceInventoryRemovalFailureCount = 0;
+        _justiceNextInventoryPersistenceRetryAt = 0;
+        JusticeMarkStateDirty();
         LogInfo("Justice.Inventaire", "Snapshot persisté au retry, confiscation appliquée.");
+        return JusticeInventoryPreparationResult.Ready;
     }
 
-    private bool PersistJusticeCriticalPrecommitRedundantly()
+    private JusticeInventoryPreparationResult RegisterJusticeInventoryRemovalFailure(
+        JusticeInventoryRemovalResult removalResult,
+        int now)
     {
-        if (!JusticeFlushStateNow())
+        _justiceInventoryRemoved = false;
+        _justiceWeaponControlsLocked = false;
+
+        if (removalResult == JusticeInventoryRemovalResult.EffectMayHaveApplied)
         {
-            return false;
+            if (!ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
+            {
+                // Ce cas est fermé par RemoveJusticePlayerWeaponsSafe, mais je
+                // refuse tout de même de le dégrader en UnsupportedPreserved.
+                _justiceInventoryCustodyState =
+                    JusticeInventoryCustodyState.RemovalPending;
+                _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(
+                    now,
+                    1000);
+                JusticeMarkStateDirty();
+                return JusticeInventoryPreparationResult.RetryableFailure;
+            }
+
+            // Je ne prétends jamais que l'inventaire est préservé après un
+            // RemoveAll potentiellement exécuté. Le snapshot durable devient la
+            // preuve de restitution et le merge pourra être rejoué sans supprimer.
+            _justiceDeferredInventoryRestore = true;
+            _justiceInventoryCustodyState =
+                JusticeInventoryCustodyState.RestoreAmbiguous;
+            _justiceInventoryRemovalFailureCount = 0;
+            _justiceNextInventoryPersistenceRetryAt = 0;
+            _justiceNextDeferredInventoryRestoreAt = JusticeCustodyFutureTime(
+                now,
+                JusticeCustodyDeferredRestoreRetryMs);
+            JusticeMarkStateDirty();
+            return JusticeInventoryPreparationResult.UnsupportedLoadout;
         }
 
-        // Je force une seconde écriture identique avant tout effet externe : le
-        // primaire et son .bak portent alors tous deux l'intention validée. Une
-        // corruption ultérieure ne peut ni perdre un snapshot, ni rejouer un débit.
+        _justiceInventoryRemovalFailureCount = Math.Min(
+            JusticeCustodyInventoryRemovalMaximumAttempts,
+            _justiceInventoryRemovalFailureCount + 1);
+        bool unsupported = _justiceInventoryRemovalFailureCount >=
+            JusticeCustodyInventoryRemovalMaximumAttempts;
+        _justiceInventoryCustodyState = unsupported
+            ? JusticeInventoryCustodyState.UnsupportedPreserved
+            : JusticeInventoryCustodyState.RemovalPending;
+        _justiceNextInventoryPersistenceRetryAt = unsupported
+            ? 0
+            : JusticeCustodyFutureTime(now, 1000);
         JusticeMarkStateDirty();
-        return JusticeFlushStateNow();
+        return unsupported
+            ? JusticeInventoryPreparationResult.UnsupportedLoadout
+            : JusticeInventoryPreparationResult.RetryableFailure;
+    }
+
+    private void EnterJusticeNonDestructiveCustodyFallback(Ped player, int now)
+    {
+        bool ambiguousRestorePending =
+            _justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.RestoreAmbiguous &&
+            _justiceDeferredInventoryRestore &&
+            ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
+        if (!ambiguousRestorePending)
+        {
+            _justiceInventoryCustodyState =
+                JusticeInventoryCustodyState.UnsupportedPreserved;
+        }
+        _justiceInventoryRemoved = false;
+        _justiceWeaponControlsLocked = false;
+        _justiceNextInventoryPersistenceRetryAt = 0;
+        JusticeMarkStateDirty();
+        ShowStatus(
+            ambiguousRestorePending
+                ? "Justice : vérification de confiscation ambiguë, restitution différée sous mandat."
+                : "Justice : inventaire incompatible, remise en liberté technique sous mandat.",
+            5500);
+        if (!TryRollbackJusticeCustodyTransfer(player, now))
+        {
+            EnsureJusticeCustodyPlayerMobility(player);
+        }
+    }
+
+    private bool PersistJusticeCriticalPrecommitRedundantly(
+        [CallerMemberName] string caller = "")
+    {
+        // Je laisse le writer confirmer le snapshot complet sans bloquer GTA,
+        // puis je rends seulement les petites frames WAL durables sur ce thread.
+        return PersistJusticeCriticalPrecommitToWal(caller);
     }
 
     private bool TryCaptureJusticeWeaponSnapshot(Ped player, out JusticeWeaponSnapshot snapshot)
@@ -3847,15 +4287,20 @@ public sealed partial class DonJEnemySpawner
         return selectedIsPresent;
     }
 
-    private bool RemoveJusticePlayerWeaponsSafe(Ped player)
+    private JusticeInventoryRemovalResult RemoveJusticePlayerWeaponsSafe(Ped player)
     {
-        if (!Entity.Exists(player))
+        if (!Entity.Exists(player) ||
+            !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
         {
-            return false;
+            return JusticeInventoryRemovalResult.NotAttempted;
         }
 
+        bool effectMayHaveApplied = false;
         try
         {
+            // Je marque l'effet avant l'appel : une exception native peut remonter
+            // après que GTA a déjà retiré les armes.
+            effectMayHaveApplied = true;
             Function.Call(Hash.REMOVE_ALL_PED_WEAPONS, player.Handle, true);
             Function.Call(Hash.SET_CURRENT_PED_WEAPON, player.Handle, JusticeUnarmedHash, true);
         }
@@ -3865,18 +4310,26 @@ public sealed partial class DonJEnemySpawner
 
         if (VerifyJusticePlayerHasNoWeapons(player))
         {
-            return true;
+            return JusticeInventoryRemovalResult.RemovedVerified;
         }
 
         try
         {
+            effectMayHaveApplied = true;
             player.Weapons.RemoveAll();
             Function.Call(Hash.SET_CURRENT_PED_WEAPON, player.Handle, JusticeUnarmedHash, true);
         }
         catch
         {
         }
-        return VerifyJusticePlayerHasNoWeapons(player);
+        if (VerifyJusticePlayerHasNoWeapons(player))
+        {
+            return JusticeInventoryRemovalResult.RemovedVerified;
+        }
+
+        return effectMayHaveApplied
+            ? JusticeInventoryRemovalResult.EffectMayHaveApplied
+            : JusticeInventoryRemovalResult.NotAttempted;
     }
 
     private bool VerifyJusticePlayerHasNoWeapons(Ped player)
@@ -3971,6 +4424,44 @@ public sealed partial class DonJEnemySpawner
         SelectJusticeUnarmedSafe(player);
     }
 
+    private void RepairJusticeOrphanedCustodyControls(Ped player)
+    {
+        if (!_justiceWeaponControlsLocked)
+        {
+            return;
+        }
+
+        bool validOwner = JusticeIsCustodyActive &&
+            ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot) &&
+            IsJusticeCustodyPlayerIdentityCompatible(player);
+        if (validOwner)
+        {
+            return;
+        }
+
+        // Je ne retire jamais d'arme dans ce chemin de secours. Je libère le
+        // combat et conserve tout snapshot valide pour une restitution ultérieure.
+        _justiceWeaponControlsLocked = false;
+        _justiceInventoryRemoved = false;
+        bool hasRecoverySnapshot = ValidateJusticeWeaponSnapshot(
+            _justiceWeaponSnapshot);
+        _justiceDeferredInventoryRestore = hasRecoverySnapshot;
+        _justiceInventoryCustodyState = hasRecoverySnapshot
+            ? JusticeInventoryCustodyState.RestoreAmbiguous
+            : JusticeInventoryCustodyState.UnsupportedPreserved;
+        _justiceNextDeferredInventoryRestoreAt = hasRecoverySnapshot
+            ? JusticeCustodyFutureTime(
+                Game.GameTime,
+                JusticeCustodyDeferredRestoreRetryMs)
+            : 0;
+        _justiceNextInventoryPersistenceRetryAt = 0;
+        SelectJusticeUnarmedSafe(player);
+        JusticeMarkStateDirty();
+        LogWarning(
+            "Justice.Inventaire",
+            "Verrou de contrôles orphelin libéré sans suppression d'arme.");
+    }
+
     private bool RestoreJusticeWeaponSnapshot(Ped player)
     {
         if (!Entity.Exists(player) || !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
@@ -3981,7 +4472,8 @@ public sealed partial class DonJEnemySpawner
         // Je repars d'un inventaire vide afin qu'une reprise soit idempotente,
         // puis j'isole chaque arme et chaque composant : une entrée refusée par
         // GTA ne doit jamais empêcher la restitution des autres éléments.
-        if (!RemoveJusticePlayerWeaponsSafe(player))
+        if (RemoveJusticePlayerWeaponsSafe(player) !=
+            JusticeInventoryRemovalResult.RemovedVerified)
         {
             return false;
         }
@@ -4090,6 +4582,8 @@ public sealed partial class DonJEnemySpawner
                         _justiceDeferredInventoryRestore = true;
                         _justiceInventoryRemoved = false;
                         _justiceWeaponControlsLocked = false;
+                        _justiceInventoryCustodyState =
+                            JusticeInventoryCustodyState.RestorePending;
                         _justiceNextDeferredInventoryRestoreAt = JusticeCustodyFutureTime(
                             now,
                             JusticeCustodyDeferredRestoreRetryMs);
@@ -4098,6 +4592,8 @@ public sealed partial class DonJEnemySpawner
                         {
                             _justiceInventoryRemoved = true;
                             _justiceWeaponControlsLocked = true;
+                            _justiceInventoryCustodyState =
+                                JusticeInventoryCustodyState.RemovedVerified;
                             return false;
                         }
 
@@ -4125,6 +4621,9 @@ public sealed partial class DonJEnemySpawner
         _justiceInventoryRemoved = false;
         _justiceWeaponControlsLocked = false;
         _justiceNextInventoryPersistenceRetryAt = 0;
+        _justiceInventoryCustodyState = _justiceDeferredInventoryRestore
+            ? JusticeInventoryCustodyState.RestorePending
+            : JusticeInventoryCustodyState.None;
         JusticeMarkStateDirty();
         return true;
     }
@@ -4136,7 +4635,8 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        if (!RemoveJusticePlayerWeaponsSafe(player))
+        if (RemoveJusticePlayerWeaponsSafe(player) !=
+            JusticeInventoryRemovalResult.RemovedVerified)
         {
             return false;
         }
@@ -4250,6 +4750,7 @@ public sealed partial class DonJEnemySpawner
         _justiceWeaponSnapshot = null;
         _justiceInventoryRemoved = false;
         _justiceWeaponControlsLocked = false;
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.None;
         _justiceNextDeferredInventoryRestoreAt = 0;
         _justiceCustodyPlayerHandle = 0;
         _justiceCustodyPlayerModelHash = 0;
@@ -4266,6 +4767,7 @@ public sealed partial class DonJEnemySpawner
         _justiceWeaponSnapshot = restoredSnapshot;
         _justiceInventoryRemoved = false;
         _justiceWeaponControlsLocked = false;
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.RestorePending;
         _justiceCustodyPlayerHandle = restoredPlayerHandle;
         _justiceCustodyPlayerModelHash = restoredModelHash;
         _justiceCustodyPlayerSlot = restoredPlayerSlot;
@@ -6062,6 +6564,17 @@ public sealed partial class DonJEnemySpawner
         writer.WriteAttributeString("inventoryRemoved", _justiceInventoryRemoved ? "true" : "false");
         writer.WriteAttributeString("weaponControlsLocked", _justiceWeaponControlsLocked ? "true" : "false");
         writer.WriteAttributeString(
+            "inventoryState",
+            ((int)_justiceInventoryCustodyState).ToString(CultureInfo.InvariantCulture));
+        writer.WriteAttributeString(
+            "inventoryCaptureFailures",
+            Math.Max(0, _justiceInventoryCaptureFailureCount).ToString(
+                CultureInfo.InvariantCulture));
+        writer.WriteAttributeString(
+            "inventoryRemovalFailures",
+            Math.Max(0, _justiceInventoryRemovalFailureCount).ToString(
+                CultureInfo.InvariantCulture));
+        writer.WriteAttributeString(
             "deferredInventoryRestore",
             _justiceDeferredInventoryRestore ? "true" : "false");
         writer.WriteAttributeString("waitingForRespawn", _justiceCustodyWaitingForRespawn ? "true" : "false");
@@ -6100,6 +6613,81 @@ public sealed partial class DonJEnemySpawner
         WriteJusticeWeaponSnapshotXml(writer);
         WriteJusticeActivityCooldownsXml(writer);
         writer.WriteEndElement();
+    }
+
+    private void MigrateLegacyJusticeInventoryCustodyState()
+    {
+        bool hasSnapshot = ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
+        if (_justiceDeferredInventoryRestore && hasSnapshot)
+        {
+            _justiceInventoryCustodyState = JusticeInventoryCustodyState.RestorePending;
+            _justiceInventoryRemoved = false;
+            _justiceWeaponControlsLocked = false;
+            return;
+        }
+        if (_justiceInventoryRemoved && hasSnapshot)
+        {
+            _justiceInventoryCustodyState = JusticeInventoryCustodyState.RemovedVerified;
+            _justiceWeaponControlsLocked = false;
+            return;
+        }
+        if (_justiceWeaponControlsLocked && hasSnapshot)
+        {
+            // L'ancien format pouvait recharger un retrait précommité. Je le
+            // reprends hors prison sans bloquer le combat avant la vérification.
+            _justiceInventoryCustodyState = JusticeInventoryCustodyState.RemovalPending;
+            _justiceInventoryRemoved = false;
+            _justiceWeaponControlsLocked = false;
+            return;
+        }
+        if (_justiceWeaponControlsLocked && !hasSnapshot)
+        {
+            // Je répare explicitement l'état v1 non récupérable relevé par l'audit.
+            _justiceInventoryCustodyState = JusticeInventoryCustodyState.UnsupportedPreserved;
+            _justiceInventoryRemoved = false;
+            _justiceWeaponControlsLocked = false;
+            return;
+        }
+        if (hasSnapshot)
+        {
+            _justiceInventoryCustodyState = JusticeInventoryCustodyState.SnapshotPersisted;
+            return;
+        }
+
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.None;
+    }
+
+    private bool ValidateJusticeInventoryCustodyStateInvariant()
+    {
+        bool hasSnapshot = ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
+        switch (_justiceInventoryCustodyState)
+        {
+            case JusticeInventoryCustodyState.None:
+                return !_justiceInventoryRemoved && !_justiceWeaponControlsLocked &&
+                       !hasSnapshot;
+
+            case JusticeInventoryCustodyState.CapturePending:
+                return !_justiceInventoryRemoved && !_justiceWeaponControlsLocked &&
+                       !hasSnapshot;
+
+            case JusticeInventoryCustodyState.SnapshotPersisted:
+            case JusticeInventoryCustodyState.RemovalPending:
+                return hasSnapshot && !_justiceInventoryRemoved &&
+                       !_justiceWeaponControlsLocked;
+
+            case JusticeInventoryCustodyState.RemovedVerified:
+                return hasSnapshot && _justiceInventoryRemoved;
+
+            case JusticeInventoryCustodyState.UnsupportedPreserved:
+                return !_justiceInventoryRemoved && !_justiceWeaponControlsLocked;
+
+            case JusticeInventoryCustodyState.RestorePending:
+            case JusticeInventoryCustodyState.RestoreAmbiguous:
+                return hasSnapshot && !_justiceWeaponControlsLocked;
+
+            default:
+                return false;
+        }
     }
 
     private static bool IsJusticeCustodyXmlSemanticallyValid(
@@ -6142,6 +6730,10 @@ public sealed partial class DonJEnemySpawner
         int playerModelHash;
         int playerSlot;
         int releaseSelectedWeaponHash;
+        int inventoryStateValue;
+        int inventoryCaptureFailures;
+        int inventoryRemovalFailures;
+        bool hasInventoryState = custody.HasAttribute("inventoryState");
         bool hasAnyPlayerStateAttribute =
             custody.HasAttribute("playerStateStored") ||
             custody.HasAttribute("storedInvincible") ||
@@ -6193,6 +6785,27 @@ public sealed partial class DonJEnemySpawner
                  out activityReduction) ||
              !TryReadJusticeBoolStrict(custody, "inventoryRemoved", false, out inventoryRemoved) ||
             !TryReadJusticeBoolStrict(custody, "weaponControlsLocked", false, out weaponControlsLocked) ||
+            !TryReadJusticeIntStrict(
+                custody,
+                "inventoryState",
+                -1,
+                -1,
+                (int)JusticeInventoryCustodyState.RestoreAmbiguous,
+                out inventoryStateValue) ||
+            !TryReadJusticeIntStrict(
+                custody,
+                "inventoryCaptureFailures",
+                0,
+                0,
+                JusticeCustodyInventoryCaptureMaximumAttempts,
+                out inventoryCaptureFailures) ||
+            !TryReadJusticeIntStrict(
+                custody,
+                "inventoryRemovalFailures",
+                0,
+                0,
+                JusticeCustodyInventoryRemovalMaximumAttempts,
+                out inventoryRemovalFailures) ||
             !TryReadJusticeBoolStrict(
                 custody,
                 "deferredInventoryRestore",
@@ -6266,6 +6879,13 @@ public sealed partial class DonJEnemySpawner
             (disciplineIntent != null &&
              !IsJusticeDisciplineIntentWalConsistent(caseState, recordState, disciplineIntent)) ||
             !AreJusticeActivityCooldownsSemanticallyValid(cooldownContainers, site) ||
+            (hasInventoryState &&
+             !IsJusticeInventoryCustodyStateSemanticallyValid(
+                 (JusticeInventoryCustodyState)inventoryStateValue,
+                 inventoryRemoved,
+                 weaponControlsLocked,
+                 deferredInventoryRestore,
+                 snapshot)) ||
             (inventoryRemoved && !ValidateJusticeWeaponSnapshot(snapshot)) ||
             (deferredInventoryRestore &&
              (!ValidateJusticeWeaponSnapshot(snapshot) || inventoryRemoved || weaponControlsLocked)) ||
@@ -6347,6 +6967,43 @@ public sealed partial class DonJEnemySpawner
         return true;
     }
 
+    private static bool IsJusticeInventoryCustodyStateSemanticallyValid(
+        JusticeInventoryCustodyState state,
+        bool inventoryRemoved,
+        bool weaponControlsLocked,
+        bool deferredInventoryRestore,
+        JusticeWeaponSnapshot snapshot)
+    {
+        bool hasSnapshot = ValidateJusticeWeaponSnapshot(snapshot);
+        switch (state)
+        {
+            case JusticeInventoryCustodyState.None:
+            case JusticeInventoryCustodyState.CapturePending:
+                return !inventoryRemoved && !weaponControlsLocked &&
+                       !deferredInventoryRestore && !hasSnapshot;
+
+            case JusticeInventoryCustodyState.SnapshotPersisted:
+            case JusticeInventoryCustodyState.RemovalPending:
+                return hasSnapshot && !inventoryRemoved &&
+                       !weaponControlsLocked && !deferredInventoryRestore;
+
+            case JusticeInventoryCustodyState.RemovedVerified:
+                return hasSnapshot && inventoryRemoved && !deferredInventoryRestore;
+
+            case JusticeInventoryCustodyState.UnsupportedPreserved:
+                return !inventoryRemoved && !weaponControlsLocked &&
+                       !deferredInventoryRestore;
+
+            case JusticeInventoryCustodyState.RestorePending:
+            case JusticeInventoryCustodyState.RestoreAmbiguous:
+                return hasSnapshot && !inventoryRemoved &&
+                       !weaponControlsLocked && deferredInventoryRestore;
+
+            default:
+                return false;
+        }
+    }
+
     private static bool IsJusticeCustodyPhase(JusticePhase phase)
     {
         return phase == JusticePhase.Captured ||
@@ -6382,6 +7039,25 @@ public sealed partial class DonJEnemySpawner
             case JusticeCashWriteResult.Succeeded:
                 return actualSentence == sentenceIfDebited;
             case JusticeCashWriteResult.Rejected:
+                return actualSentence == sentenceIfConverted;
+            default:
+                return actualSentence == sentenceIfDebited ||
+                       actualSentence == sentenceIfConverted;
+        }
+    }
+
+    private static bool IsJusticeFineSentenceCompatibleWithResolution(
+        JusticePaymentResolution resolution,
+        int actualSentence,
+        int sentenceIfDebited,
+        int sentenceIfConverted)
+    {
+        switch (resolution)
+        {
+            case JusticePaymentResolution.Confirmed:
+            case JusticePaymentResolution.Ambiguous:
+                return actualSentence == sentenceIfDebited;
+            case JusticePaymentResolution.Rejected:
                 return actualSentence == sentenceIfConverted;
             default:
                 return actualSentence == sentenceIfDebited ||
@@ -6458,6 +7134,9 @@ public sealed partial class DonJEnemySpawner
         bool debitAttempted = !element.HasAttribute("debitAttempted");
         long attemptedAtUtcTicks = 0L;
         JusticeCashWriteResult cashWriteResult = JusticeCashWriteResult.Unknown;
+        JusticePaymentResolution resolution = JusticePaymentResolution.Prepared;
+        long fineInDisputeBefore = 0L;
+        long ambiguousAmount = 0L;
         if (!element.HasAttribute("episodeId") ||
             !TryReadJusticeIntStrict(element, "slot", -1, 0, 2, out slot) ||
             !TryReadJusticeLongStrict(element, "fineAmount", -1L, 1L, JusticePolicy.MaxActiveFine, out fineAmount) ||
@@ -6499,7 +7178,26 @@ public sealed partial class DonJEnemySpawner
                  0L,
                  DateTime.MaxValue.Ticks,
                  out attemptedAtUtcTicks) ||
-             !TryReadJusticeCashWriteResult(element, out cashWriteResult))
+             !TryReadJusticeCashWriteResult(element, out cashWriteResult) ||
+             !TryReadJusticePaymentResolution(
+                 element,
+                 debitAttempted,
+                 cashWriteResult,
+                 out resolution) ||
+             !TryReadJusticeLongStrict(
+                 element,
+                 "fineInDisputeBefore",
+                 0L,
+                 0L,
+                 JusticePolicy.MaxActiveFine,
+                 out fineInDisputeBefore) ||
+             !TryReadJusticeLongStrict(
+                 element,
+                 "ambiguousAmount",
+                 0L,
+                 0L,
+                 JusticePolicy.MaxActiveFine,
+                 out ambiguousAmount))
         {
             return null;
         }
@@ -6507,7 +7205,9 @@ public sealed partial class DonJEnemySpawner
         int expectedDebit = (int)Math.Min(fineAmount, (long)cashBefore);
         string operationId = JusticePolicy.CreateOperationId(JusticeOperationKind.ApplyFine, episodeId);
         bool operationCommitted = caseState.CompletedOperationIds.Contains(operationId);
-        bool matchesPrecommit = !operationCommitted && caseState.FineDue == fineAmount;
+        bool matchesPrecommit = !operationCommitted &&
+            caseState.FineDue == fineAmount &&
+            caseState.FineInDispute == fineInDisputeBefore;
         if (matchesPrecommit)
         {
             bool expectedStationPlanned = site == JusticeCustodySite.None
@@ -6525,11 +7225,17 @@ public sealed partial class DonJEnemySpawner
                     stationPlanned);
         }
         bool matchesCommitted = operationCommitted && caseState.FineDue == 0L &&
-            IsJusticeFineSentenceCompatibleWithCashWriteResult(
-                cashWriteResult,
+            IsJusticeFineSentenceCompatibleWithResolution(
+                resolution,
                 caseState.SentenceSeconds,
                 sentenceIfDebited,
-                sentenceIfConverted);
+                sentenceIfConverted) &&
+            caseState.FineInDispute == JusticePolicy.SaturatingAdd(
+                fineInDisputeBefore,
+                resolution == JusticePaymentResolution.Ambiguous
+                    ? ambiguousAmount
+                    : 0L,
+                JusticePolicy.MaxActiveFine);
         bool valid = episodeId.Length > 0 && debitAmount == expectedDebit &&
             debitAmount <= cashBefore && cashAfter == cashBefore - debitAmount &&
             sentenceIfConverted >= sentenceIfDebited &&
@@ -6540,6 +7246,11 @@ public sealed partial class DonJEnemySpawner
               sentenceIfDebited == sentenceIfConverted)) &&
             (debitAttempted || cashWriteResult == JusticeCashWriteResult.Unknown) &&
             (debitAttempted || attemptedAtUtcTicks == 0L) &&
+            (resolution != JusticePaymentResolution.Ambiguous ||
+             (debitAttempted && cashWriteResult == JusticeCashWriteResult.Unknown &&
+              ambiguousAmount == debitAmount)) &&
+            (resolution == JusticePaymentResolution.Ambiguous ||
+             ambiguousAmount == 0L) &&
             IsJusticeFineOperationEpisodeValid(caseState, episodeId) &&
             (matchesPrecommit || matchesCommitted);
         if (!valid)
@@ -6561,7 +7272,10 @@ public sealed partial class DonJEnemySpawner
             StationPlanned = stationPlanned,
             DebitAttempted = debitAttempted,
             AttemptedAtUtcTicks = attemptedAtUtcTicks,
-            CashWriteResult = cashWriteResult
+            CashWriteResult = cashWriteResult,
+            Resolution = resolution,
+            FineInDisputeBefore = fineInDisputeBefore,
+            AmbiguousAmount = ambiguousAmount
         };
     }
 
@@ -6646,6 +7360,15 @@ public sealed partial class DonJEnemySpawner
         writer.WriteAttributeString("stationPlanned", intent.StationPlanned ? "true" : "false");
         writer.WriteAttributeString("debitAttempted", intent.DebitAttempted ? "true" : "false");
         writer.WriteAttributeString("cashWriteResult", intent.CashWriteResult.ToString());
+        writer.WriteAttributeString("resolution", intent.Resolution.ToString());
+        writer.WriteAttributeString(
+            "fineInDisputeBefore",
+            Math.Max(0L, intent.FineInDisputeBefore).ToString(
+                CultureInfo.InvariantCulture));
+        writer.WriteAttributeString(
+            "ambiguousAmount",
+            Math.Max(0L, intent.AmbiguousAmount).ToString(
+                CultureInfo.InvariantCulture));
         writer.WriteAttributeString(
             "attemptedAtUtcTicks",
             Math.Max(0L, intent.AttemptedAtUtcTicks).ToString(CultureInfo.InvariantCulture));
@@ -6778,6 +7501,9 @@ public sealed partial class DonJEnemySpawner
 
         int initialSentence;
         int activityReduction;
+        int inventoryStateValue;
+        int inventoryCaptureFailures;
+        int inventoryRemovalFailures;
         bool inventoryRemoved;
         bool weaponControlsLocked;
         bool deferredInventoryRestore;
@@ -6840,6 +7566,27 @@ public sealed partial class DonJEnemySpawner
                 out amnestyWantedClearAttempted) ||
             !TryReadJusticeBoolStrict(custody, "inventoryRemoved", false, out inventoryRemoved) ||
             !TryReadJusticeBoolStrict(custody, "weaponControlsLocked", false, out weaponControlsLocked) ||
+            !TryReadJusticeIntStrict(
+                custody,
+                "inventoryState",
+                -1,
+                -1,
+                (int)JusticeInventoryCustodyState.RestoreAmbiguous,
+                out inventoryStateValue) ||
+            !TryReadJusticeIntStrict(
+                custody,
+                "inventoryCaptureFailures",
+                0,
+                0,
+                JusticeCustodyInventoryCaptureMaximumAttempts,
+                out inventoryCaptureFailures) ||
+            !TryReadJusticeIntStrict(
+                custody,
+                "inventoryRemovalFailures",
+                0,
+                0,
+                JusticeCustodyInventoryRemovalMaximumAttempts,
+                out inventoryRemovalFailures) ||
             !TryReadJusticeBoolStrict(
                 custody,
                 "deferredInventoryRestore",
@@ -6875,6 +7622,8 @@ public sealed partial class DonJEnemySpawner
         _justiceActivityReductionGrantedSeconds = activityReduction;
         _justiceInventoryRemoved = inventoryRemoved;
         _justiceWeaponControlsLocked = weaponControlsLocked;
+        _justiceInventoryCaptureFailureCount = inventoryCaptureFailures;
+        _justiceInventoryRemovalFailureCount = inventoryRemovalFailures;
         _justiceDeferredInventoryRestore = deferredInventoryRestore;
         _justiceCustodyWaitingForRespawn = waitingForRespawn;
         _justiceCustodyDeathRebindPending = deathRebindPending;
@@ -6898,6 +7647,15 @@ public sealed partial class DonJEnemySpawner
                 _justiceCaseState);
         _justiceDisciplineIntent = ReadJusticeDisciplineIntentXml(custody);
         _justiceWeaponSnapshot = ReadJusticeWeaponSnapshotXml(custody);
+        if (inventoryStateValue >= 0)
+        {
+            _justiceInventoryCustodyState =
+                (JusticeInventoryCustodyState)inventoryStateValue;
+        }
+        else
+        {
+            MigrateLegacyJusticeInventoryCustodyState();
+        }
         ReadJusticeActivityCooldownsXml(custody);
 
         if ((fineIntentElement != null && _justiceFineDebitIntent == null) ||
@@ -6907,6 +7665,7 @@ public sealed partial class DonJEnemySpawner
             (_justiceDisciplineIntent != null &&
              !IsJusticeDisciplineIntentWalConsistent(_justiceDisciplineIntent)) ||
             (snapshotElement != null && _justiceWeaponSnapshot == null) ||
+            !ValidateJusticeInventoryCustodyStateInvariant() ||
             (_justiceInventoryRemoved && !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot)) ||
             (_justiceDeferredInventoryRestore &&
              (!ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot) ||
@@ -7041,8 +7800,9 @@ public sealed partial class DonJEnemySpawner
             ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
         {
             // Un snapshot présent sans commit RemoveAll correspond à une reprise
-            // de préconfiscation : je réactive toujours son verrou idempotent.
-            _justiceWeaponControlsLocked = true;
+            // de préconfiscation : je garde le joueur libre tant que le retrait
+            // n'est pas vérifié, conformément à l'état RemovalPending.
+            _justiceWeaponControlsLocked = false;
             _justiceNextInventoryPersistenceRetryAt = 0;
         }
 
@@ -7280,6 +8040,9 @@ public sealed partial class DonJEnemySpawner
         bool debitAttempted = !element.HasAttribute("debitAttempted");
         long attemptedAtUtcTicks = 0L;
         JusticeCashWriteResult cashWriteResult = JusticeCashWriteResult.Unknown;
+        JusticePaymentResolution resolution = JusticePaymentResolution.Prepared;
+        long fineInDisputeBefore = 0L;
+        long ambiguousAmount = 0L;
         bool attributesValid = element.HasAttribute("episodeId") &&
             TryReadJusticeIntStrict(element, "slot", -1, 0, 2, out slot) &&
             TryReadJusticeLongStrict(
@@ -7353,7 +8116,26 @@ public sealed partial class DonJEnemySpawner
                  0L,
                  DateTime.MaxValue.Ticks,
                  out attemptedAtUtcTicks) &&
-             TryReadJusticeCashWriteResult(element, out cashWriteResult);
+             TryReadJusticeCashWriteResult(element, out cashWriteResult) &&
+             TryReadJusticePaymentResolution(
+                 element,
+                 debitAttempted,
+                 cashWriteResult,
+                 out resolution) &&
+             TryReadJusticeLongStrict(
+                 element,
+                 "fineInDisputeBefore",
+                 0L,
+                 0L,
+                 JusticePolicy.MaxActiveFine,
+                 out fineInDisputeBefore) &&
+             TryReadJusticeLongStrict(
+                 element,
+                 "ambiguousAmount",
+                 0L,
+                 0L,
+                 JusticePolicy.MaxActiveFine,
+                 out ambiguousAmount);
 
         bool valid = attributesValid && episodeId.Length > 0 && slot >= 0 && slot <= 2 &&
                      fineAmount > 0L && fineAmount <= JusticePolicy.MaxActiveFine &&
@@ -7368,7 +8150,13 @@ public sealed partial class DonJEnemySpawner
                          debitAmount == 0 && cashBefore == 0 && cashAfter == 0 &&
                          sentenceIfDebited == sentenceIfConverted)) &&
                        (debitAttempted || cashWriteResult == JusticeCashWriteResult.Unknown) &&
-                       (debitAttempted || attemptedAtUtcTicks == 0L);
+                       (debitAttempted || attemptedAtUtcTicks == 0L) &&
+                       (resolution != JusticePaymentResolution.Ambiguous ||
+                        (debitAttempted &&
+                         cashWriteResult == JusticeCashWriteResult.Unknown &&
+                         ambiguousAmount == debitAmount)) &&
+                       (resolution == JusticePaymentResolution.Ambiguous ||
+                        ambiguousAmount == 0L);
         int expectedDebit = (int)Math.Min(fineAmount, (long)Math.Max(0, cashBefore));
         valid &= debitAmount == expectedDebit;
         string custodyEpisode = _justiceCaseState == null
@@ -7385,7 +8173,8 @@ public sealed partial class DonJEnemySpawner
         bool operationCommitted = _justiceCaseState != null &&
             _justiceCaseState.CompletedOperationIds.Contains(operationId);
         bool matchesPrecommit = !operationCommitted && _justiceCaseState != null &&
-            _justiceCaseState.FineDue == fineAmount;
+            _justiceCaseState.FineDue == fineAmount &&
+            _justiceCaseState.FineInDispute == fineInDisputeBefore;
         if (matchesPrecommit)
         {
             bool expectedStationPlanned = _justiceCustodySite == JusticeCustodySite.None
@@ -7404,11 +8193,17 @@ public sealed partial class DonJEnemySpawner
         }
         bool matchesCommittedState = operationCommitted && _justiceCaseState != null &&
             _justiceCaseState.FineDue == 0L &&
-            IsJusticeFineSentenceCompatibleWithCashWriteResult(
-                cashWriteResult,
+            IsJusticeFineSentenceCompatibleWithResolution(
+                resolution,
                 _justiceCaseState.SentenceSeconds,
                 sentenceIfDebited,
-                sentenceIfConverted);
+                sentenceIfConverted) &&
+            _justiceCaseState.FineInDispute == JusticePolicy.SaturatingAdd(
+                fineInDisputeBefore,
+                resolution == JusticePaymentResolution.Ambiguous
+                    ? ambiguousAmount
+                    : 0L,
+                JusticePolicy.MaxActiveFine);
         valid &= belongsToCurrentCustody && operationEpisodeIsCanonical &&
                  (matchesPrecommit || matchesCommittedState);
         if (!valid)
@@ -7434,7 +8229,10 @@ public sealed partial class DonJEnemySpawner
             StationPlanned = stationPlanned,
             DebitAttempted = debitAttempted,
             AttemptedAtUtcTicks = attemptedAtUtcTicks,
-            CashWriteResult = cashWriteResult
+            CashWriteResult = cashWriteResult,
+            Resolution = resolution,
+            FineInDisputeBefore = fineInDisputeBefore,
+            AmbiguousAmount = ambiguousAmount
         };
     }
 
@@ -7663,6 +8461,11 @@ public sealed partial class DonJEnemySpawner
         int deferredModelHash = _justiceCustodyPlayerModelHash;
         int deferredPlayerSlot = _justiceCustodyPlayerSlot;
         int deferredRetryAt = _justiceNextDeferredInventoryRestoreAt;
+        JusticeInventoryCustodyState deferredInventoryState =
+            _justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.RestoreAmbiguous
+                ? JusticeInventoryCustodyState.RestoreAmbiguous
+                : JusticeInventoryCustodyState.RestorePending;
         bool shouldPreserveDeferredRestore = deferredSnapshot != null;
         bool preserveLegalReleaseWantedClearAttempt =
             _justiceLegalReleaseFinalizationPending &&
@@ -7691,6 +8494,9 @@ public sealed partial class DonJEnemySpawner
         _justiceInventoryRemoved = false;
         _justiceWeaponControlsLocked = false;
         _justiceNextInventoryPersistenceRetryAt = 0;
+        _justiceInventoryCustodyState = JusticeInventoryCustodyState.None;
+        _justiceInventoryCaptureFailureCount = 0;
+        _justiceInventoryRemovalFailureCount = 0;
         _justiceWeaponSnapshot = null;
         _justiceDeferredInventoryRestore = false;
         _justiceNextDeferredInventoryRestoreAt = 0;
@@ -7731,6 +8537,7 @@ public sealed partial class DonJEnemySpawner
         {
             _justiceWeaponSnapshot = deferredSnapshot;
             _justiceDeferredInventoryRestore = true;
+            _justiceInventoryCustodyState = deferredInventoryState;
             // Je conserve ce jeton uniquement en mémoire pour que le même ped
             // custom puisse terminer sa restitution dans la session courante.
             // Le writer XML ne sérialise volontairement jamais un handle GTA.
@@ -7744,33 +8551,68 @@ public sealed partial class DonJEnemySpawner
     private void JusticeShutdownCustody()
     {
         Ped player = Game.Player.Character;
-        CancelJusticeCustodyActivity(false, Game.GameTime);
-        EndJusticeCustodyDiscipline(player);
+        try
+        {
+            RunJusticeCustodyShutdownStep(
+                "Activite",
+                () => CancelJusticeCustodyActivity(false, Game.GameTime));
+            RunJusticeCustodyShutdownStep(
+                "Discipline",
+                () => EndJusticeCustodyDiscipline(player));
+            RunJusticeCustodyShutdownStep(
+                "Inventaire",
+                () => RestoreJusticeInventoryProvisionallyOnShutdown(player));
+            RunJusticeCustodyShutdownStep(
+                "EtatJoueur",
+                () => RestoreJusticeTransientStateOnShutdown(player));
+            RunJusticeCustodyShutdownStep(
+                "Scene",
+                CleanupJusticeCustodyEntitiesAndGroups);
+        }
+        finally
+        {
+            // Les flags police sont globaux : même une panne inventaire ou scène
+            // ne peut empêcher leur restauration best-effort.
+            RunJusticeCustodyShutdownStep(
+                "Police",
+                RestoreJusticePoliceSuppressionOnShutdown);
+            _justiceWeaponControlsLocked = false;
+            _justiceCustodyRuntimeActive = false;
+            _justiceCustodyTransferPending = false;
+            _justiceCustodyResumePending = false;
+            ResetJusticeCustodyTransferRetryState();
+        }
+    }
 
+    private void RestoreJusticeInventoryProvisionallyOnShutdown(Ped player)
+    {
         // Je rends provisoirement le snapshot à l'arrêt pour qu'un unload ou un
         // crash du loader ne puisse jamais laisser les armes perdues. Les drapeaux
         // persistés restent inchangés : le prochain chargement reconfisquera.
-        if (_justiceWeaponSnapshot != null && Entity.Exists(player) && !player.IsDead &&
-            IsJusticeCustodyPlayerIdentityCompatible(player))
+        if (_justiceWeaponSnapshot == null || !Entity.Exists(player) || player.IsDead ||
+            !IsJusticeCustodyPlayerIdentityCompatible(player) ||
+            (!_justiceInventoryRemoved && !_justiceDeferredInventoryRestore))
         {
-            if (_justiceInventoryRemoved || _justiceDeferredInventoryRestore)
-            {
-                // Je ne passe jamais par RemoveAll pendant OnAborted : je fusionne
-                // le snapshot complet et vérifié avec l'inventaire présent.
-                bool restored = false;
-                for (int attempt = 0; attempt < 3 && !restored; attempt++)
-                {
-                    restored = RestoreJusticeWeaponSnapshotMergeSafe(player, true, true);
-                }
-                if (!restored)
-                {
-                    LogWarning(
-                        "Justice.Inventaire",
-                        "Restitution provisoire incomplète à l'arrêt; le snapshot durable reste disponible.");
-                }
-            }
+            return;
         }
 
+        // Je ne passe jamais par RemoveAll pendant OnAborted : je fusionne le
+        // snapshot complet et vérifié avec l'inventaire présent.
+        bool restored = false;
+        for (int attempt = 0; attempt < 3 && !restored; attempt++)
+        {
+            restored = RestoreJusticeWeaponSnapshotMergeSafe(player, true, true);
+        }
+        if (!restored)
+        {
+            LogWarning(
+                "Justice.Inventaire",
+                "Restitution provisoire incomplète à l'arrêt; le snapshot durable reste disponible.");
+        }
+    }
+
+    private void RestoreJusticeTransientStateOnShutdown(Ped player)
+    {
         for (int attempt = 0;
              attempt < 3 &&
              (_justiceDisciplineInvincibilityRestorePending ||
@@ -7780,12 +8622,18 @@ public sealed partial class DonJEnemySpawner
             EndJusticeCustodyDiscipline(player);
             RestoreJusticeCustodyPlayerTransientState(player);
         }
-        CleanupJusticeCustodyEntitiesAndGroups();
-        RestoreJusticePoliceSuppressionOnShutdown();
-        _justiceCustodyRuntimeActive = false;
-        _justiceCustodyTransferPending = false;
-        _justiceCustodyResumePending = false;
-        ResetJusticeCustodyTransferRetryState();
+    }
+
+    private void RunJusticeCustodyShutdownStep(string name, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            LogException("Justice.ArretDetention." + name, ex);
+        }
     }
 
     private void RestoreJusticePoliceSuppressionOnShutdown()
