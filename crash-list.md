@@ -1922,6 +1922,21 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Vérification: La première commande s'est arrêtée au parseur avant `git fetch` et `git push`; le hash distant est relu après la relance.
 - Résolution: Incident d'outillage isolé, sans impact produit.
 
+## 2026-08-30 04:38:50 +02:00 - Échec intermittent de persistance Justice pendant la validation du guide README
+- Statut: Instable, non corrigé hors périmètre; la dernière validation complète est réussie.
+- Contexte: Validation de la documentation d'installation bilingue dans un worktree propre basé sur `origin/main`, sans modification du code Justice.
+- Symptôme: La suite `safety-20260830-043159` a échoué une fois sur `PlayerProfiles_SuccessfulResetWritesTheEmptyProfileToPrimaryAndBackup`: après corruption volontaire du primaire, le chargement depuis le `.bak` a retrouvé `recidivism=2` au lieu de `0`.
+- Sources vérifiées:
+  - `TestResults\safety-20260830-043159\logs\test-release.log` et `safety-tests.trx`;
+  - `bug-reports\20260830-043422-safety-failure\crash-list-entry.md` et les logs collectés automatiquement;
+  - `tests\DonJEnemySpawner.Tests\JusticePlayerProfilePersistenceTests.cs`, test et helpers de persistance concernés;
+  - trois relances isolées du test, puis `TestResults\safety-20260830-043607\safety-tests.trx`.
+- Extraits utiles: l'échec signale `Attendu : <0>, Réel : <2>` à la ligne 750 du test; les trois relances isolées réussissent ensuite `1/1`, et la relance complète Safety réussit `507/507` avec ABI NIB v2 valide.
+- Analyse / hypothèse: Le symptôme est compatible avec une course intermittente entre l'écriture asynchrone du reset et la copie de sauvegarde. Il n'est pas lié au README, au test documentaire ou au package de DonJ Custom NPC Placer.
+- Action menée: Les logs ont été collectés via la suite de sécurité; aucune modification Justice hors demande n'a été appliquée. Le nouveau guide et son test restent isolés de cet incident.
+- Vérification: Test Justice concerné réussi trois fois de suite; `tools\run-safety-checks.ps1 -UseStubApi` relancé avec succès (`507/507`, package vérifié, refus attendu de la source sale).
+- Résolution: L'incident est consigné pour une investigation Justice dédiée. La documentation demandée est validée par la dernière passe complète verte.
+
 ## 2026-08-30 05:31:16 +02:00 - Respawn hôpital et transfert technique observés avec un ancien build installé
 - Statut: Diagnostiqué; correctifs source et tests validés, redéploiement live et preuve en jeu encore requis.
 - Contexte: Audit du signalement selon lequel une mort policière avec étoiles réapparaissait à l'hôpital puis aboutissait à « transfert impossible, remise en liberté technique sous mandat », alors que la peine devait conduire à Mission Row ou Bolingbroke.

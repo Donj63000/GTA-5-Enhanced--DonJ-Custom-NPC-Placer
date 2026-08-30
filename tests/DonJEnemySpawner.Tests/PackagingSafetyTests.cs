@@ -368,6 +368,53 @@ public class PackagingSafetyTests
     }
 
     [TestMethod]
+    public void QuickStartGuide_IsBilingualVisibleAndDedicatedToDonJCustomNpcPlacer()
+    {
+        string readme = File.ReadAllText(Path.Combine(GetRepositoryRoot(), "README.md"));
+        const string QuickStartHeading = "## Installation express / Quick Start";
+        const string FrenchHeading = "### Français : ta mission installation";
+        const string EnglishHeading = "### English: your installation mission";
+        const string TableOfContentsHeading = "## Table of Contents";
+
+        int quickStartIndex = readme.IndexOf(QuickStartHeading, StringComparison.Ordinal);
+        int frenchIndex = readme.IndexOf(FrenchHeading, StringComparison.Ordinal);
+        int englishIndex = readme.IndexOf(EnglishHeading, StringComparison.Ordinal);
+        int tableOfContentsIndex = readme.IndexOf(TableOfContentsHeading, StringComparison.Ordinal);
+
+        Assert.IsTrue(quickStartIndex >= 0, "Le README doit commencer par un guide d'installation express.");
+        Assert.IsTrue(
+            quickStartIndex < tableOfContentsIndex,
+            "Le guide d'installation express doit être visible avant la table des matières.");
+        Assert.IsTrue(
+            frenchIndex > quickStartIndex && englishIndex > frenchIndex,
+            "Le guide express doit présenter le français avant son équivalent anglais.");
+
+        string quickStart = readme.Substring(quickStartIndex, tableOfContentsIndex - quickStartIndex);
+        StringAssert.Contains(
+            quickStart,
+            "https://github.com/Donj63000/GTA-5-Enhanced--DonJ-Custom-NPC-Placer/actions/workflows/safety.yml");
+        StringAssert.Contains(quickStart, "`main`");
+        StringAssert.Contains(quickStart, "`push`");
+        StringAssert.Contains(quickStart, "DonJCustomNpcPlacer-game-ready");
+        StringAssert.Contains(quickStart, "DonJ Custom NPC Placer");
+        StringAssert.Contains(quickStart, "Code → Download ZIP");
+        StringAssert.Contains(quickStart, "GTA5_Enhanced.exe");
+        StringAssert.Contains(quickStart, "ScriptHookV.dll");
+        StringAssert.Contains(quickStart, "xinput1_4.dll");
+        StringAssert.Contains(quickStart, "NIBScriptHookVDotNet.asi");
+        StringAssert.Contains(quickStart, "DonJCustomNpcPlacer.ENdll");
+        StringAssert.Contains(quickStart, "DonJCustomNpcPlacer.manifest.json");
+        StringAssert.Contains(quickStart, "NIBScriptHookVDotNet2.dll");
+        StringAssert.Contains(quickStart, "GTA Online");
+        StringAssert.Contains(quickStart, "Story Mode");
+        StringAssert.Contains(quickStart, "F10");
+        Assert.IsFalse(
+            quickStart.IndexOf("Iron Man", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            quickStart.IndexOf("Ironman", StringComparison.OrdinalIgnoreCase) >= 0,
+            "Le guide express doit rester dédié à DonJ Custom NPC Placer, sans mélanger un autre mod.");
+    }
+
+    [TestMethod]
     public void SafetyScript_ObservesTheExpectedDirtyDeployFailureWithoutAbortingOnStderr()
     {
         string script = File.ReadAllText(
