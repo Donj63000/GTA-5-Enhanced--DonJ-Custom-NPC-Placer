@@ -2060,3 +2060,19 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: L'invocation comportementale de `UpdateJusticeSystem()` et son assertion de compteur restent exécutées sous `DONJ_STUB_API`. Les deux builds conservent les assertions headless de reset/toggle, et le contrat source exige désormais le `return` immédiat du WAL `ProfileReset` avant `_justiceBackupRepairPending`. Aucun core 3.9 artificiel n'est copié et aucun code gameplay n'est modifié.
 - Vérification: Test ciblé réel `1/1`, même test stub `1/1`; relance réelle complète `536/536`; `tools\run-safety-checks.ps1 -UseStubApi` réussi `572/572` dans `TestResults\safety-20260830-063103`, build zéro avertissement/zéro erreur et ABI valide sur 32 types/189 membres.
 - Résolution: Incident limité au harness de test et clos. La couverture comportementale demeure dans la CI stub, le contrat réel reste headless, et GTA n'a pas été fermé ni redéployé pendant cette correction.
+
+## 2026-08-30 06:38:30 +02:00 - Course Wait-Process après la fermeture autorisée de GTA
+- Statut: Résolu; jeu confirmé fermé avant toute copie du mod.
+- Contexte: Fermeture de GTA V Enhanced explicitement autorisée par l'utilisateur, uniquement après validation du commit `921295c` en CI et téléchargement de son artefact propre.
+- Symptôme: `CloseMainWindow()` n'a pas arrêté le PID 30400 dans le délai de vingt secondes. Après `Stop-Process -Force`, le processus a disparu avant l'appel `Wait-Process`; celui-ci a donc signalé `Cannot find a process with the process identifier 30400` et interrompu la fin du script de contrôle.
+- Sources vérifiées:
+  - sortie directe de la commande PowerShell de fermeture;
+  - contrôle séparé par `Get-Process -Name GTA5_Enhanced`;
+  - `bug-reports\20260830-063830-gta-close-wait-process-race`;
+  - manifest et hashes du package CI sous `TestResults\ci-33292773129-921295c`;
+  - ENdll, PDB et manifest installés sous `Grand Theft Auto V Enhanced\Scripts`.
+- Extraits utiles: `Wait-Process: Cannot find a process with the process identifier 30400`; le contrôle séparé retourne ensuite `GTA_STATUS=closed`.
+- Analyse / hypothèse: Il s'agit d'une course bénigne d'outillage : `Stop-Process` a terminé le processus entre le test de présence et l'attente finale. Ce message ne décrit ni un crash du mod ni un échec de fermeture; le premier script n'a encore copié aucun fichier GTA.
+- Action menée: L'absence de `GTA5_Enhanced` a été revérifiée dans une commande séparée, les logs ont été collectés, puis le déploiement transactionnel n'a été lancé qu'après cette preuve. Aucun autre processus Steam/Rockstar n'a été arrêté.
+- Vérification: GTA est resté fermé pendant la copie; `deploy-game-ready.ps1` a ensuite installé et vérifié l'ENdll de SHA-256 `9C5B3FD6EF923F12BCE1913EC1662631068EC02A5DD977247CA44026EE121A1D`, le manifest `sourceDirty=false`, l'API NIB 2.11.6 et le contrat ABI 32 types/189 membres.
+- Résolution: Incident d'outillage clos. La session GTA a été arrêtée comme autorisé; elle devra être relancée après l'installation de l'artefact final aligné sur `main`.
