@@ -2043,3 +2043,20 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Les six valeurs sont construites dans un InputArgument[] explicite, puis ce lot unique est passé à Function.Call<bool>. Aucun assouplissement du validateur ABI n'a été effectué.
 - Vérification: La relance safety-20260830-060440 valide 32 références de types et 189 références de membres, compile sans erreur puis réussit 571/571; son résumé porte Statut: OK.
 - Résolution: Le nouvel appel natif est lié à la surcharge params réellement disponible dans NIB 2.11.6 et la régression ABI est bloquée par la chaîne de sécurité.
+
+## 2026-08-30 06:24:24 +02:00 - Test ProfileReset non headless sous l'API NIB réelle
+- Statut: Corrigé; suites réelle et stub entièrement validées.
+- Contexte: Exécution obligatoire de `dotnet test GTA5modDEV.sln -c Release` sur le commit fusionné, après une Safety stub déjà verte à 572/572.
+- Symptôme: La suite réelle terminait avec un échec, 535 réussites et 536 tests. `ProfileReset_OpenWalFreezesToggleAndLateJusticeRuntime` invoquait `UpdateJusticeSystem()` sur un objet créé avec `FormatterServices`; l'accès à `GTA.Game.Player.Character` levait ensuite `FileNotFoundException` pour `NIBScriptHookVDotNet, Version=3.9.0.0`.
+- Sources vérifiées:
+  - sortie console de `dotnet test GTA5modDEV.sln -c Release`;
+  - `bug-reports\20260830-062417-dotnet-test-real-profile-reset-headless`;
+  - `tests\DonJEnemySpawner.Tests\JusticePlayerProfilePersistenceTests.cs` et `DonJEnemySpawner.Tests.csproj`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.cs`, méthode `UpdateJusticeSystem`;
+  - références Cecil de `NIBScriptHookVDotNet2.dll` 2.11.6 et appel `SHVDN.NativeMemory.GetLocalPlayerIndex()`;
+  - `TestResults\safety-20260830-063103\safety-tests.trx` et journaux de build/ABI associés.
+- Extraits utiles: première passe réelle `échec : 1, réussite : 535, total : 536`; exception `Impossible de charger ... NIBScriptHookVDotNet, Version=3.9.0.0`; la façade v2 est bien copiée, mais son core strong-named est fourni par l'hôte GTA/ASI et n'est pas exécutable dans VSTest seul.
+- Analyse / hypothèse: Le runtime du mod et sa référence NIB v2 sont corrects. Seule la fixture était faussement qualifiée de headless : le stub simule `Game.Player`, tandis que l'API réelle exige le processus GTA. L'ordre masque/holding avant le garde `ProfileReset` est volontaire et ne doit pas être déplacé pour satisfaire un test hors hôte.
+- Action menée: L'invocation comportementale de `UpdateJusticeSystem()` et son assertion de compteur restent exécutées sous `DONJ_STUB_API`. Les deux builds conservent les assertions headless de reset/toggle, et le contrat source exige désormais le `return` immédiat du WAL `ProfileReset` avant `_justiceBackupRepairPending`. Aucun core 3.9 artificiel n'est copié et aucun code gameplay n'est modifié.
+- Vérification: Test ciblé réel `1/1`, même test stub `1/1`; relance réelle complète `536/536`; `tools\run-safety-checks.ps1 -UseStubApi` réussi `572/572` dans `TestResults\safety-20260830-063103`, build zéro avertissement/zéro erreur et ABI valide sur 32 types/189 membres.
+- Résolution: Incident limité au harness de test et clos. La couverture comportementale demeure dans la CI stub, le contrat réel reste headless, et GTA n'a pas été fermé ni redéployé pendant cette correction.

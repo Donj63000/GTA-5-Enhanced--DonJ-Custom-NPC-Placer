@@ -1331,11 +1331,16 @@ public sealed class JusticePlayerProfilePersistenceTests
             GetField<string>(script, "_statusText"),
             "backup");
 
+#if DONJ_STUB_API
+        // Je réserve l'exécution du pont GTA au stub configurable. L'assembly
+        // NIB réel ne peut pas fournir Game.Player hors du processus du jeu.
+        GTA.StubRuntime.Reset();
         Invoke(script, "UpdateJusticeSystem");
         Assert.AreEqual(
             987654L,
             GetField<long>(script, "_justiceNextIncidentProcessingAtMs"),
             "Le runtime tardif ne doit progresser aucun front pendant le WAL.");
+#endif
 
         string source = File.ReadAllText(Path.Combine(
             GetRepositoryRoot(),
@@ -1356,7 +1361,9 @@ public sealed class JusticePlayerProfilePersistenceTests
             "Ped player = Game.Player.Character",
             "UpdateJusticeCustodyRespawnTransferMask(player)",
             "UpdateJusticePoliceDeathPreJudgmentHolding(player, nowRaw)",
-            "if (HasOpenJusticeProfileResetWal())");
+            "if (HasOpenJusticeProfileResetWal())",
+            "return;",
+            "if (_justiceBackupRepairPending)");
 
         int toggleStart = source.IndexOf(
             "private void RequestJusticeToggle()",
