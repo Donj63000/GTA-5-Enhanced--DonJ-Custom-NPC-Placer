@@ -93,8 +93,13 @@ public sealed partial class DonJEnemySpawner
             : "rev " + repository.MemoryRevision.ToString(CultureInfo.InvariantCulture) +
               "/" + repository.DiskRevision.ToString(CultureInfo.InvariantCulture);
         int openWal = wal == null ? 0 : wal.OpenTransactionCount;
+        string context = GetJusticeProfileTransitionDiagnosticState();
+        string persistence = string.IsNullOrWhiteSpace(_justicePersistenceLastError)
+            ? string.Empty
+            : " · ERREUR SAUVEGARDE";
         return GetJusticeBuildId() + " · " + revision + " · WAL " +
-               openWal.ToString(CultureInfo.InvariantCulture);
+               openWal.ToString(CultureInfo.InvariantCulture) + " · " +
+               context + persistence;
     }
 
     private void ShowJusticeDiagnosticStatus()
@@ -150,6 +155,11 @@ public sealed partial class DonJEnemySpawner
         report.Append("; schema=").Append(JusticeXmlPersistenceCodec.SchemaMajor);
         report.Append("; phase=").Append(_justiceCaseState == null ? "Aucune" : _justiceCaseState.Phase.ToString());
         report.Append("; slot=").Append(_justiceActivePlayerProfileSlot);
+        report.Append("; profil=").Append(GetJusticeProfileTransitionDiagnosticState());
+        report.Append("; sélectionEnAttente=").Append(_justiceProfileSelectionPending ? "oui" : "non");
+        report.Append("; sauvegardeSwitchEnAttente=").Append(_justiceProfileSwitchPersistencePending ? "oui" : "non");
+        report.Append("; contexteBloqué=").Append(_justiceProfileContextBlocked ? "oui" : "non");
+        report.Append("; révisionSwitch=").Append(_justiceProfileSwitchPersistenceRevision);
         report.Append("; inventaire=").Append(_justiceInventoryCustodyState);
         report.Append("; paiement=").Append(GetJusticePaymentDiagnosticState());
         report.Append("; police=").Append(_justicePoliceIntegrationMode);
@@ -174,6 +184,25 @@ public sealed partial class DonJEnemySpawner
             report.Append("; dernière erreur=").Append(_justicePersistenceLastError);
         }
         return report.ToString();
+    }
+
+    private string GetJusticeProfileTransitionDiagnosticState()
+    {
+        if (_justiceProfileSwitchPersistencePending)
+        {
+            return "switch/sauvegarde";
+        }
+        if (_justiceProfileSelectionPending ||
+            !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot))
+        {
+            return "identification";
+        }
+        if (_justiceProfileContextBlocked ||
+            !IsJusticeRuntimeProfileContextCompatible())
+        {
+            return "suspendu";
+        }
+        return "prêt";
     }
 
     private static void AppendJusticeMetricReport(

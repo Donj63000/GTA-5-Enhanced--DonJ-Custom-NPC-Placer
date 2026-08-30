@@ -303,7 +303,7 @@ public sealed partial class DonJEnemySpawner
 
         _justiceActiveProfileResetPending = false;
         _justiceActiveProfileResetPrecommitRedundant = false;
-        ShowStatus(GetJusticeMenuSelectedProfileDisplay() + " : profil Justice réinitialisé.", 4200);
+        ShowStatus(GetJusticeProfileDisplayName(slot) + " : profil Justice réinitialisé.", 4200);
         LogInfo("Justice.Profil", "Réinitialisation transactionnelle du profil actif terminée.");
         return true;
     }
@@ -1287,6 +1287,16 @@ public sealed partial class DonJEnemySpawner
         // deux validations annule toute action destructive préparée pour l'ancien.
         CancelPendingDangerAction();
         CancelJusticeWantedClearRetry();
+        // Je retire uniquement un message porté par Justice. Le bandeau global
+        // peut aussi appartenir au téléphone, au Cartel ou aux Ballas et leur
+        // statut ne doit pas disparaître à cause d'un changement de héros.
+        if (_statusOwnedByJusticeProfile ||
+            IsJusticeProfileScopedStatus(_statusText))
+        {
+            _statusText = string.Empty;
+            _statusUntil = 0;
+        }
+        _statusOwnedByJusticeProfile = false;
         FlushJusticeConsumedDamageFronts();
         _justicePendingIncidents.Clear();
         _justiceRecentVictims.Clear();
@@ -1320,6 +1330,36 @@ public sealed partial class DonJEnemySpawner
             : (_justiceCaseState.WantedEpisodeId ?? string.Empty);
         _justiceDamageFrontPrimingPending = _justiceEnabled;
         _justiceDeathDetectionBarrierInitialized = false;
+    }
+
+    private static bool IsJusticeProfileScopedStatus(string statusText)
+    {
+        if (string.IsNullOrWhiteSpace(statusText))
+        {
+            return false;
+        }
+
+        if (statusText.IndexOf("Justice", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return true;
+        }
+
+        return statusText.StartsWith("Amnistie", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Activation", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Désactivation", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Paiement", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Discipline", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Évasion", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Activité", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Réinitialisation", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Commissariat", StringComparison.OrdinalIgnoreCase) ||
+               statusText.StartsWith("Prison de Bolingbroke", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ShowJusticeProfileStatus(string text, int milliseconds)
+    {
+        ShowStatus(text, milliseconds);
+        _statusOwnedByJusticeProfile = true;
     }
 
     private string CaptureCurrentJusticeCustodyXml()

@@ -1432,12 +1432,14 @@ public sealed partial class DonJEnemySpawner
             // Je laisse le DeathFront seul propriétaire du dossier avant jugement
             // et bloque les incidents, wanted et checkpoints tardifs pendant
             // que le suspect vivant attend dans l'enceinte provisoire.
+            SuspendJusticeSentenceClocks(nowRaw);
             return;
         }
         if (HasOpenJusticeProfileResetWal())
         {
             // UpdateJusticeEarly possède seul le contrôleur du reset. Les scènes,
             // incidents et détentions tardives restent gelés jusqu'au backup.
+            SuspendJusticeSentenceClocks(nowRaw);
             return;
         }
         if (_justiceBackupRepairPending)
@@ -1445,7 +1447,7 @@ public sealed partial class DonJEnemySpawner
             // UpdateJusticeEarly porte seul le retry cadencé de réparation. Je
             // suspends ici même les reprises de détention afin qu'aucun effet
             // externe ne précède le retour d'une persistance fiable.
-            AdvanceJusticeInactiveCustodyProfiles(nowRaw, true);
+            SuspendJusticeSentenceClocks(nowRaw);
             return;
         }
         bool profileContextCompatible =
@@ -1461,11 +1463,18 @@ public sealed partial class DonJEnemySpawner
             // cinématique ou un autre protagoniste prendre la main.
             SetJusticeCustodyPoliceSuppression(false);
         }
-        AdvanceJusticeInactiveCustodyProfiles(
-            nowRaw,
-            runtimeSuspended || IsJusticePlayerDeadSafe(player) ||
-            !profileContextCompatible || _justiceProfileSwitchPersistencePending ||
-            _justicePoliceSuppressionRestorePending);
+        bool suspendSentenceClocks = runtimeSuspended ||
+            IsJusticePlayerDeadSafe(player) || !profileContextCompatible ||
+            _justiceProfileSwitchPersistencePending ||
+            _justicePoliceSuppressionRestorePending;
+        if (suspendSentenceClocks)
+        {
+            SuspendJusticeSentenceClocks(nowRaw);
+        }
+        else
+        {
+            AdvanceJusticeInactiveCustodyProfiles(nowRaw, false);
+        }
 
         RetryJusticePoliceSuppressionRestore(player, nowRaw);
         RetryJusticeDeferredInventoryRestore(player, nowRaw);
@@ -1545,6 +1554,16 @@ public sealed partial class DonJEnemySpawner
         PersistJusticeStateIfDue();
     }
 
+    private void SuspendJusticeSentenceClocks(int now)
+    {
+        // Je rebascule toutes les horloges sur le tick courant. Aucun temps de
+        // peine ni délai d'évasion ne doit être récupéré après une phase où le
+        // runtime Justice n'avait pas le droit d'observer le joueur.
+        InterruptJusticeCustodyEscapeObservation();
+        ResetJusticeCustodyClock(now);
+        AdvanceJusticeInactiveCustodyProfiles(now, true);
+    }
+
     private void UpdateJusticeFailSafeMaintenance()
     {
         if (!_justiceInitialized)
@@ -1555,6 +1574,7 @@ public sealed partial class DonJEnemySpawner
         Ped player = Game.Player.Character;
         UpdateJusticeCustodyRespawnTransferMask(player);
         int now = GetJusticeRawGameTimeSafe();
+        SuspendJusticeSentenceClocks(now);
         UpdateJusticePoliceDeathPreJudgmentHolding(player, now);
         RepairJusticeOrphanedCustodyControls(player);
         RetryJusticePoliceSuppressionRestore(player, now);
@@ -1767,9 +1787,25 @@ public sealed partial class DonJEnemySpawner
 
         if (!IsJusticePlayedProfileContextReady())
         {
-            ShowStatus(
-                "Justice : identification ou changement de personnage en cours.",
-                3600);
+            if (_justiceProfileSwitchPersistencePending)
+            {
+                ShowStatus(
+                    "Justice : sauvegarde sécurisée du changement de personnage en cours.",
+                    4200);
+            }
+            else if (_justiceProfileSelectionPending ||
+                     !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot))
+            {
+                ShowStatus(
+                    "Justice : identification du personnage joué en cours.",
+                    3600);
+            }
+            else
+            {
+                ShowStatus(
+                    "Justice suspendue : changement de personnage à finaliser.",
+                    4200);
+            }
             return;
         }
 

@@ -212,7 +212,9 @@ public sealed class JusticePreJudgmentHoldingTests
         StringAssert.Contains(pending, "IsJusticeDeathFrontWalRecordExact(record)");
         StringAssert.Contains(pending, "JusticePoliceDeathFrontMode");
         StringAssert.Contains(pending, "recordSlot != record.ProfileSlot");
-        StringAssert.Contains(pending, "currentSlot == -1");
+        StringAssert.Contains(
+            pending,
+            "JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(");
         AssertDoesNotContain(pending, "ApplyJusticeDeathFrontToRuntime");
         AssertDoesNotContain(pending, "JusticeMarkStateDirty");
 

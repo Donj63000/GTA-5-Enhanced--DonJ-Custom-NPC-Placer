@@ -50,6 +50,45 @@ public sealed partial class DonJEnemySpawner
     private long _justiceWalCompactionProofSequence;
     private long _justiceWalCompactionProofDiskRevision;
 
+    private sealed class JusticeFinancialWalRecoveryCandidate
+    {
+        internal JusticeFinancialWalRecoveryCandidate(
+            JusticeWalRecord record,
+            long profileGeneration,
+            long loadedProfileGeneration)
+        {
+            Record = record;
+            ProfileGeneration = profileGeneration;
+            LoadedProfileGeneration = loadedProfileGeneration;
+        }
+
+        internal JusticeWalRecord Record { get; private set; }
+
+        internal long ProfileGeneration { get; private set; }
+
+        internal long LoadedProfileGeneration { get; private set; }
+
+        internal bool IsSuperseded
+        {
+            get { return LoadedProfileGeneration > ProfileGeneration; }
+        }
+
+        internal bool ReplacesLoadedFinancialState
+        {
+            get { return ProfileGeneration > LoadedProfileGeneration; }
+        }
+
+        internal bool RequiresPreMutationTerminalization
+        {
+            get
+            {
+                return IsSuperseded ||
+                       (ReplacesLoadedFinancialState &&
+                        Record.State == JusticeWalState.Prepared);
+            }
+        }
+    }
+
     private void InitializeJusticePersistenceServices()
     {
         if (_justiceRepository != null)
@@ -80,6 +119,13 @@ public sealed partial class DonJEnemySpawner
                 _justiceV1MigrationSourcePath = string.Empty;
             }
 
+            // Je distingue la révision du document effectivement relu de
+            // l'horloge logique que le WAL peut relever pendant sa récupération.
+            // Le repository ne doit jamais annoncer sur disque un snapshot N
+            // reconstruit uniquement en mémoire depuis un backup N-1.
+            long loadedDocumentDiskRevision = Math.Max(
+                0L,
+                _justicePersistenceRevision);
             _justiceWriteAheadLog = new JusticeWriteAheadLog(
                 Path.Combine(directory, JusticeWalFileName),
                 _justiceWalFaultInjectorOverride ??
@@ -90,7 +136,7 @@ public sealed partial class DonJEnemySpawner
                 statePath,
                 statePath + ".bak",
                 new JusticeXmlPersistenceCodec(),
-                Math.Max(0L, _justicePersistenceRevision));
+                loadedDocumentDiskRevision);
             _justiceRepository.Start();
             FinalizeJusticeWalTransactionsWhoseSnapshotIsDurable();
             _justicePersistenceServicesUnavailable = false;
@@ -260,7 +306,12 @@ public sealed partial class DonJEnemySpawner
         JusticePersistenceSnapshot snapshot;
         if (!TryCaptureJusticePersistenceSnapshot(out snapshot))
         {
-            RegisterJusticePersistenceFailure("capture durable impossible");
+            string captureError = _justicePersistenceLastError;
+            RegisterJusticePersistenceFailure(
+                "capture durable impossible" +
+                (string.IsNullOrWhiteSpace(captureError)
+                    ? string.Empty
+                    : ": " + captureError));
             return false;
         }
 
@@ -458,6 +509,26 @@ public sealed partial class DonJEnemySpawner
             ClearJusticeFinancialBarrier();
             return true;
         }
+        if (terminal != null && terminal.State == JusticeWalState.Prepared)
+        {
+            // Je reprends exactement la barrière déjà durcie avant le crash. Je
+            // ne capture surtout pas un nouveau snapshot, car sa génération ne
+            // correspondrait plus aux champs immuables du WAL Prepared et
+            // bloquerait ensuite l'armement Attempted.
+            if (!TryRestoreJusticeFinancialBarrierFromPreparedWal(
+                    terminal,
+                    operationKind,
+                    transactionId,
+                    profileSlot))
+            {
+                RegisterJusticePersistenceFailure(
+                    "le WAL Prepared financier ne correspond plus à son intention");
+                return false;
+            }
+
+            return _justiceRepository.GetDiagnostics().DiskRevision >=
+                   _justiceFinancialBarrierRevision;
+        }
 
         if (_justiceFinancialBarrierRevision > 0L)
         {
@@ -523,6 +594,89 @@ public sealed partial class DonJEnemySpawner
         // Je rends toujours la main après le premier enqueue. Même si le writer a
         // fini dans ce tick, l'effet cash ne franchira la barrière qu'à la reprise.
         return false;
+    }
+
+    private bool TryRestoreJusticeFinancialBarrierFromPreparedWal(
+        JusticeWalRecord record,
+        string operationKind,
+        string transactionId,
+        int profileSlot)
+    {
+        if (record == null || record.State != JusticeWalState.Prepared ||
+            record.PersistenceRevision <= 0L ||
+            _justiceRepository == null ||
+            _justiceRepository.GetDiagnostics().DiskRevision <
+                record.PersistenceRevision ||
+            !string.Equals(
+                record.OperationKind,
+                operationKind,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                record.TransactionId,
+                transactionId,
+                StringComparison.Ordinal) ||
+            record.ProfileSlot != profileSlot ||
+            profileSlot != _justiceActivePlayerProfileSlot ||
+            !IsJusticeFinancialWalRecordForCurrentIntent(
+                record,
+                operationKind))
+        {
+            return false;
+        }
+
+        EnsureJusticePlayerProfilesInitialized();
+        EnsureJusticeProfilePersistenceGenerations();
+        JusticePlayerProfileState profile = _justicePlayerProfiles[profileSlot];
+        long profileGeneration = ReadWalLong(
+            record,
+            "profileGeneration",
+            -1L);
+        string identityKey = ReadWalString(
+            record,
+            "identityKey",
+            string.Empty);
+        if (profile == null || profileGeneration <= 0L ||
+            _justiceProfilePersistenceGenerations[profileSlot] !=
+                profileGeneration ||
+            !string.Equals(
+                identityKey,
+                CreateJusticeProfileIdentityKey(profile),
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (_justiceFinancialBarrierRevision > 0L)
+        {
+            return _justiceFinancialBarrierRevision ==
+                       record.PersistenceRevision &&
+                   _justiceFinancialBarrierProfileGeneration ==
+                       profileGeneration &&
+                   _justiceFinancialBarrierProfileSlot == profileSlot &&
+                   string.Equals(
+                       _justiceFinancialBarrierOperationKind,
+                       operationKind,
+                       StringComparison.Ordinal) &&
+                   string.Equals(
+                       _justiceFinancialBarrierTransactionId,
+                       transactionId,
+                       StringComparison.Ordinal) &&
+                   string.Equals(
+                       _justiceFinancialBarrierIdentityKey,
+                       identityKey,
+                       StringComparison.Ordinal) &&
+                   DoJusticeFinancialWalFieldsMatchBarrier(record.Fields);
+        }
+
+        _justiceFinancialBarrierOperationKind = operationKind;
+        _justiceFinancialBarrierTransactionId = transactionId;
+        _justiceFinancialBarrierRevision = record.PersistenceRevision;
+        _justiceFinancialBarrierProfileGeneration = profileGeneration;
+        _justiceFinancialBarrierProfileSlot = profileSlot;
+        _justiceFinancialBarrierIdentityKey = identityKey;
+        _justiceFinancialBarrierFields =
+            new List<JusticePersistenceField>(record.Fields);
+        return true;
     }
 
     private bool PersistJusticeFinancialOutcomeWithoutEffect(string operationKind)
@@ -1000,9 +1154,21 @@ public sealed partial class DonJEnemySpawner
         JusticeWalRecord record,
         string operationKind)
     {
+        return IsJusticeFinancialWalRecordForIntent(
+            record,
+            operationKind,
+            _justiceFineDebitIntent,
+            _justiceVoluntaryFinePaymentIntent);
+    }
+
+    private bool IsJusticeFinancialWalRecordForIntent(
+        JusticeWalRecord record,
+        string operationKind,
+        JusticeFineDebitIntent fineDebitIntent,
+        JusticeVoluntaryFinePaymentIntent voluntaryPaymentIntent)
+    {
         if (record == null ||
             !string.Equals(record.OperationKind, operationKind, StringComparison.Ordinal) ||
-            record.ProfileSlot != GetJusticeFinancialIntentSlot(operationKind) ||
             ReadWalInt(record, "schemaMajor", -1) !=
                 JusticeXmlPersistenceCodec.SchemaMajor)
         {
@@ -1010,11 +1176,12 @@ public sealed partial class DonJEnemySpawner
         }
 
         if (operationKind == "VoluntaryFinePayment" &&
-            _justiceVoluntaryFinePaymentIntent != null)
+            voluntaryPaymentIntent != null)
         {
             JusticeVoluntaryFinePaymentIntent intent =
-                _justiceVoluntaryFinePaymentIntent;
-            return string.Equals(
+                voluntaryPaymentIntent;
+            return record.ProfileSlot == intent.Slot &&
+                   string.Equals(
                        ReadWalString(record, "paymentId", string.Empty),
                        intent.PaymentId ?? string.Empty,
                        StringComparison.Ordinal) &&
@@ -1028,10 +1195,11 @@ public sealed partial class DonJEnemySpawner
                        intent.PreparedAtUtcTicks;
         }
 
-        if (operationKind == "FineDebit" && _justiceFineDebitIntent != null)
+        if (operationKind == "FineDebit" && fineDebitIntent != null)
         {
-            JusticeFineDebitIntent intent = _justiceFineDebitIntent;
-            return string.Equals(
+            JusticeFineDebitIntent intent = fineDebitIntent;
+            return record.ProfileSlot == intent.Slot &&
+                   string.Equals(
                        ReadWalString(record, "episodeId", string.Empty),
                        intent.EpisodeId ?? string.Empty,
                        StringComparison.Ordinal) &&
@@ -1914,8 +2082,15 @@ public sealed partial class DonJEnemySpawner
         }
 
         IReadOnlyList<JusticeWalRecord> open = _justiceWriteAheadLog.GetOpenTransactions();
-        JusticeWalRecord newestFineDebit = null;
-        JusticeWalRecord newestVoluntaryPayment = null;
+        EnsureJusticePlayerProfilesInitialized();
+        EnsureJusticeProfilePersistenceGenerations();
+        List<JusticeFinancialWalRecoveryCandidate> financialTransactions =
+            new List<JusticeFinancialWalRecoveryCandidate>(
+                JusticePlayerProfileCount);
+        HashSet<long>[] nonSupersededFinancialGenerationsBySlot =
+            new HashSet<long>[JusticePlayerProfileCount];
+        int[] lostFinancialTransactionsBySlot =
+            new int[JusticePlayerProfileCount];
         JusticeWalRecord newestProfileResetResult = null;
         List<JusticeWalRecord> inventoryConfiscations =
             new List<JusticeWalRecord>();
@@ -1945,29 +2120,43 @@ public sealed partial class DonJEnemySpawner
                 newestProfileResetResult = candidate;
                 RecoverJusticeProfileResetFromWal(candidate);
             }
-            else if (candidate.OperationKind == "FineDebit")
+            else if (candidate.OperationKind == "FineDebit" ||
+                     candidate.OperationKind == "VoluntaryFinePayment")
             {
-                if (newestFineDebit != null && !string.Equals(
-                        newestFineDebit.TransactionId,
-                        candidate.TransactionId,
-                        StringComparison.Ordinal))
+                JusticeFinancialWalRecoveryCandidate financial;
+                if (!TryCreateJusticeFinancialWalRecoveryCandidate(
+                        candidate,
+                        out financial))
                 {
                     throw new InvalidDataException(
-                        "Plusieurs transactions FineDebit sont ouvertes dans le WAL.");
+                        "Le WAL financier cible un profil ou une génération invalide.");
                 }
-                newestFineDebit = candidate;
-            }
-            else if (candidate.OperationKind == "VoluntaryFinePayment")
-            {
-                if (newestVoluntaryPayment != null && !string.Equals(
-                        newestVoluntaryPayment.TransactionId,
-                        candidate.TransactionId,
-                        StringComparison.Ordinal))
+
+                if (!financial.IsSuperseded)
                 {
-                    throw new InvalidDataException(
-                        "Plusieurs paiements volontaires sont ouverts dans le WAL.");
+                    HashSet<long> generations =
+                        nonSupersededFinancialGenerationsBySlot[
+                            candidate.ProfileSlot];
+                    if (generations == null)
+                    {
+                        generations = new HashSet<long>();
+                        nonSupersededFinancialGenerationsBySlot[
+                            candidate.ProfileSlot] = generations;
+                    }
+                    if (!generations.Add(financial.ProfileGeneration))
+                    {
+                        throw new InvalidDataException(
+                            "Plusieurs opérations financières non supersédées ciblent le même profil et la même génération WAL.");
+                    }
+                    if (financial.ReplacesLoadedFinancialState &&
+                        candidate.State != JusticeWalState.Prepared &&
+                        ++lostFinancialTransactionsBySlot[candidate.ProfileSlot] > 1)
+                    {
+                        throw new InvalidDataException(
+                            "Le snapshot chargé précède plusieurs générations financières WAL perdues pour le même profil.");
+                    }
                 }
-                newestVoluntaryPayment = candidate;
+                financialTransactions.Add(financial);
             }
             else
             {
@@ -2021,21 +2210,109 @@ public sealed partial class DonJEnemySpawner
             }
         }
 
-        if (newestFineDebit != null && newestVoluntaryPayment != null)
+        financialTransactions.Sort(delegate(
+            JusticeFinancialWalRecoveryCandidate left,
+            JusticeFinancialWalRecoveryCandidate right)
         {
-            throw new InvalidDataException(
-                "Deux opérations financières incompatibles sont ouvertes dans le WAL.");
+            int generationOrder = left.ProfileGeneration.CompareTo(
+                right.ProfileGeneration);
+            if (generationOrder != 0)
+            {
+                return generationOrder;
+            }
+            int revisionOrder = left.Record.PersistenceRevision.CompareTo(
+                right.Record.PersistenceRevision);
+            return revisionOrder != 0
+                ? revisionOrder
+                : left.Record.Sequence.CompareTo(right.Record.Sequence);
+        });
+
+        // Je valide tout le lot avant de toucher un dossier ou un latch runtime.
+        // Une transaction invalide ne peut donc laisser une reprise partielle.
+        for (int index = 0; index < financialTransactions.Count; index++)
+        {
+            JusticeFinancialWalRecoveryCandidate financial =
+                financialTransactions[index];
+            bool valid = financial.Record.OperationKind == "FineDebit"
+                ? TryProcessJusticeFineDebitWalRecord(
+                    financial.Record,
+                    false,
+                    financial.IsSuperseded,
+                    financial.ReplacesLoadedFinancialState)
+                : TryProcessJusticeVoluntaryPaymentWalRecord(
+                    financial.Record,
+                    false,
+                    financial.IsSuperseded,
+                    financial.ReplacesLoadedFinancialState);
+            if (!valid)
+            {
+                throw new InvalidDataException(
+                    financial.Record.OperationKind == "FineDebit"
+                        ? "Intention FineDebit WAL invalide."
+                        : "Intention de paiement volontaire WAL invalide.");
+            }
         }
 
-        if (newestFineDebit != null &&
-            !TryApplyJusticeFineDebitWalRecord(newestFineDebit))
+        // Je terminalise d'abord tous les WAL supersédés. Une indisponibilité
+        // disque pendant un Append survient ainsi avant toute mutation des DTO
+        // récupérés et reste intégralement rejouable au prochain backoff.
+        for (int index = 0; index < financialTransactions.Count; index++)
         {
-            throw new InvalidDataException("Intention FineDebit WAL invalide.");
+            JusticeFinancialWalRecoveryCandidate financial =
+                financialTransactions[index];
+            if (!financial.RequiresPreMutationTerminalization)
+            {
+                continue;
+            }
+            bool applied = financial.Record.OperationKind == "FineDebit"
+                ? TryProcessJusticeFineDebitWalRecord(
+                    financial.Record,
+                    true,
+                    financial.IsSuperseded,
+                    financial.ReplacesLoadedFinancialState)
+                : TryProcessJusticeVoluntaryPaymentWalRecord(
+                    financial.Record,
+                    true,
+                    financial.IsSuperseded,
+                    financial.ReplacesLoadedFinancialState);
+            if (!applied)
+            {
+                throw new InvalidDataException(
+                    financial.Record.OperationKind == "FineDebit"
+                        ? "Intention FineDebit WAL invalide."
+                        : "Intention de paiement volontaire WAL invalide.");
+            }
         }
-        if (newestVoluntaryPayment != null &&
-            !TryApplyJusticeVoluntaryPaymentWalRecord(newestVoluntaryPayment))
+
+        // J'applique ensuite les snapshots non supersédés dans leur ordre
+        // causal. Le profil actif garde ses latches; les autres restent dans
+        // leurs DTO, sans aucune écriture WAL encore susceptible d'échouer.
+        for (int index = 0; index < financialTransactions.Count; index++)
         {
-            throw new InvalidDataException("Intention de paiement volontaire WAL invalide.");
+            JusticeFinancialWalRecoveryCandidate financial =
+                financialTransactions[index];
+            if (financial.RequiresPreMutationTerminalization)
+            {
+                continue;
+            }
+            bool applied = financial.Record.OperationKind == "FineDebit"
+                ? TryProcessJusticeFineDebitWalRecord(
+                    financial.Record,
+                    true,
+                    false,
+                    financial.ReplacesLoadedFinancialState)
+                : TryProcessJusticeVoluntaryPaymentWalRecord(
+                    financial.Record,
+                    true,
+                    false,
+                    financial.ReplacesLoadedFinancialState);
+            if (!applied)
+            {
+                throw new InvalidDataException(
+                    financial.Record.OperationKind == "FineDebit"
+                        ? "Intention FineDebit WAL invalide."
+                        : "Intention de paiement volontaire WAL invalide.");
+            }
         }
         for (int index = 0; index < inventoryConfiscations.Count; index++)
         {
@@ -2248,7 +2525,11 @@ public sealed partial class DonJEnemySpawner
             "Confiscation interrompue après tentative : snapshot conservé pour restitution différée, sans nouveau RemoveAll.");
     }
 
-    private bool TryApplyJusticeVoluntaryPaymentWalRecord(JusticeWalRecord record)
+    private bool TryProcessJusticeVoluntaryPaymentWalRecord(
+        JusticeWalRecord record,
+        bool applyChanges,
+        bool superseded,
+        bool replacesLoadedFinancialState)
     {
         if (record == null ||
             (record.State != JusticeWalState.Prepared &&
@@ -2284,11 +2565,11 @@ public sealed partial class DonJEnemySpawner
         long preparedAt = ReadWalLong(record, "preparedAt", 0L);
         string caseEpisode = ReadWalString(record, "caseEpisode", string.Empty);
         long profileGeneration;
+        JusticePlayerProfileState targetProfile;
         string expectedTransactionId = "financial:" +
             slot.ToString(CultureInfo.InvariantCulture) +
             ":VoluntaryFinePayment:" + paymentId;
         if (record.ProfileSlot != slot ||
-            slot != _justiceActivePlayerProfileSlot ||
             !IsJusticeCanonicalProfileSlot(slot) ||
             !IsCanonicalJusticeVoluntaryPaymentId(paymentId) ||
             fineBefore <= 0L || fineBefore > JusticePolicy.MaxActiveFine ||
@@ -2305,42 +2586,90 @@ public sealed partial class DonJEnemySpawner
                 expectedTransactionId,
                 record.TransactionId,
                 StringComparison.Ordinal) ||
-            !TryValidateJusticeFinancialWalProfile(record, out profileGeneration) ||
+            !TryValidateJusticeFinancialWalProfile(
+                record,
+                out profileGeneration,
+                out targetProfile))
+        {
+            return false;
+        }
+
+        if (superseded)
+        {
+            return !replacesLoadedFinancialState &&
+                   CanFinalizeSupersededJusticeFinancialWal(
+                       record,
+                       profileGeneration) &&
+                   (!applyChanges ||
+                    TryFinalizeSupersededJusticeFinancialWal(
+                        record,
+                        profileGeneration));
+        }
+
+        long loadedProfileGeneration =
+            _justiceProfilePersistenceGenerations[slot];
+        if (profileGeneration < loadedProfileGeneration ||
+            replacesLoadedFinancialState !=
+                (profileGeneration > loadedProfileGeneration) ||
+            (replacesLoadedFinancialState &&
+             (targetProfile.CaseState.FineDue != fineBefore ||
+              targetProfile.CaseState.VoluntaryFinePaid != paidBefore ||
+              targetProfile.CaseState.FineInDispute != disputeBefore)) ||
             !string.Equals(
                 caseEpisode,
-                GetCurrentJusticeFinancialCaseEpisode(),
+                GetJusticeFinancialCaseEpisode(targetProfile.CaseState),
                 StringComparison.Ordinal))
         {
             return false;
         }
 
+        if (replacesLoadedFinancialState &&
+            record.State == JusticeWalState.Prepared)
+        {
+            // Le primaire N qui contenait l'intention a disparu et seul le
+            // backup N-1 subsiste. Prepared prouve qu'aucun SET n'a commencé :
+            // je ferme donc cette demande sans reconstruire une barrière dont
+            // le snapshot n'existe plus réellement sur disque.
+            return !applyChanges ||
+                   TryRejectLostJusticePreparedFinancialWal(record);
+        }
+
+        bool ownerIsActive = slot == _justiceActivePlayerProfileSlot;
         JusticeVoluntaryFinePaymentIntent existing =
-            _justiceVoluntaryFinePaymentIntent;
+            ownerIsActive
+                ? _justiceVoluntaryFinePaymentIntent
+                : RestoreJusticeVoluntaryPaymentIntent(
+                    targetProfile.CustodySnapshot == null
+                        ? null
+                        : targetProfile.CustodySnapshot.VoluntaryPaymentIntent);
         if (existing != null && !string.Equals(
                 existing.PaymentId,
                 paymentId,
                 StringComparison.Ordinal))
         {
-            return TryFinalizeSupersededJusticeFinancialWal(record);
+            if (!replacesLoadedFinancialState)
+            {
+                return false;
+            }
+            existing = null;
         }
-        if (existing == null && record.PersistenceRevision < _justicePersistenceRevision)
-        {
-            return TryFinalizeSupersededJusticeFinancialWal(record);
-        }
-        if (existing == null && record.PersistenceRevision == _justicePersistenceRevision)
+        if (existing == null && !replacesLoadedFinancialState)
         {
             return false;
         }
         if (existing != null &&
-            !IsJusticeFinancialWalRecordForCurrentIntent(
+            !IsJusticeFinancialWalRecordForIntent(
                 record,
-                "VoluntaryFinePayment"))
+                "VoluntaryFinePayment",
+                null,
+                existing))
         {
             return false;
         }
 
         bool attempted = record.State != JusticeWalState.Prepared ||
             (existing != null && existing.DebitAttempted);
+        bool intentChanged = replacesLoadedFinancialState;
         if (existing == null)
         {
             existing = new JusticeVoluntaryFinePaymentIntent
@@ -2360,23 +2689,51 @@ public sealed partial class DonJEnemySpawner
                     ? JusticePaymentResolution.Attempted
                     : JusticePaymentResolution.Prepared
             };
-            _justiceVoluntaryFinePaymentIntent = existing;
+            intentChanged = true;
         }
         else if (attempted && !existing.DebitAttempted)
         {
-            existing.DebitAttempted = true;
-            existing.AttemptedAtUtcTicks = Math.Max(1L, record.CreatedAtUtcTicks);
-            existing.CashWriteResult = JusticeCashWriteResult.Unknown;
-            existing.Resolution = JusticePaymentResolution.Attempted;
-            existing.AmbiguousAmount = 0L;
-            existing.DebtCommitted = false;
+            intentChanged = true;
+            if (applyChanges)
+            {
+                existing.DebitAttempted = true;
+                existing.AttemptedAtUtcTicks = Math.Max(
+                    1L,
+                    record.CreatedAtUtcTicks);
+                existing.CashWriteResult = JusticeCashWriteResult.Unknown;
+                existing.Resolution = JusticePaymentResolution.Attempted;
+                existing.AmbiguousAmount = 0L;
+                existing.DebtCommitted = false;
+            }
         }
 
-        if (record.PersistenceRevision > _justicePersistenceRevision)
+        if (intentChanged &&
+            !CanStoreRecoveredJusticeFinancialIntent(
+                targetProfile,
+                ownerIsActive,
+                existing.Slot))
         {
-            _justiceCaseState.FineDue = fineBefore;
-            _justiceCaseState.VoluntaryFinePaid = paidBefore;
-            _justiceCaseState.FineInDispute = disputeBefore;
+            return false;
+        }
+        if (!applyChanges)
+        {
+            return true;
+        }
+        if (intentChanged &&
+            !TryStoreRecoveredJusticeVoluntaryPaymentIntent(
+                targetProfile,
+                ownerIsActive,
+                existing,
+                replacesLoadedFinancialState))
+        {
+            return false;
+        }
+
+        if (replacesLoadedFinancialState)
+        {
+            targetProfile.CaseState.FineDue = fineBefore;
+            targetProfile.CaseState.VoluntaryFinePaid = paidBefore;
+            targetProfile.CaseState.FineInDispute = disputeBefore;
             _justiceProfilePersistenceGenerations[slot] = Math.Max(
                 _justiceProfilePersistenceGenerations[slot],
                 profileGeneration);
@@ -2388,7 +2745,11 @@ public sealed partial class DonJEnemySpawner
         return true;
     }
 
-    private bool TryApplyJusticeFineDebitWalRecord(JusticeWalRecord record)
+    private bool TryProcessJusticeFineDebitWalRecord(
+        JusticeWalRecord record,
+        bool applyChanges,
+        bool superseded,
+        bool replacesLoadedFinancialState)
     {
         if (record == null ||
             (record.State != JusticeWalState.Prepared &&
@@ -2438,6 +2799,7 @@ public sealed partial class DonJEnemySpawner
         long preparedAt = ReadWalLong(record, "preparedAt", 0L);
         string custodyEpisode = ReadWalString(record, "custodyEpisode", string.Empty);
         long profileGeneration;
+        JusticePlayerProfileState targetProfile;
         int expectedDebit = cashPlan
             ? (int)Math.Min(fineAmount, (long)Math.Max(0, cashBefore))
             : 0;
@@ -2445,7 +2807,6 @@ public sealed partial class DonJEnemySpawner
             slot.ToString(CultureInfo.InvariantCulture) +
             ":FineDebit:" + episodeId;
         if (record.ProfileSlot != slot ||
-            slot != _justiceActivePlayerProfileSlot ||
             !IsJusticeCanonicalProfileSlot(slot) ||
             string.IsNullOrWhiteSpace(episodeId) || episodeId.Length > 256 ||
             string.IsNullOrWhiteSpace(custodyEpisode) || custodyEpisode.Length > 256 ||
@@ -2474,42 +2835,91 @@ public sealed partial class DonJEnemySpawner
                 expectedTransactionId,
                 record.TransactionId,
                 StringComparison.Ordinal) ||
-            !string.Equals(
-                custodyEpisode,
-                _justiceCaseState == null
-                    ? string.Empty
-                    : (_justiceCaseState.CustodyEpisodeId ?? string.Empty).Trim(),
-                StringComparison.Ordinal) ||
-            !IsJusticeFineOperationEpisodeValid(_justiceCaseState, episodeId) ||
-            !TryValidateJusticeFinancialWalProfile(record, out profileGeneration))
+            !TryValidateJusticeFinancialWalProfile(
+                record,
+                out profileGeneration,
+                out targetProfile))
         {
             return false;
         }
 
-        JusticeFineDebitIntent existing = _justiceFineDebitIntent;
+        if (superseded)
+        {
+            return !replacesLoadedFinancialState &&
+                   CanFinalizeSupersededJusticeFinancialWal(
+                       record,
+                       profileGeneration) &&
+                   (!applyChanges ||
+                    TryFinalizeSupersededJusticeFinancialWal(
+                        record,
+                        profileGeneration));
+        }
+
+        long loadedProfileGeneration =
+            _justiceProfilePersistenceGenerations[slot];
+        if (profileGeneration < loadedProfileGeneration ||
+            replacesLoadedFinancialState !=
+                (profileGeneration > loadedProfileGeneration) ||
+            (replacesLoadedFinancialState &&
+             (targetProfile.CaseState.FineDue != fineAmount ||
+              targetProfile.CaseState.FineInDispute != disputeBefore ||
+              targetProfile.CaseState.SentenceSeconds != sentenceBefore)) ||
+            !string.Equals(
+                custodyEpisode,
+                targetProfile == null || targetProfile.CaseState == null
+                    ? string.Empty
+                    : (targetProfile.CaseState.CustodyEpisodeId ?? string.Empty).Trim(),
+                StringComparison.Ordinal) ||
+            !IsJusticeFineOperationEpisodeValid(targetProfile.CaseState, episodeId))
+        {
+            return false;
+        }
+
+        if (replacesLoadedFinancialState &&
+            record.State == JusticeWalState.Prepared)
+        {
+            // Sans le snapshot N, la seule décision certaine est qu'aucun débit
+            // n'a encore été autorisé. Je rejette l'intention orpheline et laisse
+            // le dossier N-1 préparer proprement une nouvelle opération.
+            return !applyChanges ||
+                   TryRejectLostJusticePreparedFinancialWal(record);
+        }
+
+        bool ownerIsActive = slot == _justiceActivePlayerProfileSlot;
+        JusticeFineDebitIntent existing = ownerIsActive
+            ? _justiceFineDebitIntent
+            : RestoreJusticeFineDebitIntent(
+                targetProfile.CustodySnapshot == null
+                    ? null
+                    : targetProfile.CustodySnapshot.FineDebitIntent);
         if (existing != null && !string.Equals(
                 existing.EpisodeId,
                 episodeId,
                 StringComparison.Ordinal))
         {
-            return TryFinalizeSupersededJusticeFinancialWal(record);
+            if (!replacesLoadedFinancialState)
+            {
+                return false;
+            }
+            existing = null;
         }
-        if (existing == null && record.PersistenceRevision < _justicePersistenceRevision)
-        {
-            return TryFinalizeSupersededJusticeFinancialWal(record);
-        }
-        if (existing == null && record.PersistenceRevision == _justicePersistenceRevision)
+        if (existing == null && !replacesLoadedFinancialState)
         {
             return false;
         }
         if (existing != null &&
-            !IsJusticeFinancialWalRecordForCurrentIntent(record, "FineDebit"))
+            !IsJusticeFinancialWalRecordForIntent(
+                record,
+                "FineDebit",
+                existing,
+                null))
         {
             return false;
         }
 
         bool attempted = record.State != JusticeWalState.Prepared ||
             (existing != null && existing.DebitAttempted);
+        bool intentChanged = replacesLoadedFinancialState;
         if (existing == null)
         {
             existing = new JusticeFineDebitIntent
@@ -2533,22 +2943,50 @@ public sealed partial class DonJEnemySpawner
                     : JusticePaymentResolution.Prepared,
                 FineInDisputeBefore = disputeBefore
             };
-            _justiceFineDebitIntent = existing;
+            intentChanged = true;
         }
         else if (attempted && !existing.DebitAttempted)
         {
-            existing.DebitAttempted = true;
-            existing.AttemptedAtUtcTicks = Math.Max(1L, record.CreatedAtUtcTicks);
-            existing.CashWriteResult = JusticeCashWriteResult.Unknown;
-            existing.Resolution = JusticePaymentResolution.Attempted;
-            existing.AmbiguousAmount = 0L;
+            intentChanged = true;
+            if (applyChanges)
+            {
+                existing.DebitAttempted = true;
+                existing.AttemptedAtUtcTicks = Math.Max(
+                    1L,
+                    record.CreatedAtUtcTicks);
+                existing.CashWriteResult = JusticeCashWriteResult.Unknown;
+                existing.Resolution = JusticePaymentResolution.Attempted;
+                existing.AmbiguousAmount = 0L;
+            }
         }
 
-        if (record.PersistenceRevision > _justicePersistenceRevision)
+        if (intentChanged &&
+            !CanStoreRecoveredJusticeFinancialIntent(
+                targetProfile,
+                ownerIsActive,
+                existing.Slot))
         {
-            _justiceCaseState.FineDue = fineAmount;
-            _justiceCaseState.FineInDispute = disputeBefore;
-            _justiceCaseState.SentenceSeconds = sentenceBefore;
+            return false;
+        }
+        if (!applyChanges)
+        {
+            return true;
+        }
+        if (intentChanged &&
+            !TryStoreRecoveredJusticeFineDebitIntent(
+                targetProfile,
+                ownerIsActive,
+                existing,
+                replacesLoadedFinancialState))
+        {
+            return false;
+        }
+
+        if (replacesLoadedFinancialState)
+        {
+            targetProfile.CaseState.FineDue = fineAmount;
+            targetProfile.CaseState.FineInDispute = disputeBefore;
+            targetProfile.CaseState.SentenceSeconds = sentenceBefore;
             _justiceProfilePersistenceGenerations[slot] = Math.Max(
                 _justiceProfilePersistenceGenerations[slot],
                 profileGeneration);
@@ -2560,10 +2998,235 @@ public sealed partial class DonJEnemySpawner
         return true;
     }
 
+    private bool CanStoreRecoveredJusticeFinancialIntent(
+        JusticePlayerProfileState targetProfile,
+        bool ownerIsActive,
+        int intentSlot)
+    {
+        return targetProfile != null &&
+               targetProfile.Slot == intentSlot &&
+               ownerIsActive ==
+                   (targetProfile.Slot == _justiceActivePlayerProfileSlot) &&
+               (ownerIsActive || targetProfile.CustodySnapshot != null);
+    }
+
+    private bool TryStoreRecoveredJusticeFineDebitIntent(
+        JusticePlayerProfileState targetProfile,
+        bool ownerIsActive,
+        JusticeFineDebitIntent intent,
+        bool replacesLoadedFinancialState)
+    {
+        if (intent == null ||
+            !CanStoreRecoveredJusticeFinancialIntent(
+                targetProfile,
+                ownerIsActive,
+                intent.Slot))
+        {
+            return false;
+        }
+
+        if (ownerIsActive)
+        {
+            _justiceFineDebitIntent = intent;
+            if (replacesLoadedFinancialState)
+            {
+                _justiceVoluntaryFinePaymentIntent = null;
+            }
+            return true;
+        }
+
+        JusticeCustodyPersistenceSnapshot source = targetProfile.CustodySnapshot;
+        if (source == null)
+        {
+            return false;
+        }
+
+        // Je remplace uniquement l'intention du propriétaire du WAL. Le profil
+        // actuellement joué conserve ainsi son cash, son dossier et sa détention.
+        targetProfile.CustodySnapshot =
+            CloneJusticeCustodyPersistenceSnapshotWithFinancialIntents(
+                source,
+                CreateJusticeFineDebitPersistenceSnapshot(intent),
+                replacesLoadedFinancialState
+                    ? null
+                    : source.VoluntaryPaymentIntent);
+        targetProfile.CustodyXml = string.Empty;
+        return true;
+    }
+
+    private bool TryStoreRecoveredJusticeVoluntaryPaymentIntent(
+        JusticePlayerProfileState targetProfile,
+        bool ownerIsActive,
+        JusticeVoluntaryFinePaymentIntent intent,
+        bool replacesLoadedFinancialState)
+    {
+        if (intent == null ||
+            !CanStoreRecoveredJusticeFinancialIntent(
+                targetProfile,
+                ownerIsActive,
+                intent.Slot))
+        {
+            return false;
+        }
+
+        if (ownerIsActive)
+        {
+            _justiceVoluntaryFinePaymentIntent = intent;
+            if (replacesLoadedFinancialState)
+            {
+                _justiceFineDebitIntent = null;
+            }
+            return true;
+        }
+
+        JusticeCustodyPersistenceSnapshot source = targetProfile.CustodySnapshot;
+        if (source == null)
+        {
+            return false;
+        }
+
+        // Je garde le snapshot inactif immuable : la reprise produit un nouveau
+        // graphe qui sera restauré seulement quand son protagoniste sera activé.
+        targetProfile.CustodySnapshot =
+            CloneJusticeCustodyPersistenceSnapshotWithFinancialIntents(
+                source,
+                replacesLoadedFinancialState
+                    ? null
+                    : source.FineDebitIntent,
+                CreateJusticeVoluntaryPaymentPersistenceSnapshot(intent));
+        targetProfile.CustodyXml = string.Empty;
+        return true;
+    }
+
+    private static JusticeFineDebitPersistenceSnapshot
+        CreateJusticeFineDebitPersistenceSnapshot(JusticeFineDebitIntent intent)
+    {
+        return intent == null
+            ? null
+            : new JusticeFineDebitPersistenceSnapshot(
+                intent.EpisodeId,
+                intent.Slot,
+                intent.FineAmount,
+                intent.CashPlanPrepared,
+                intent.PreparedAtUtcTicks,
+                intent.DebitAmount,
+                intent.CashBefore,
+                intent.CashAfter,
+                intent.SentenceIfDebited,
+                intent.SentenceIfConverted,
+                intent.StationPlanned,
+                intent.DebitAttempted,
+                (int)intent.CashWriteResult,
+                (int)intent.Resolution,
+                intent.FineInDisputeBefore,
+                intent.AmbiguousAmount,
+                intent.AttemptedAtUtcTicks);
+    }
+
+    private static JusticeVoluntaryPaymentPersistenceSnapshot
+        CreateJusticeVoluntaryPaymentPersistenceSnapshot(
+            JusticeVoluntaryFinePaymentIntent intent)
+    {
+        return intent == null
+            ? null
+            : new JusticeVoluntaryPaymentPersistenceSnapshot(
+                intent.PaymentId,
+                intent.Slot,
+                intent.FineBefore,
+                intent.DebitAmount,
+                intent.CashBefore,
+                intent.CashAfter,
+                intent.FineInDisputeBefore,
+                intent.PreparedAtUtcTicks,
+                intent.DebitAttempted,
+                intent.AttemptedAtUtcTicks,
+                (int)intent.CashWriteResult,
+                (int)intent.Resolution,
+                intent.AmbiguousAmount,
+                intent.DebtCommitted);
+    }
+
+    private static JusticeCustodyPersistenceSnapshot
+        CloneJusticeCustodyPersistenceSnapshotWithFinancialIntents(
+            JusticeCustodyPersistenceSnapshot source,
+            JusticeFineDebitPersistenceSnapshot fineDebitIntent,
+            JusticeVoluntaryPaymentPersistenceSnapshot voluntaryPaymentIntent)
+    {
+        if (source == null)
+        {
+            return null;
+        }
+
+        return new JusticeCustodyPersistenceSnapshot(
+            source.Active,
+            source.Site,
+            source.PoliceSuppressionApplied,
+            source.PoliceDispatchDisabled,
+            source.InitialSentenceSeconds,
+            source.ActivityReductionSeconds,
+            source.InventoryRemoved,
+            source.WeaponControlsLocked,
+            source.InventoryState,
+            source.InventoryCaptureFailures,
+            source.InventoryRemovalFailures,
+            source.DeferredInventoryRestore,
+            source.WaitingForRespawn,
+            source.DeathRebindPending,
+            source.PlayerStateStored,
+            source.StoredInvincible,
+            source.StoredFrozen,
+            source.StoredCanRagdoll,
+            source.PlayerModelHash,
+            source.PlayerSlot,
+            source.ReleaseSelectedWeapon,
+            source.LegalReleaseWantedClearAttempted,
+            source.AmnestyWantedClearAttempted,
+            fineDebitIntent,
+            voluntaryPaymentIntent,
+            source.DisciplineIntent,
+            source.InventorySnapshot,
+            source.HasActivityCooldownContainer,
+            source.Cooldowns);
+    }
+
+    private bool TryCreateJusticeFinancialWalRecoveryCandidate(
+        JusticeWalRecord record,
+        out JusticeFinancialWalRecoveryCandidate candidate)
+    {
+        candidate = null;
+        long profileGeneration;
+        JusticePlayerProfileState profile;
+        if (record == null ||
+            (record.State != JusticeWalState.Prepared &&
+             record.State != JusticeWalState.Attempted &&
+             record.State != JusticeWalState.Ambiguous) ||
+            (record.OperationKind != "FineDebit" &&
+             record.OperationKind != "VoluntaryFinePayment") ||
+            ReadWalInt(record, "slot", -1) != record.ProfileSlot ||
+            !TryValidateJusticeFinancialWalProfile(
+                record,
+                out profileGeneration,
+                out profile) ||
+            profile == null)
+        {
+            return false;
+        }
+
+        long loadedProfileGeneration =
+            _justiceProfilePersistenceGenerations[record.ProfileSlot];
+        candidate = new JusticeFinancialWalRecoveryCandidate(
+            record,
+            profileGeneration,
+            loadedProfileGeneration);
+        return true;
+    }
+
     private bool TryValidateJusticeFinancialWalProfile(
         JusticeWalRecord record,
-        out long profileGeneration)
+        out long profileGeneration,
+        out JusticePlayerProfileState profile)
     {
+        profile = null;
         profileGeneration = record == null
             ? -1L
             : ReadWalLong(record, "profileGeneration", -1L);
@@ -2577,29 +3240,44 @@ public sealed partial class DonJEnemySpawner
 
         EnsureJusticePlayerProfilesInitialized();
         EnsureJusticeProfilePersistenceGenerations();
-        JusticePlayerProfileState profile =
+        JusticePlayerProfileState loadedProfile =
             _justicePlayerProfiles[record.ProfileSlot];
         string identityKey = ReadWalString(record, "identityKey", string.Empty);
-        long loadedGeneration =
-            _justiceProfilePersistenceGenerations[record.ProfileSlot];
-        if (profile == null || string.IsNullOrWhiteSpace(identityKey) ||
+        if (loadedProfile == null || loadedProfile.CaseState == null ||
+            string.IsNullOrWhiteSpace(identityKey) ||
             !string.Equals(
                 identityKey,
-                CreateJusticeProfileIdentityKey(profile),
+                CreateJusticeProfileIdentityKey(loadedProfile),
                 StringComparison.Ordinal))
         {
             return false;
         }
 
-        return record.PersistenceRevision > _justicePersistenceRevision
-            ? profileGeneration >= loadedGeneration
-            : profileGeneration <= loadedGeneration;
+        profile = loadedProfile;
+        return true;
     }
 
-    private bool TryFinalizeSupersededJusticeFinancialWal(JusticeWalRecord record)
+    private bool CanFinalizeSupersededJusticeFinancialWal(
+        JusticeWalRecord record,
+        long profileGeneration)
     {
-        if (record == null || _justiceWriteAheadLog == null ||
-            record.PersistenceRevision >= _justicePersistenceRevision)
+        return record != null && _justiceWriteAheadLog != null &&
+               profileGeneration > 0L &&
+               IsJusticeCanonicalProfileSlot(record.ProfileSlot) &&
+               _justiceProfilePersistenceGenerations != null &&
+               _justiceProfilePersistenceGenerations.Length ==
+                   JusticePlayerProfileCount &&
+               _justiceProfilePersistenceGenerations[record.ProfileSlot] >
+                   profileGeneration;
+    }
+
+    private bool TryFinalizeSupersededJusticeFinancialWal(
+        JusticeWalRecord record,
+        long profileGeneration)
+    {
+        if (!CanFinalizeSupersededJusticeFinancialWal(
+                record,
+                profileGeneration))
         {
             return false;
         }
@@ -2607,38 +3285,65 @@ public sealed partial class DonJEnemySpawner
         JusticeWalState terminal = record.State == JusticeWalState.Prepared
             ? JusticeWalState.Rejected
             : JusticeWalState.Confirmed;
-        try
+        // Je laisse remonter IOException/UnauthorizedAccessException jusqu'à
+        // l'initialisation : un verrou antivirus ou disque temporaire doit
+        // déclencher le backoff, jamais être maquillé en corruption permanente.
+        _justiceWriteAheadLog.Append(new JusticeWalRecord(
+            record.TransactionId,
+            record.OperationKind,
+            record.ProfileSlot,
+            terminal,
+            Math.Max(
+                record.PersistenceRevision,
+                _justicePersistenceRevision),
+            record.CreatedAtUtcTicks,
+            record.Fields));
+        return true;
+    }
+
+    private bool TryRejectLostJusticePreparedFinancialWal(
+        JusticeWalRecord record)
+    {
+        if (record == null || record.State != JusticeWalState.Prepared ||
+            _justiceWriteAheadLog == null)
         {
-            _justiceWriteAheadLog.Append(new JusticeWalRecord(
-                record.TransactionId,
-                record.OperationKind,
-                record.ProfileSlot,
-                terminal,
-                _justicePersistenceRevision,
-                record.CreatedAtUtcTicks,
-                record.Fields));
-            return true;
-        }
-        catch (Exception exception)
-        {
-            _justicePersistenceLastError =
-                exception.GetType().Name + ": " + exception.Message;
             return false;
         }
+
+        _justiceWriteAheadLog.Append(new JusticeWalRecord(
+            record.TransactionId,
+            record.OperationKind,
+            record.ProfileSlot,
+            JusticeWalState.Rejected,
+            Math.Max(
+                record.PersistenceRevision,
+                _justicePersistenceRevision),
+            record.CreatedAtUtcTicks,
+            record.Fields));
+        _justicePersistenceRevision = Math.Max(
+            _justicePersistenceRevision,
+            record.PersistenceRevision);
+        JusticeMarkStateDirty();
+        return true;
     }
 
     private string GetCurrentJusticeFinancialCaseEpisode()
     {
-        if (_justiceCaseState == null)
+        return GetJusticeFinancialCaseEpisode(_justiceCaseState);
+    }
+
+    private static string GetJusticeFinancialCaseEpisode(JusticeCaseState state)
+    {
+        if (state == null)
         {
             return string.Empty;
         }
 
         string custodyEpisode =
-            (_justiceCaseState.CustodyEpisodeId ?? string.Empty).Trim();
+            (state.CustodyEpisodeId ?? string.Empty).Trim();
         return custodyEpisode.Length > 0
             ? custodyEpisode
-            : (_justiceCaseState.WantedEpisodeId ?? string.Empty).Trim();
+            : (state.WantedEpisodeId ?? string.Empty).Trim();
     }
 
     private static bool HasExactJusticeWalFields(

@@ -220,6 +220,78 @@ public sealed class JusticeCustodyHardeningTests
     }
 
     [TestMethod]
+    public void PoliceDeathRespawnIdentity_AcceptsTheSameCanonicalSlotOrTheExactCustomModel()
+    {
+        const int ownerSlot = 0;
+        const int customModel = 0x123456;
+        const int canonicalModel = 0x654321;
+
+        // Je reconnais le protagoniste canonique par son slot, même si GTA lui
+        // rend son modèle d'origine après une mort survenue sous un ped custom.
+        Assert.IsTrue(JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+            ownerSlot,
+            canonicalModel,
+            ownerSlot,
+            customModel));
+
+        // Je refuse toujours un autre protagoniste canonique et je conserve la
+        // preuve forte du modèle exact lorsqu'aucun slot GTA n'est disponible.
+        Assert.IsFalse(JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+            1,
+            canonicalModel,
+            ownerSlot,
+            customModel));
+        Assert.IsTrue(JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+            -1,
+            customModel,
+            ownerSlot,
+            customModel));
+        Assert.IsFalse(JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+            -1,
+            canonicalModel,
+            ownerSlot,
+            customModel));
+        Assert.IsFalse(JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+            ownerSlot,
+            0,
+            ownerSlot,
+            customModel));
+        Assert.IsFalse(JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+            ownerSlot,
+            canonicalModel,
+            -1,
+            customModel));
+        Assert.IsFalse(JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+            ownerSlot,
+            canonicalModel,
+            ownerSlot,
+            0));
+
+        string source = ReadCustodySource();
+        string pendingWalResolver = ExtractMethodBody(
+            source,
+            "TryResolveJusticePendingWalPoliceDeathHoldingIntent");
+        string holdingCompatibility = ExtractMethodBody(
+            source,
+            "IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible");
+        string respawnMaskCompatibility = ExtractMethodBody(
+            source,
+            "CanMaskJusticePoliceDeathRespawnOrigin");
+        StringAssert.Contains(
+            pendingWalResolver,
+            "JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(");
+        StringAssert.Contains(
+            holdingCompatibility,
+            "JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(");
+        StringAssert.Contains(
+            respawnMaskCompatibility,
+            "JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(");
+        Assert.IsFalse(
+            pendingWalResolver.Contains("currentIdentityExact"),
+            "Le resolver WAL ne doit plus imposer le modèle custom à un slot canonique prouvé.");
+    }
+
+    [TestMethod]
     public void CustodyRespawn_ReturnsAnExistingSentenceToItsCellWithoutReapplyingIt()
     {
         Assert.IsFalse(JusticePolicy.ShouldReturnCustodyTransferToCell(JusticePhase.Captured));
@@ -283,6 +355,58 @@ public sealed class JusticeCustodyHardeningTests
             "SelectJusticeUnarmedSafe(player)");
         Assert.AreEqual(1, CountOccurrences(weaponLock, "GtaControl.Attack"));
         Assert.AreEqual(1, CountOccurrences(weaponLock, "GtaControl.SelectWeapon"));
+    }
+
+    [TestMethod]
+    public void CustodyWeaponLock_BlocksAnAmbiguousPartialRemovalOnlyDuringCustody()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        Type inventoryStateType = GetNestedType("JusticeInventoryCustodyState");
+        SetField(
+            script,
+            "_justiceInventoryCustodyState",
+            Enum.Parse(inventoryStateType, "RestoreAmbiguous"));
+        SetField(script, "_justiceWeaponSnapshot", CreateValidatedEmptyWeaponSnapshot());
+        SetField(script, "_justiceDeferredInventoryRestore", true);
+        SetField(script, "_justiceInventoryRemoved", false);
+        SetField(script, "_justiceWeaponControlsLocked", false);
+
+        JusticeCaseState state = new JusticeCaseState
+        {
+            Enabled = true,
+            Phase = JusticePhase.Incarcerated,
+            SentenceSeconds = 120,
+            CustodyEpisodeId = "custody:ambiguous-lock"
+        };
+        SetField(script, "_justiceCaseState", state);
+
+        Assert.IsTrue(
+            (bool)Invoke(script, "ShouldEnforceJusticeCustodyWeaponLock"),
+            "Une arme potentiellement restée après RemoveAll doit être inutilisable en prison.");
+
+        state.Phase = JusticePhase.AtLarge;
+        Assert.IsFalse(
+            (bool)Invoke(script, "ShouldEnforceJusticeCustodyWeaponLock"),
+            "Le snapshot différé ne doit jamais verrouiller les contrôles après la libération.");
+
+        SetField(script, "_justiceInventoryRemoved", true);
+        Assert.IsTrue(
+            (bool)Invoke(script, "ShouldEnforceJusticeCustodyWeaponLock"),
+            "Une confiscation vérifiée conserve le verrou de sélection d'arme.");
+
+        string weaponLock = ExtractMethodBody(
+            ReadCustodySource(),
+            "EnforceJusticeCustodyWeaponLock");
+        string weaponLockPredicate = ExtractMethodBody(
+            ReadCustodySource(),
+            "ShouldEnforceJusticeCustodyWeaponLock");
+        AssertOrdered(
+            weaponLock,
+            "ShouldEnforceJusticeCustodyWeaponLock()",
+            "CanUseCustodyUnarmedCombat");
+        Assert.IsFalse(
+            weaponLockPredicate.Contains("ValidateJusticeWeaponSnapshot"),
+            "Le verrou exécuté à chaque frame doit rester O(1), sans HashSet ni validation profonde.");
     }
 
     [TestMethod]
@@ -910,6 +1034,57 @@ public sealed class JusticeCustodyHardeningTests
     }
 
     [TestMethod]
+    public void CustodyEscapeObservation_IsInterruptedBeforeParkingAndWhileRuntimeIsSuspended()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        JusticeCaseState state = new JusticeCaseState
+        {
+            Enabled = true,
+            Phase = JusticePhase.Escaping,
+            SentenceSeconds = 180,
+            CustodyEpisodeId = "custody:escape-interruption"
+        };
+        SetField(script, "_justiceCaseState", state);
+        SetField(script, "_justiceOutsideCustodySinceAt", 1200);
+        SetField(script, "_justiceStateDirty", false);
+
+        Invoke(script, "InterruptJusticeCustodyEscapeObservation");
+
+        Assert.AreEqual(
+            JusticePhase.Incarcerated,
+            state.Phase,
+            "Une interruption non observable annule la continuité de l'évasion.");
+        Assert.AreEqual(0, GetField<int>(script, "_justiceOutsideCustodySinceAt"));
+        Assert.IsTrue(GetField<bool>(script, "_justiceStateDirty"));
+        Assert.AreEqual(
+            0,
+            state.CompletedOperationIds.Count,
+            "L'interruption ne doit enregistrer ni évasion, ni nouvelle opération judiciaire.");
+
+        string source = ReadCustodySource();
+        string interruption = ExtractMethodBody(
+            source,
+            "InterruptJusticeCustodyEscapeObservation");
+        AssertOrdered(
+            interruption,
+            "_justiceCaseState.Phase == JusticePhase.Escaping",
+            "JusticeSignal.Restrained",
+            "JusticeMarkStateDirty()",
+            "_justiceOutsideCustodySinceAt = 0");
+
+        string update = ExtractMethodBody(source, "JusticeUpdateCustody");
+        AssertOrdered(
+            update,
+            "RetryJusticeCustodyActivityTaskClear(player, now)",
+            "EnforceJusticeCustodyWeaponLock(player)",
+            "if (!JusticeCustodyCanMutateWorld(player))",
+            "CancelJusticeCustodyActivity(false, now)",
+            "InterruptJusticeCustodyEscapeObservation()",
+            "ResetJusticeCustodyClock(now)",
+            "return;");
+    }
+
+    [TestMethod]
     public void CustodyProfileSwitch_ParksWorldEffectsAndDefersReleaseToTheReturningHero()
     {
         string source = ReadCustodySource();
@@ -918,6 +1093,7 @@ public sealed class JusticeCustodyHardeningTests
             "TryPrepareJusticeCustodyForProfileSwitch");
         AssertOrdered(
             parking,
+            "InterruptJusticeCustodyEscapeObservation()",
             "CanParkCurrentJusticeCustodyForProfileSwitch()",
             "ApplyLoadedJusticeActivityCooldowns(now)",
             "SetJusticeCustodyPoliceSuppression(false)",

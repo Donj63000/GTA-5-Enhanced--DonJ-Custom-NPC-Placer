@@ -168,27 +168,27 @@ internal sealed class JusticeXmlPersistenceCodec : IJusticePersistenceCodec
             }
 
             string expectedRecoveryHash = root.GetAttribute("recoverySha256");
-            if (!string.IsNullOrEmpty(expectedRecoveryHash))
+            // Je traite cette preuve comme une partie obligatoire du schéma 2.0.
+            // Son absence ne doit jamais dégrader silencieusement la lecture
+            // normale vers un document qui ne prouve plus son autorité runtime.
+            JusticePersistenceProfileSnapshot activeProfile =
+                FindProfileBySlot(profiles, activeSlot);
+            string activeProfileHash = activeProfile == null
+                ? string.Empty
+                : ComputeProfileHash(activeProfile);
+            string actualRecoveryHash = ComputeRecoveryHash(
+                generation,
+                activeSlot,
+                globalFields,
+                activeProfileHash);
+            if (!IsSha256(expectedRecoveryHash) ||
+                !string.Equals(
+                    expectedRecoveryHash,
+                    actualRecoveryHash,
+                    StringComparison.OrdinalIgnoreCase))
             {
-                JusticePersistenceProfileSnapshot activeProfile =
-                    FindProfileBySlot(profiles, activeSlot);
-                string activeProfileHash = activeProfile == null
-                    ? string.Empty
-                    : ComputeProfileHash(activeProfile);
-                string actualRecoveryHash = ComputeRecoveryHash(
-                    generation,
-                    activeSlot,
-                    globalFields,
-                    activeProfileHash);
-                if (!IsSha256(expectedRecoveryHash) ||
-                    !string.Equals(
-                        expectedRecoveryHash,
-                        actualRecoveryHash,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidDataException(
-                        "SHA-256 de récupération Justice v2 invalide.");
-                }
+                throw new InvalidDataException(
+                    "SHA-256 de récupération Justice v2 invalide.");
             }
 
             snapshot = new JusticePersistenceSnapshot(

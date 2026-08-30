@@ -1234,6 +1234,7 @@ public sealed class JusticeRuntimeContractTests
             JusticeCaseState caseState = GetFieldValue<JusticeCaseState>(writerScript, "_justiceCaseState");
             JusticeRecordState record = GetFieldValue<JusticeRecordState>(writerScript, "_justiceRecordState");
             PopulatePersistedJusticeState(caseState, record);
+            SetFieldValue(writerScript, "_justiceActivePlayerProfileSlot", 1);
             SetFieldValue(writerScript, "_justiceEnabled", true);
             SetFieldValue(writerScript, "_justiceWeaponSnapshot", CreateValidWeaponSnapshot());
             SetFieldValue(writerScript, "_justiceInventoryRemoved", true);
@@ -1252,7 +1253,7 @@ public sealed class JusticeRuntimeContractTests
 
             object fineIntent = Activator.CreateInstance(GetNestedType("JusticeFineDebitIntent"), true);
             SetMemberValue(fineIntent, "EpisodeId", "custody:one:fine:release:incident:one");
-            SetMemberValue(fineIntent, "Slot", 0);
+            SetMemberValue(fineIntent, "Slot", 1);
             SetMemberValue(fineIntent, "FineAmount", 4321L);
             SetMemberValue(fineIntent, "CashPlanPrepared", true);
             SetMemberValue(
@@ -1473,6 +1474,74 @@ public sealed class JusticeRuntimeContractTests
             Assert.AreEqual(0L, GetMemberValue(legacyFineLoaded, "PreparedAtUtcTicks"));
             Assert.IsTrue((bool)GetMemberValue(legacyFineLoaded, "DebitAttempted"));
             Assert.AreEqual(0L, GetMemberValue(legacyFineLoaded, "AttemptedAtUtcTicks"));
+        });
+    }
+
+    [TestMethod]
+    public void JusticePersistence_CollectiveMergeKeepsCanonicalIdentityAndFullSnapshotRoundTrips()
+    {
+        WithTemporarySaveDirectory(directory =>
+        {
+            object writer = CreateJusticeHeadlessScript();
+            InvokeInstance(writer, "EnsureJusticePlayerProfilesInitialized");
+            JusticePlayerProfileState[] profiles =
+                GetFieldValue<JusticePlayerProfileState[]>(writer, "_justicePlayerProfiles");
+            JusticeCaseState caseState = GetFieldValue<JusticeCaseState>(writer, "_justiceCaseState");
+            JusticeRecordState record = GetFieldValue<JusticeRecordState>(writer, "_justiceRecordState");
+            caseState.Enabled = true;
+
+            const string episodeId = "wanted:collective-roundtrip";
+            JusticeIncident first = CreateConfirmedDirectIncident(
+                JusticeCrimeKind.AccessoryAssaultOfficer,
+                "incident:collective:first",
+                episodeId,
+                JusticeCircumstances.None);
+            first.VictimHandle = 200;
+            first.VictimGeneration = 2;
+            first.IsAlliedAction = true;
+            first.AllyHandle = 501;
+            first.AllyGeneration = 11;
+
+            JusticeIncident second = CreateConfirmedDirectIncident(
+                JusticeCrimeKind.AccessoryAssaultOfficer,
+                "incident:collective:second",
+                episodeId,
+                JusticeCircumstances.None);
+            second.VictimHandle = first.VictimHandle;
+            second.VictimGeneration = first.VictimGeneration;
+            second.IsAlliedAction = true;
+            second.AllyHandle = 502;
+            second.AllyGeneration = 12;
+
+            Assert.IsNotNull(JusticePolicy.ApplyConfirmedIncident(caseState, first, record));
+            JusticeCharge merged = JusticePolicy.ApplyConfirmedIncident(caseState, second, record);
+            Assert.IsNotNull(merged);
+            Assert.AreEqual(1, caseState.Charges.Count);
+            Assert.AreEqual(second.IncidentId, merged.IncidentId);
+            Assert.AreEqual("charge:" + second.IncidentId, merged.ChargeId);
+            caseState.Phase = JusticePhase.Wanted;
+
+            // Je publie le dossier fusionné par le vrai repository afin de couvrir
+            // le DTO figé, le codec v2, les SHA-256 et la relecture des profils.
+            profiles[0].CaseState = caseState;
+            profiles[0].RecordState = record;
+            SetFieldValue(writer, "_justiceEnabled", true);
+            SetFieldValue(writer, "_justiceActivePlayerProfileSlot", 0);
+            SetFieldValue(writer, "_justiceLastCanonicalPlayerSlot", 0);
+            SetFieldValue(writer, "_justiceProfileSelectionPending", false);
+
+            FlushAndAwait(writer);
+            string path = Path.Combine(directory, "_justice_state.xml");
+            Assert.IsTrue(File.Exists(path));
+
+            object reader = CreateJusticeHeadlessScript();
+            Assert.IsTrue((bool)InvokeInstance(reader, "TryReadJusticeStateFile", path));
+            JusticeCaseState reloaded =
+                GetFieldValue<JusticeCaseState>(reader, "_justiceCaseState");
+            Assert.AreEqual(caseState.ActiveScore, reloaded.ActiveScore);
+            Assert.AreEqual(1, reloaded.Charges.Count);
+            Assert.AreEqual(second.IncidentId, reloaded.Charges[0].IncidentId);
+            Assert.AreEqual("charge:" + second.IncidentId, reloaded.Charges[0].ChargeId);
         });
     }
 
@@ -5553,9 +5622,11 @@ public sealed class JusticeRuntimeContractTests
 
     private static void FlushAndAwait(object script)
     {
+        bool accepted = (bool)InvokeInstance(script, "JusticeFlushStateNow");
         Assert.IsTrue(
-            (bool)InvokeInstance(script, "JusticeFlushStateNow"),
-            "Le snapshot doit être accepté par le repository.");
+            accepted,
+            "Le snapshot doit être accepté par le repository. Détail : " +
+            GetFieldValue<string>(script, "_justicePersistenceLastError"));
         AwaitQueuedPersistence(script);
     }
 

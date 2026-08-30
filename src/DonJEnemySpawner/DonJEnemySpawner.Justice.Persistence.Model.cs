@@ -276,7 +276,8 @@ internal enum JusticePersistenceFaultPoint
     BeforeWalFlush,
     AfterWalFlush,
     BeforeWalTailRepairFlush,
-    AfterWalTailRepairFlush
+    AfterWalTailRepairFlush,
+    BeforeWalCompactReplace
 }
 
 internal interface IJusticePersistenceFaultInjector

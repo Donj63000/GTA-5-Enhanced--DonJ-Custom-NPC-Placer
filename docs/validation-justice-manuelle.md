@@ -55,6 +55,7 @@ Valeurs autorisées dans la colonne **Résultat** : `PASS`, `FAIL`, `BLOQUÉ`, `
 | RUN-06 | Une étape d'arrêt échoue | Les étapes suivantes s'exécutent quand même, y compris le nettoyage des blips et groupes. | NON EXÉCUTÉ | Log `Shutdown.*` |
 | RUN-07 | Enfilement final ou arrêt refusé | Le refus d'enfilement ou l'expiration du délai borné de `Stop()` est explicitement journalisé et le WAL/état sale reste récupérable au redémarrage. | NON EXÉCUTÉ | Log + reprise suivante |
 | RUN-08 | Arrêt pendant libération | Aucun contrôle ni flag police ne reste imposé; la libération reprend sans double effet au reload. | NON EXÉCUTÉ | Vidéo + XML/WAL + log |
+| RUN-09 | Transition ou fail-safe Justice | Pendant identification, sauvegarde de switch et suspension, F10 affiche trois causes distinctes. Si `JusticeEarly` ou `JusticeLate` échoue, la mini-ligne de peine disparaît au lieu de rester figée; le HUD Terminator reste indépendant. | NON EXÉCUTÉ | Captures F10/HUD + log stage |
 
 ## C. Inventaire et intégration police — JUS-005, JUS-006
 
@@ -69,6 +70,7 @@ Valeurs autorisées dans la colonne **Résultat** : `PASS`, `FAIL`, `BLOQUÉ`, `
 | INV-07 | Restitution partielle | Le snapshot n'est pas effacé; l'état reste `RestorePending` ou `RestoreAmbiguous` et récupérable. | NON EXÉCUTÉ | Diagnostic + XML |
 | INV-08 | Ancien v1: snapshot nul + lock vrai | Au chargement, l'état migre vers `UnsupportedPreserved`, armes conservées et contrôles libérés. | NON EXÉCUTÉ | XML de fixture + vidéo |
 | INV-09 | Récupération manuelle | L'action restaure contrôles/police, fusionne seulement un snapshot valide, ne retire aucune arme et écrit un log. | NON EXÉCUTÉ | Vidéo + log `Justice.Diagnostic` |
+| INV-10 | `RestoreAmbiguous` actif | Simuler un `RemoveAll` partiel : aucune arme potentiellement restante n'est utilisable pendant la détention. Après libération, le verrou dérivé disparaît et la restitution différée peut aboutir. | NON EXÉCUTÉ | Vidéo contrôles + XML/WAL |
 | POL-01 | Mode `Disabled` | Justice ne pose aucun flag global police; la détention reste jouable avec la limite documentée. | NON EXÉCUTÉ | Trace des natives + capture F10 |
 | POL-02 | Mode `FreeroamBestEffort` | Valeur par défaut; application unique en jeu libre, pas de réaffirmation permanente. | NON EXÉCUTÉ | Diagnostic + trace native |
 | POL-03 | Mode `Force` | Réaffirmation cadencée uniquement dans le contexte de détention compatible et hors suspension. | NON EXÉCUTÉ | Diagnostic + trace native |
@@ -99,6 +101,13 @@ Valeurs autorisées dans la colonne **Résultat** : `PASS`, `FAIL`, `BLOQUÉ`, `
 | PER-16 | WAL financier borné | Un débit de jugement ou volontaire utilise un identifiant stable et un plan immuable. Le snapshot complet contenant `Prepared` doit atteindre `DiskRevision`; juste avant l'appel cash, les petites frames `Prepared` puis `Attempted` sont flushées. Chaque frame reste sous 1 024 octets et vingt champs, sans `Case`, `Record`, `Custody`, inventaire complet ni XML. Le lecteur refuse tout slot, génération, identité, schéma ou épisode différent. | NON EXÉCUTÉ | Révisions + décodage WAL + taille des frames + trace cash |
 | PER-17 | Barrières d'attente | Aucun chemin gameplay n'appelle la barrière de test. Seul `Stop()` attend au plus 2,5 secondes à l'arrêt; `JusticeAwaitQueuedPersistenceForTests` peut attendre 30 secondes uniquement hors jeu. | NON EXÉCUTÉ | Trace d'appels + chronométrage arrêt |
 | PER-18 | Isolation inactive refusée | Répéter PER-15 en corrompant successivement le profil actif, les champs globaux, `recoverySha256`, le backup, puis avec un WAL corrompu, tronqué/réparé ou ouvert. L'isolation est toujours refusée; seul un backup complet valide peut ensuite être chargé. | NON EXÉCUTÉ | Fixtures + WAL + choix primaire/backup + log |
+| PER-19 | Preuve v2 absente | Retirer seulement `recoverySha256` d'un primaire v2 : le primaire est refusé et le backup v2 intact reste lisible. | NON EXÉCUTÉ | Fixtures + erreur codec |
+| PER-20 | WAL financier d'un profil inactif | Couper après `Attempted` sur Michael, redémarrer avec Franklin, sauvegarder, puis revenir à Michael : Franklin reste intact et aucun second `STAT_SET_INT` n'est émis. Répéter pour jugement et paiement volontaire. | NON EXÉCUTÉ | XML/WAL + compteurs cash |
+| PER-21 | Préfixe WAL modifié hors instance | Après acquisition du WAL, modifier un octet sans changer la taille, puis répéter par suppression, troncature et allongement. Tout nouvel append est refusé sans octet supplémentaire, l'autorité mémoire reste inchangée et le diagnostic devient `Corrupt`. | NON EXÉCUTÉ | Copies byte-for-byte + diagnostic |
+| PER-22 | Plusieurs WAL financiers | Préparer des opérations sur deux héros puis plusieurs générations du même héros. Au redémarrage, les WAL supersédés sont terminalisés, les propriétaires sont restaurés dans l'ordre causal et un doublon de même génération est refusé avant toute mutation. Aucun cash n'est rejoué. | NON EXÉCUTÉ | XML/WAL des trois profils + compteurs cash |
+| PER-23 | Primaire N perdu, backup N-1 | Supprimer uniquement le primaire après un WAL N. Avec `Attempted`, l'intention propriétaire est reconstruite mais `DiskRevision` reste N-1 jusqu'au checkpoint N+1; avec `Prepared`, l'opération est rejetée sans effet et la révision N n'est pas réutilisée. Répéter pour les deux paiements. | NON EXÉCUTÉ | Révisions logique/disque + WAL + compteur cash |
+| PER-24 | Verrou ou refus d'accès WAL transitoire | Verrouiller le fichier pendant Recover, pendant la terminalisation d'un WAL supersédé, puis pendant le contrôle du préfixe. Justice applique son backoff sans panne permanente; après déverrouillage, le même état reprend et progresse. | NON EXÉCUTÉ | Diagnostic retry + WAL avant/après |
+| PER-25 | Deux instances sur le même WAL | Bloquer une compaction juste avant `File.Replace`, puis tenter un append depuis une seconde instance; répéter Recover pendant une frame écrite non flushée. La seconde opération reçoit une I/O retryable et aucune frame n'est effacée ou tronquée. | NON EXÉCUTÉ | Trace mutex + WAL décodé |
 
 ### Coupures transactionnelles obligatoires
 
@@ -107,12 +116,12 @@ Chaque ligne est exécutée pour un paiement, une confiscation/restitution et, q
 | ID | Point de coupure injecté | Invariant attendu | Résultat | Preuve |
 |---|---|---|---|---|
 | CUT-01 | Avant `WAL Prepared` | Aucun effet GTA; dette/inventaire/police inchangés. | NON EXÉCUTÉ | WAL + état avant/après |
-| CUT-02 | Après snapshot `Prepared` durable, avant WAL `Attempted` | Reprise autorisée sans effet supposé; le plan peut être réévalué ou annulé si ses préconditions ont changé. | NON EXÉCUTÉ | XML/WAL rechargés + compteur native |
+| CUT-02 | Après snapshot `Prepared` durable, avant WAL `Attempted` | Si le snapshot référencé existe, la barrière exacte est réhydratée sans nouvelle génération puis peut progresser. Si le primaire a disparu et que seul N-1 subsiste, `Prepared` est rejeté sans effet ni débit supposé. | NON EXÉCUTÉ | XML/WAL rechargés + compteur native |
 | CUT-03 | Après WAL `Attempted` flushé ou effet GTA tenté | Aucun replay, y compris si l'acquittement WAL a été perdu ou sa queue tronquée; état `Attempted`/`Ambiguous` conservateur. | NON EXÉCUTÉ | Compteur native + WAL |
 | CUT-04 | Après résultat GTA inconnu | Pas de double débit/confiscation; litige ou restauration récupérable. | NON EXÉCUTÉ | WAL + état métier |
 | CUT-05 | Après snapshot écrit | Révision disque cohérente et effet exactement une fois. | NON EXÉCUTÉ | Révisions + hashes |
 | CUT-06 | Après backup remplacé | Primaire ou backup valide et sélectionné par génération/hash. | NON EXÉCUTÉ | Fichiers + hashes |
-| CUT-07 | Pendant compaction WAL | Les entrées ouvertes restent récupérables; aucune transaction inventée. | NON EXÉCUTÉ | WAL tronqué + log |
+| CUT-07 | Pendant compaction WAL | Le mutex reste possédé depuis la validation jusqu'au remplacement. Un append concurrent échoue de façon retryable puis réussit sur une vue fraîche; aucune entrée ouverte n'est effacée ou inventée. | NON EXÉCUTÉ | WAL + log contention |
 
 ## E. Paiements — JUS-011
 
@@ -153,6 +162,10 @@ Chaque ligne est exécutée pour un paiement, une confiscation/restitution et, q
 | DOM-10 | Plus de vingt fautes disciplinaires | L'épinglage principal résiste aux évictions et la récidive n'est pas doublée. | NON EXÉCUTÉ | Casier + XML |
 | DOM-11 | Invariant impossible injecté | Un état `RemovedVerified` sans snapshot est refusé; aucune mutation monde ne suit. | NON EXÉCUTÉ | Build diagnostic + log |
 | DOM-12 | Isolation des trois profils | Modifier successivement casier, dette et inventaire de chaque héros; aucune valeur ne fuit vers les deux autres. | NON EXÉCUTÉ | Diff des trois profils |
+| DOM-13 | Mort policière sous modèle custom | Mourir avec des étoiles sous une tenue/ped custom : si GTA restaure le modèle canonique du même héros, le transfert reprend au poste ou en prison selon la peine. Un autre héros n'hérite jamais du front. | NON EXÉCUTÉ | Vidéo + diagnostic slot/modèle |
+| DOM-14 | Switch pendant grâce d'évasion | Sortir de l'enceinte moins de six secondes puis changer de héros : aucune charge d'évasion ni étoile n'est créée. Au retour, la présence doit être revalidée et une nouvelle sortie exige six secondes continues. | NON EXÉCUTÉ | Vidéo + casier + timer |
+| DOM-15 | Switch après intention d'évasion | Couper le changement une fois le discard engagé : le switch reste fermé jusqu'à la finalisation fail-closed et ne transforme jamais l'évasion durable en simple pause. | NON EXÉCUTÉ | WAL + diagnostic switch |
+| DOM-16 | Maintenance de la scène | Tuer/retirer un garde intermédiaire puis terminer une discipline : son poste exact est recréé et les gardes reviennent sans spam. Les détenus circulent librement dans `AllowedVolumes` et sont rappelés par navmesh seulement après en être sortis, sans téléport visible. | NON EXÉCUTÉ | Vidéo + trace tâches/cadences |
 
 ## Décision de release
 

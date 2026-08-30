@@ -228,6 +228,50 @@ public sealed class JusticeWalRecoveryTests
     }
 
     [TestMethod]
+    public void Wal_TransientExclusiveLockRemainsRetryableAndDoesNotMasqueradeAsCorruption()
+    {
+        string directory = CreateTempDirectory();
+        string path = Path.Combine(directory, "justice.wal");
+        try
+        {
+            JusticeWriteAheadLog writer = new JusticeWriteAheadLog(path);
+            writer.Append(Record(JusticeWalState.Prepared, 1L));
+
+            using (FileStream exclusiveLock = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.None))
+            {
+                Assert.ThrowsException<IOException>(delegate
+                {
+                    JusticeWriteAheadLog.Recover(path);
+                });
+                Assert.ThrowsException<IOException>(delegate
+                {
+                    new JusticeWriteAheadLog(path);
+                });
+            }
+
+            JusticeWalRecoveryResult recovery = JusticeWriteAheadLog.Recover(path);
+            Assert.AreEqual(JusticeWalRecoveryStatus.Clean, recovery.Status);
+            Assert.AreEqual(1, recovery.Records.Count);
+
+            JusticeWriteAheadLog retried = new JusticeWriteAheadLog(path);
+            Assert.AreEqual(
+                JusticeWalRecoveryStatus.Clean,
+                retried.GetDiagnostics().RecoveryStatus);
+            Assert.AreEqual(
+                JusticeWalState.Prepared,
+                retried.GetLatest("payment:one").State);
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [TestMethod]
     public void Wal_LostAcknowledgementAfterFlushIsIdempotentOnRetry()
     {
         string directory = CreateTempDirectory();

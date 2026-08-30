@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 internal sealed class JusticeWalRecord
 {
@@ -185,6 +186,8 @@ internal sealed class JusticeWriteAheadLog
     private const int MaxOperationKindBytes = 80;
     private const int MaxFieldPathBytes = 64;
     private const int MaxFieldValueBytes = 256;
+    private const int ExclusiveLeaseTimeoutMilliseconds = 25;
+    private const string ExclusiveLeaseNamePrefix = "Local\\DonJJusticeWal-";
 
     private readonly object _gate = new object();
     private readonly string _path;
@@ -194,6 +197,8 @@ internal sealed class JusticeWriteAheadLog
         new Dictionary<string, JusticeWalRecord>(StringComparer.Ordinal);
 
     private long _durableLength;
+    private byte[] _durablePrefixHash;
+    private bool _durableFileExists;
     private long _lastSequence;
     private long _walRevision;
     private long _repairedTailCount;
@@ -217,7 +222,10 @@ internal sealed class JusticeWriteAheadLog
         _path = Path.GetFullPath(path);
         _faultInjector = faultInjector ?? JusticeNoOpPersistenceFaultInjector.Instance;
         _lastError = string.Empty;
-        ReloadAndRepairTail();
+        using (AcquireExclusiveLease(_path))
+        {
+            ReloadAndRepairTailUnderExclusiveLease();
+        }
     }
 
     internal JusticeWalRecord Append(JusticeWalRecord requested)
@@ -229,32 +237,35 @@ internal sealed class JusticeWriteAheadLog
 
         lock (_gate)
         {
-            EnsureHealthy();
-            EnsureFileWasNotChangedExternally();
-
-            JusticeWalRecord previous;
-            if (_latestByTransaction.TryGetValue(requested.TransactionId, out previous))
+            using (AcquireExclusiveLease(_path))
             {
-                if (AreSameTransition(previous, requested))
+                EnsureHealthy();
+                EnsureFileWasNotChangedExternally();
+
+                JusticeWalRecord previous;
+                if (_latestByTransaction.TryGetValue(requested.TransactionId, out previous))
                 {
-                    // Je rends un retry post-Flush idempotent : l'appelant peut
-                    // perdre l'acquittement sans dupliquer la transition durable.
-                    return previous;
+                    if (AreSameTransition(previous, requested))
+                    {
+                        // Je rends un retry post-Flush idempotent : l'appelant peut
+                        // perdre l'acquittement sans dupliquer la transition durable.
+                        return previous;
+                    }
+
+                    ValidateTransition(previous, requested);
+                }
+                else if (requested.State != JusticeWalState.Prepared)
+                {
+                    throw new InvalidOperationException(
+                        "Une transaction WAL doit commencer dans l'etat Prepared.");
                 }
 
-                ValidateTransition(previous, requested);
+                JusticeWalRecord durable = requested.WithSequence(checked(_lastSequence + 1L));
+                byte[] payload = SerializePayload(durable);
+                byte[] frame = BuildFrame(payload);
+                AppendFrameUnderExclusiveLease(frame, durable);
+                return durable;
             }
-            else if (requested.State != JusticeWalState.Prepared)
-            {
-                throw new InvalidOperationException(
-                    "Une transaction WAL doit commencer dans l'etat Prepared.");
-            }
-
-            JusticeWalRecord durable = requested.WithSequence(checked(_lastSequence + 1L));
-            byte[] payload = SerializePayload(durable);
-            byte[] frame = BuildFrame(payload);
-            AppendFrame(frame, durable);
-            return durable;
         }
     }
 
@@ -336,67 +347,75 @@ internal sealed class JusticeWriteAheadLog
     {
         lock (_gate)
         {
-            EnsureHealthy();
-            EnsureFileWasNotChangedExternally();
-            foreach (JusticeWalRecord record in _latestByTransaction.Values)
+            using (AcquireExclusiveLease(_path))
             {
-                if (!record.IsTerminal)
+                EnsureHealthy();
+                EnsureFileWasNotChangedExternally();
+                foreach (JusticeWalRecord record in _latestByTransaction.Values)
                 {
-                    return false;
-                }
-            }
-
-            if (_durableLength == 0L)
-            {
-                return true;
-            }
-
-            string directory = Path.GetDirectoryName(_path);
-            if (string.IsNullOrEmpty(directory))
-            {
-                throw new InvalidOperationException("Le dossier du WAL est introuvable.");
-            }
-
-            Directory.CreateDirectory(directory);
-            string temp = Path.Combine(
-                directory,
-                Path.GetFileName(_path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
-            try
-            {
-                // Je remplace le WAL par un fichier vide préalablement flushé. Je
-                // n'utilise aucun fallback Copy/Delete/Move faussement atomique.
-                using (FileStream stream = new FileStream(
-                    temp,
-                    FileMode.CreateNew,
-                    FileAccess.Write,
-                    FileShare.None,
-                    4096,
-                    FileOptions.WriteThrough))
-                {
-                    stream.Flush(true);
+                    if (!record.IsTerminal)
+                    {
+                        return false;
+                    }
                 }
 
-                if (File.Exists(_path))
+                if (_durableLength == 0L)
                 {
+                    return true;
+                }
+
+                string directory = Path.GetDirectoryName(_path);
+                if (string.IsNullOrEmpty(directory))
+                {
+                    throw new InvalidOperationException("Le dossier du WAL est introuvable.");
+                }
+
+                Directory.CreateDirectory(directory);
+                string temp = Path.Combine(
+                    directory,
+                    Path.GetFileName(_path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+                try
+                {
+                    // Je remplace le WAL par un fichier vide préalablement flushé. Je
+                    // n'utilise aucun fallback Copy/Delete/Move faussement atomique.
+                    using (FileStream stream = new FileStream(
+                        temp,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        4096,
+                        FileOptions.WriteThrough))
+                    {
+                        stream.Flush(true);
+                    }
+
+                    // Je garde le verrou inter-processus de la validation jusqu'au
+                    // remplacement : aucune autre instance ne peut publier une frame
+                    // dans l'intervalle puis la voir effacée par la compaction.
+                    EnsureFileWasNotChangedExternally();
+                    foreach (JusticeWalRecord record in _latestByTransaction.Values)
+                    {
+                        if (!record.IsTerminal)
+                        {
+                            return false;
+                        }
+                    }
+                    _faultInjector.Probe(
+                        JusticePersistenceFaultPoint.BeforeWalCompactReplace);
                     File.Replace(temp, _path, null, true);
-                }
-                else
-                {
-                    File.Move(temp, _path);
-                }
 
-                _records.Clear();
-                _latestByTransaction.Clear();
-                _durableLength = 0L;
-                _lastSequence = 0L;
-                _walRevision = 0L;
-                _recoveryStatus = JusticeWalRecoveryStatus.Clean;
-                _lastError = string.Empty;
-                return true;
-            }
-            finally
-            {
-                if (File.Exists(temp))
+                    _records.Clear();
+                    _latestByTransaction.Clear();
+                    _durableLength = 0L;
+                    _durablePrefixHash = ComputeSha256(new byte[0]);
+                    _durableFileExists = true;
+                    _lastSequence = 0L;
+                    _walRevision = 0L;
+                    _recoveryStatus = JusticeWalRecoveryStatus.Clean;
+                    _lastError = string.Empty;
+                    return true;
+                }
+                finally
                 {
                     try
                     {
@@ -444,15 +463,14 @@ internal sealed class JusticeWriteAheadLog
         }
 
         string fullPath = Path.GetFullPath(path);
-        if (!File.Exists(fullPath))
+        using (AcquireExclusiveLease(fullPath))
         {
-            return new JusticeWalRecoveryResult(
-                JusticeWalRecoveryStatus.Clean,
-                new JusticeWalRecord[0],
-                0L,
-                string.Empty);
+            return RecoverUnderExclusiveLease(fullPath);
         }
+    }
 
+    private static JusticeWalRecoveryResult RecoverUnderExclusiveLease(string fullPath)
+    {
         List<JusticeWalRecord> records = new List<JusticeWalRecord>();
         Dictionary<string, JusticeWalRecord> latest =
             new Dictionary<string, JusticeWalRecord>(StringComparer.Ordinal);
@@ -465,7 +483,7 @@ internal sealed class JusticeWriteAheadLog
                 fullPath,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete))
+                FileShare.Read))
             using (BinaryReader reader = new BinaryReader(stream, Encoding.UTF8, false))
             {
                 while (stream.Position < stream.Length)
@@ -568,6 +586,33 @@ internal sealed class JusticeWriteAheadLog
                 }
             }
         }
+        catch (FileNotFoundException)
+        {
+            // Je ne conclus à l'absence qu'après l'échec explicite de l'ouverture.
+            // File.Exists peut masquer un refus d'accès et n'est donc pas une preuve.
+            return CreateMissingWalRecoveryResult();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return CreateMissingWalRecoveryResult();
+        }
+        catch (IOException)
+        {
+            // Je laisse remonter une indisponibilité disque transitoire afin que
+            // l'initialisation Justice applique son backoff puis retente la lecture.
+            throw;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Je distingue un accès momentanément refusé d'une corruption du
+            // journal : ce problème d'environnement ne condamne pas la session.
+            throw;
+        }
+        catch (System.Security.SecurityException)
+        {
+            // Je conserve la même sémantique retryable pour un refus de sécurité.
+            throw;
+        }
         catch (Exception exception)
         {
             return new JusticeWalRecoveryResult(
@@ -584,7 +629,16 @@ internal sealed class JusticeWriteAheadLog
             string.Empty);
     }
 
-    private void AppendFrame(byte[] frame, JusticeWalRecord record)
+    private static JusticeWalRecoveryResult CreateMissingWalRecoveryResult()
+    {
+        return new JusticeWalRecoveryResult(
+            JusticeWalRecoveryStatus.Clean,
+            new JusticeWalRecord[0],
+            0L,
+            string.Empty);
+    }
+
+    private void AppendFrameUnderExclusiveLease(byte[] frame, JusticeWalRecord record)
     {
         string directory = Path.GetDirectoryName(_path);
         if (string.IsNullOrEmpty(directory))
@@ -594,19 +648,62 @@ internal sealed class JusticeWriteAheadLog
 
         Directory.CreateDirectory(directory);
         long originalLength = _durableLength;
+        byte[] durablePrefixHash = null;
+        bool prefixIntegrityRejected = false;
+        bool appendFileAcquired = false;
         try
         {
-            using (FileStream stream = new FileStream(
-                _path,
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.Read,
-                4096,
-                FileOptions.WriteThrough))
+            FileStream appendStream = null;
+            try
+            {
+                appendStream = new FileStream(
+                    _path,
+                    _durableFileExists ? FileMode.Open : FileMode.CreateNew,
+                    FileAccess.ReadWrite,
+                    FileShare.Read,
+                    4096,
+                    FileOptions.WriteThrough);
+                appendFileAcquired = true;
+            }
+            catch (FileNotFoundException)
+            {
+                prefixIntegrityRejected = true;
+                RejectChangedDurablePrefix();
+                throw;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                prefixIntegrityRejected = true;
+                RejectChangedDurablePrefix();
+                throw;
+            }
+            catch (IOException)
+            {
+                // CreateNew distingue la création appartenant à cette instance
+                // d'un fichier apparu entre les deux contrôles d'intégrité.
+                if (!_durableFileExists && File.Exists(_path))
+                {
+                    prefixIntegrityRejected = true;
+                    RejectChangedDurablePrefix();
+                }
+                throw;
+            }
+
+            using (FileStream stream = appendStream)
             {
                 if (stream.Length != originalLength)
                 {
-                    throw new IOException("Le WAL a change pendant l'ecriture.");
+                    prefixIntegrityRejected = true;
+                    RejectChangedDurablePrefix();
+                }
+
+                byte[] actualPrefixHash = ComputeStreamSha256(
+                    stream,
+                    originalLength);
+                if (!BytesEqual(actualPrefixHash, _durablePrefixHash))
+                {
+                    prefixIntegrityRejected = true;
+                    RejectChangedDurablePrefix();
                 }
 
                 stream.Position = originalLength;
@@ -625,48 +722,91 @@ internal sealed class JusticeWriteAheadLog
                     stream.Flush(true);
                     throw;
                 }
+
+                durablePrefixHash = ComputeStreamSha256(
+                    stream,
+                    checked(originalLength + frame.Length));
             }
 
-            RegisterDurableRecord(record, originalLength + frame.Length);
+            RegisterDurableRecord(
+                record,
+                originalLength + frame.Length,
+                durablePrefixHash);
             _faultInjector.Probe(JusticePersistenceFaultPoint.AfterWalFlush);
         }
         catch (Exception exception)
         {
-            _lastError = exception.GetType().Name + ": " + exception.Message;
-            ReloadAndRepairTail();
+            if (prefixIntegrityRejected)
+            {
+                // Je conserve cet état fail-closed même si le contenu modifié est
+                // encore syntaxiquement valide : il ne correspond plus au
+                // préfixe durable que cette instance avait acquitté.
+                _recoveryStatus = JusticeWalRecoveryStatus.Corrupt;
+                _lastError = exception.Message;
+            }
+            else
+            {
+                _lastError = exception.GetType().Name + ": " + exception.Message;
+                if (appendFileAcquired)
+                {
+                    // Je ne relis qu'après une erreur survenue une fois le fichier
+                    // acquis par cet append. Un simple échec d'ouverture ne doit
+                    // jamais faire adopter ni oublier un état externe concurrent.
+                    ReloadAndRepairTailUnderExclusiveLease();
+                }
+            }
             throw;
         }
     }
 
-    private void RegisterDurableRecord(JusticeWalRecord record, long durableLength)
+    private void RegisterDurableRecord(
+        JusticeWalRecord record,
+        long durableLength,
+        byte[] durablePrefixHash)
     {
+        if (durablePrefixHash == null || durablePrefixHash.Length != HashLength)
+        {
+            throw new InvalidDataException(
+                "L'empreinte du préfixe WAL acquitté est invalide.");
+        }
+
         _records.Add(record);
         _latestByTransaction[record.TransactionId] = record;
         _lastSequence = record.Sequence;
         _walRevision = Math.Max(_walRevision, record.PersistenceRevision);
         _durableLength = durableLength;
+        _durablePrefixHash = (byte[])durablePrefixHash.Clone();
+        _durableFileExists = true;
         _recoveryStatus = JusticeWalRecoveryStatus.Clean;
         _lastError = string.Empty;
     }
 
     private void EnsureFileWasNotChangedExternally()
     {
-        long actualLength = File.Exists(_path) ? new FileInfo(_path).Length : 0L;
-        if (actualLength == _durableLength)
+        byte[] actualPrefixHash;
+        if (!TryComputeCurrentDurablePrefixHash(
+                _durableLength,
+                _durableFileExists,
+                out actualPrefixHash))
         {
-            return;
+            // Une instance vivante ne réacquiert jamais silencieusement un WAL
+            // disparu, tronqué ou allongé. Les seules relectures réparatrices
+            // restent le constructeur et le chemin d'erreur d'un append interne.
+            RejectChangedDurablePrefix();
         }
 
-        ReloadAndRepairTail();
-        EnsureHealthy();
+        if (!BytesEqual(actualPrefixHash, _durablePrefixHash))
+        {
+            RejectChangedDurablePrefix();
+        }
     }
 
-    private void ReloadAndRepairTail()
+    private void ReloadAndRepairTailUnderExclusiveLease()
     {
-        JusticeWalRecoveryResult recovered = Recover(_path);
+        JusticeWalRecoveryResult recovered = RecoverUnderExclusiveLease(_path);
         if (recovered.Status == JusticeWalRecoveryStatus.TruncatedTail)
         {
-            RepairTruncatedTail(recovered.LastValidLength);
+            RepairTruncatedTailUnderExclusiveLease(recovered.LastValidLength);
             _repairedTailCount++;
         }
 
@@ -685,15 +825,103 @@ internal sealed class JusticeWriteAheadLog
         _durableLength = recovered.LastValidLength;
         _recoveryStatus = recovered.Status;
         _lastError = recovered.Error;
+        _durableFileExists = WalFileExistsUnderExclusiveLease();
+
+        long canonicalLength;
+        _durablePrefixHash = ComputeCanonicalPrefixHash(
+            _records,
+            out canonicalLength);
+        if (_recoveryStatus != JusticeWalRecoveryStatus.Corrupt &&
+            canonicalLength != _durableLength)
+        {
+            _recoveryStatus = JusticeWalRecoveryStatus.Corrupt;
+            _lastError =
+                "Le préfixe WAL relu n'a pas une représentation canonique stable.";
+        }
     }
 
-    private void RepairTruncatedTail(long validLength)
+    private bool TryComputeCurrentDurablePrefixHash(
+        long expectedLength,
+        bool expectedFileExists,
+        out byte[] hash)
     {
-        if (!File.Exists(_path))
+        hash = null;
+        try
         {
-            return;
-        }
+            using (FileStream stream = new FileStream(
+                _path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                4096,
+                FileOptions.SequentialScan))
+            {
+                if (!expectedFileExists || stream.Length != expectedLength)
+                {
+                    return false;
+                }
 
+                hash = ComputeStreamSha256(stream, expectedLength);
+                return true;
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            if (expectedFileExists || expectedLength != 0L)
+            {
+                return false;
+            }
+
+            hash = ComputeSha256(new byte[0]);
+            return true;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            if (expectedFileExists || expectedLength != 0L)
+            {
+                return false;
+            }
+
+            hash = ComputeSha256(new byte[0]);
+            return true;
+        }
+    }
+
+    private bool WalFileExistsUnderExclusiveLease()
+    {
+        try
+        {
+            using (new FileStream(
+                _path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                4096,
+                FileOptions.SequentialScan))
+            {
+                return true;
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private void RejectChangedDurablePrefix()
+    {
+        _recoveryStatus = JusticeWalRecoveryStatus.Corrupt;
+        _lastError =
+            "Le préfixe durable du WAL a été modifié hors de cette instance.";
+        throw new InvalidDataException(_lastError);
+    }
+
+    private void RepairTruncatedTailUnderExclusiveLease(long validLength)
+    {
         using (FileStream stream = new FileStream(
             _path,
             FileMode.Open,
@@ -716,6 +944,77 @@ internal sealed class JusticeWriteAheadLog
             throw new InvalidDataException(
                 "Le WAL Justice est corrompu; aucune transition ne peut etre rejouee. " +
                 _lastError);
+        }
+    }
+
+    private static IDisposable AcquireExclusiveLease(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        byte[] identityHash = ComputeSha256(
+            Encoding.UTF8.GetBytes(fullPath.ToUpperInvariant()));
+        string mutexName = ExclusiveLeaseNamePrefix +
+                           BitConverter.ToString(identityHash).Replace("-", string.Empty);
+        return new JusticeWalExclusiveLease(mutexName);
+    }
+
+    private sealed class JusticeWalExclusiveLease : IDisposable
+    {
+        private Mutex _mutex;
+        private bool _ownsMutex;
+
+        internal JusticeWalExclusiveLease(string mutexName)
+        {
+            _mutex = new Mutex(false, mutexName);
+            try
+            {
+                try
+                {
+                    _ownsMutex = _mutex.WaitOne(
+                        ExclusiveLeaseTimeoutMilliseconds,
+                        false);
+                }
+                catch (AbandonedMutexException)
+                {
+                    // Je reprends un verrou abandonné : le contrôle intégral du WAL
+                    // qui suit décidera si l'ancien processus a laissé une queue.
+                    _ownsMutex = true;
+                }
+
+                if (!_ownsMutex)
+                {
+                    throw new IOException(
+                        "Le WAL Justice est temporairement utilisé par une autre instance.");
+                }
+            }
+            catch
+            {
+                _mutex.Dispose();
+                _mutex = null;
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            Mutex mutex = _mutex;
+            if (mutex == null)
+            {
+                return;
+            }
+
+            _mutex = null;
+            try
+            {
+                if (_ownsMutex)
+                {
+                    mutex.ReleaseMutex();
+                }
+            }
+            finally
+            {
+                _ownsMutex = false;
+                mutex.Dispose();
+            }
         }
     }
 
@@ -922,6 +1221,65 @@ internal sealed class JusticeWriteAheadLog
         {
             return algorithm.ComputeHash(value);
         }
+    }
+
+    private static byte[] ComputeStreamSha256(
+        FileStream stream,
+        long expectedLength)
+    {
+        if (stream == null)
+        {
+            throw new ArgumentNullException("stream");
+        }
+        if (expectedLength < 0L || stream.Length != expectedLength)
+        {
+            throw new IOException(
+                "La longueur du préfixe WAL a changé avant son contrôle d'intégrité.");
+        }
+
+        stream.Position = 0L;
+        byte[] hash;
+        using (SHA256 algorithm = SHA256.Create())
+        {
+            // ComputeHash(Stream) travaille avec un tampon interne fixe : je ne
+            // matérialise jamais le WAL complet en mémoire pour ce contrôle.
+            hash = algorithm.ComputeHash(stream);
+        }
+
+        if (stream.Position != expectedLength || stream.Length != expectedLength)
+        {
+            throw new IOException(
+                "Le préfixe WAL a changé pendant son contrôle d'intégrité.");
+        }
+        return hash;
+    }
+
+    private static byte[] ComputeCanonicalPrefixHash(
+        IReadOnlyList<JusticeWalRecord> records,
+        out long canonicalLength)
+    {
+        canonicalLength = 0L;
+        byte[] hash;
+        using (SHA256 algorithm = SHA256.Create())
+        using (CryptoStream hashing = new CryptoStream(
+            Stream.Null,
+            algorithm,
+            CryptoStreamMode.Write))
+        {
+            if (records != null)
+            {
+                for (int index = 0; index < records.Count; index++)
+                {
+                    byte[] frame = BuildFrame(SerializePayload(records[index]));
+                    canonicalLength = checked(canonicalLength + frame.Length);
+                    hashing.Write(frame, 0, frame.Length);
+                }
+            }
+
+            hashing.FlushFinalBlock();
+            hash = (byte[])algorithm.Hash.Clone();
+        }
+        return hash;
     }
 
     private static bool BytesEqual(byte[] left, byte[] right)

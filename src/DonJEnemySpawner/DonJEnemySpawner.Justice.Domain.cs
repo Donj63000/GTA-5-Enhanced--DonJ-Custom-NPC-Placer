@@ -1507,6 +1507,30 @@ internal sealed class JusticePolicy
         return pendingModelHash != 0 && currentModelHash == pendingModelHash;
     }
 
+    internal static bool IsPoliceDeathRespawnIdentityCompatible(
+        int currentSlot,
+        int currentModelHash,
+        int ownerSlot,
+        int ownerModelHash)
+    {
+        if (ownerSlot < 0 || ownerSlot > 2 || ownerModelHash == 0 ||
+            currentModelHash == 0)
+        {
+            return false;
+        }
+
+        // Je privilégie le slot canonique après un respawn : GTA peut rendre le
+        // modèle normal du héros qui est mort sous une tenue custom. Sans slot,
+        // je conserve l'exigence stricte du modèle pour ne jamais confondre deux
+        // personnages transformés.
+        if (currentSlot >= 0 && currentSlot <= 2)
+        {
+            return currentSlot == ownerSlot;
+        }
+
+        return currentSlot == -1 && currentModelHash == ownerModelHash;
+    }
+
     internal static int ResolveTrustedCanonicalPlayerSlot(
         int currentSlot,
         int lastCanonicalSlot)

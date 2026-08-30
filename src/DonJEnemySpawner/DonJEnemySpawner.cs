@@ -248,6 +248,7 @@ private bool _menuVisible;
 
     private string _statusText = string.Empty;
     private int _statusUntil;
+    private bool _statusOwnedByJusticeProfile;
     private bool _objectInteractionKeyLatch;
 
     private bool _spawnRequested;
@@ -975,7 +976,6 @@ private enum EnemyBehavior
                 if (!ShouldRenderMenu)
                 {
                     DrawTerminatorModeHud();
-                    DrawJusticeCustodyStatusLine();
                 }
             }
             catch (Exception ex)
@@ -987,15 +987,33 @@ private enum EnemyBehavior
             RunTickStage(RuntimeTickStage.PendingSpawn);
             RunTickStage(RuntimeTickStage.PlayerHostility);
 
+            bool justiceLateSucceeded = false;
             if (justiceEarlySucceeded)
             {
-                RunTickStage(RuntimeTickStage.JusticeLate);
+                justiceLateSucceeded =
+                    RunTickStage(RuntimeTickStage.JusticeLate);
             }
             else
             {
                 // Je n'avance jamais le dossier sur un état Early incomplet;
                 // je ne conserve ici que les reprises de sécurité Justice.
                 RunTickStage(RuntimeTickStage.JusticeRecovery);
+            }
+
+            if (justiceEarlySucceeded && justiceLateSucceeded &&
+                !ShouldRenderMenu)
+            {
+                try
+                {
+                    // Je dessine le temps seulement après un cycle Justice
+                    // complet. Une exception Late ne peut ainsi laisser une
+                    // ligne figée issue d'un état qui n'avance plus.
+                    DrawJusticeCustodyStatusLine();
+                }
+                catch (Exception ex)
+                {
+                    ReportRuntimeTickStageFailure(RuntimeTickStage.Hud, ex);
+                }
             }
 
             RunTickStage(RuntimeTickStage.Npcs);
@@ -10974,6 +10992,9 @@ private void DrawMenu()
     {
         _statusText = text ?? string.Empty;
         _statusUntil = GetMenuGameTimeSafe() + milliseconds;
+        // Je retire l'ancien propriétaire à chaque message générique. Les
+        // chemins Justice qui suivent un protagoniste le réarment explicitement.
+        _statusOwnedByJusticeProfile = false;
     }
 
     private static void DrawRect(int x, int y, int width, int height, Color color)

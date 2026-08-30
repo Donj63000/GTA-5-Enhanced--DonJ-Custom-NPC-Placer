@@ -41,6 +41,9 @@ public sealed partial class DonJEnemySpawner
     private const ulong JusticeNativeHasCollisionLoadedAroundEntity = 0xE9676F61BC0B3321UL;
 
     private const int JusticeCustodySceneRefreshMs = 1500;
+    private const int JusticeCustodySceneReturnRetryMs = 5000;
+    private const int JusticeCustodyMaximumGuardCount = 4;
+    private const int JusticeCustodyMaximumInmateCount = 8;
     private const int JusticeCustodyDisciplineScanMs = 180;
     private const int JusticeCustodyDisciplineDurationMs = 3500;
     private const int JusticeCustodyDisciplineCooldownMs = 8000;
@@ -77,6 +80,7 @@ public sealed partial class DonJEnemySpawner
     private const int JusticeDlcWeaponHashOffset = 8;
     private const float JusticeCustodyActivityUseDistance = 2.4f;
     private const float JusticeCustodyActivityCancelDistance = 4.0f;
+    private const float JusticeCustodyGuardPostReturnDistanceSquared = 6.25f;
 
     private const int JusticeStunGunHash = unchecked((int)0x3656C8C1);
     private const int JusticeNightstickHash = unchecked((int)0x678B81B1);
@@ -356,8 +360,10 @@ public sealed partial class DonJEnemySpawner
 
     // Je possède ces entités séparément : aucun garde ou détenu Justice n'entre
     // dans _spawnedNpcs, une scène XML ou un nettoyage générique du menu.
-    private readonly List<Ped> _justiceCustodyGuards = new List<Ped>(4);
-    private readonly List<Ped> _justiceCustodyInmates = new List<Ped>(8);
+    private readonly List<Ped> _justiceCustodyGuards =
+        new List<Ped>(JusticeCustodyMaximumGuardCount);
+    private readonly List<Ped> _justiceCustodyInmates =
+        new List<Ped>(JusticeCustodyMaximumInmateCount);
     // Je lie chaque handle à sa génération observée au spawn : un handle GTA
     // recyclé ne suffit jamais à transférer la propriété d'un ped à Justice.
     private Dictionary<int, int> _justiceCustodyPedGenerationByHandle =
@@ -372,6 +378,10 @@ public sealed partial class DonJEnemySpawner
         new int[JusticeCustodyTrackedAggressorCapacity];
     private long[] _justiceCustodyAggressorUntilMs =
         new long[JusticeCustodyTrackedAggressorCapacity];
+    private int[] _justiceCustodyGuardReturnRetryAt =
+        new int[JusticeCustodyMaximumGuardCount];
+    private int[] _justiceCustodyInmateReturnRetryAt =
+        new int[JusticeCustodyMaximumInmateCount];
 
     private JusticeCustodySite _justiceCustodySite;
     private bool _justiceCustodyRuntimeActive;
@@ -838,6 +848,7 @@ public sealed partial class DonJEnemySpawner
                 {
                     ObserveJusticeCustodyDeathDuringSuspension(player);
                 }
+                InterruptJusticeCustodyEscapeObservation();
                 ResetJusticeCustodyClock(now);
                 return;
             }
@@ -975,6 +986,7 @@ public sealed partial class DonJEnemySpawner
 
         if (!Entity.Exists(player))
         {
+            InterruptJusticeCustodyEscapeObservation();
             ResetJusticeCustodyClock(now);
             return;
         }
@@ -984,6 +996,7 @@ public sealed partial class DonJEnemySpawner
             // Je suspends sur un vrai changement de protagoniste pour ne jamais
             // rendre le loadout de Michael à Franklin (ou inversement).
             CancelJusticeCustodyActivity(false, now);
+            InterruptJusticeCustodyEscapeObservation();
             ResetJusticeCustodyClock(now);
             return;
         }
@@ -1031,6 +1044,7 @@ public sealed partial class DonJEnemySpawner
             // GameTime continue pendant certains chargements/cinématiques : je
             // supprime l'activité afin qu'aucun bonus ne mûrisse hors gameplay.
             CancelJusticeCustodyActivity(false, now);
+            InterruptJusticeCustodyEscapeObservation();
             ResetJusticeCustodyClock(now);
             return;
         }
@@ -3264,16 +3278,19 @@ public sealed partial class DonJEnemySpawner
         int recordModel = ReadWalInt(record, "playerModel", 0);
         int currentSlot = GetCurrentSinglePlayerCashSlotSafe();
         int currentModel = GetJusticePedModelHashSafe(player);
-        bool currentIdentityExact =
-            (currentSlot == record.ProfileSlot || currentSlot == -1) &&
-            currentModel == recordModel;
+        bool currentIdentityCompatible =
+            JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+                currentSlot,
+                currentModel,
+                record.ProfileSlot,
+                recordModel);
         JusticeCaseState ownerCase = GetJusticePreJudgmentHoldingOwnerCase(
             record.ProfileSlot);
         if (!IsJusticeCanonicalProfileSlot(record.ProfileSlot) ||
             recordSlot != record.ProfileSlot || recordModel == 0 ||
             ownerCase == null || !ownerCase.Enabled ||
             !Entity.Exists(player) ||
-            !currentIdentityExact)
+            !currentIdentityCompatible)
         {
             return false;
         }
@@ -3861,12 +3878,15 @@ public sealed partial class DonJEnemySpawner
             _justicePoliceDeathPreJudgmentHoldingOwnerModelHash != 0 &&
             currentModel ==
                 _justicePoliceDeathPreJudgmentHoldingOwnerModelHash;
+        bool respawnIdentityCompatible =
+            JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+                currentSlot,
+                currentModel,
+                _justicePoliceDeathPreJudgmentHoldingOwnerSlot,
+                _justicePoliceDeathPreJudgmentHoldingOwnerModelHash);
         if (repairSource)
         {
-            return (currentSlot ==
-                        _justicePoliceDeathPreJudgmentHoldingOwnerSlot ||
-                    currentSlot == -1) &&
-                   exactModel;
+            return respawnIdentityCompatible;
         }
         if (_justicePreJudgmentHoldingSource ==
                 JusticePreJudgmentHoldingSource.PendingWalCustodyRebind)
@@ -3884,10 +3904,7 @@ public sealed partial class DonJEnemySpawner
                 JusticePreJudgmentHoldingSource.Captured;
         if (exactIdentitySource)
         {
-            return (currentSlot ==
-                        _justicePoliceDeathPreJudgmentHoldingOwnerSlot ||
-                    currentSlot == -1) &&
-                   exactModel;
+            return respawnIdentityCompatible;
         }
 
         if (IsJusticeCanonicalProfileSlot(currentSlot))
@@ -4372,26 +4389,12 @@ public sealed partial class DonJEnemySpawner
         }
 
         int currentSlot = GetCurrentSinglePlayerCashSlotSafe();
-        if (IsJusticeCanonicalProfileSlot(currentSlot) &&
-            currentSlot != _justiceSuspendedPursuitDeathPlayerSlot)
-        {
-            return false;
-        }
-        if (currentSlot != -1 &&
-            !IsJusticeCanonicalProfileSlot(currentSlot))
-        {
-            return false;
-        }
-
         int currentModel = GetJusticePedModelHashSafe(player);
-        if (currentModel == 0)
-        {
-            return false;
-        }
-        bool identityMatches = currentSlot != -1 ||
-            (_justiceSuspendedPursuitDeathPlayerModelHash != 0 &&
-             currentModel == _justiceSuspendedPursuitDeathPlayerModelHash);
-        if (!identityMatches)
+        if (!JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(
+                currentSlot,
+                currentModel,
+                _justiceSuspendedPursuitDeathPlayerSlot,
+                _justiceSuspendedPursuitDeathPlayerModelHash))
         {
             return false;
         }
@@ -5221,6 +5224,24 @@ public sealed partial class DonJEnemySpawner
         CompleteJusticeCustodyEscape(player);
     }
 
+    private void InterruptJusticeCustodyEscapeObservation()
+    {
+        if (_justiceCaseState != null &&
+            _justiceCaseState.Phase == JusticePhase.Escaping &&
+            !HasJusticeCustodyOperation(JusticeOperationKind.DiscardInventory))
+        {
+            // Je n'enregistre une évasion qu'après six secondes réellement
+            // observées. Une pause, un chargement ou un switch annule donc la
+            // tentative provisoire sans créer de charge ni de mandat.
+            ApplyJusticeTransition(
+                JusticeSignal.Restrained,
+                _justiceCaseState.CustodyEpisodeId);
+            JusticeMarkStateDirty();
+        }
+
+        _justiceOutsideCustodySinceAt = 0;
+    }
+
     private void CompleteJusticeCustodyEscape(Ped player)
     {
         if (_justiceCaseState == null)
@@ -5879,6 +5900,24 @@ public sealed partial class DonJEnemySpawner
 
     private bool TryPrepareJusticeCustodyForProfileSwitch(int now)
     {
+        bool interruptedEscape = _justiceCaseState != null &&
+            _justiceCaseState.Phase == JusticePhase.Escaping &&
+            !HasJusticeCustodyOperation(JusticeOperationKind.DiscardInventory);
+        InterruptJusticeCustodyEscapeObservation();
+        if (_justiceCaseState != null &&
+            _justiceCaseState.Phase == JusticePhase.Escaping)
+        {
+            // L'intention de confiscation est déjà durable : je ne peux plus
+            // transformer cette évasion en simple changement de personnage.
+            return false;
+        }
+        if (interruptedEscape)
+        {
+            // Au retour du détenu, je vérifie à nouveau sa cellule avant de
+            // rouvrir les horloges et le détecteur d'évasion.
+            _justiceCustodyResumePending = true;
+            _justiceCustodyContainmentEstablished = false;
+        }
         bool canPark = CanParkCurrentJusticeCustodyForProfileSwitch();
 
         // Une reprise chargée avant l'identification du héros conserve encore
@@ -6655,7 +6694,7 @@ public sealed partial class DonJEnemySpawner
 
     private void EnforceJusticeCustodyWeaponLock(Ped player)
     {
-        if (!Entity.Exists(player) || (!_justiceInventoryRemoved && !_justiceWeaponControlsLocked))
+        if (!Entity.Exists(player) || !ShouldEnforceJusticeCustodyWeaponLock())
         {
             return;
         }
@@ -6680,6 +6719,22 @@ public sealed partial class DonJEnemySpawner
         Game.DisableControlThisFrame(0, GtaControl.WeaponWheelLeftRight);
         Game.DisableControlThisFrame(0, GtaControl.WeaponWheelUpDown);
         SelectJusticeUnarmedSafe(player);
+    }
+
+    private bool ShouldEnforceJusticeCustodyWeaponLock()
+    {
+        if (_justiceInventoryRemoved || _justiceWeaponControlsLocked)
+        {
+            return true;
+        }
+
+        // Je dérive le verrou de l'état durable lorsque RemoveAll a pu ne
+        // retirer qu'une partie des armes. Le même snapshot redevient libre dès
+        // la sortie réelle de détention, afin que sa restitution puisse aboutir.
+        return JusticeIsCustodyActive &&
+               _justiceInventoryCustodyState ==
+                   JusticeInventoryCustodyState.RestoreAmbiguous &&
+               _justiceDeferredInventoryRestore;
     }
 
     private void RepairJusticeOrphanedCustodyControls(Ped player)
@@ -7300,7 +7355,7 @@ public sealed partial class DonJEnemySpawner
             !JusticeCustodyHasReached(now, cooldownUntil))
         {
             int seconds = Math.Max(1, (JusticeCustodyMillisecondsUntil(now, cooldownUntil) + 999) / 1000);
-            ShowStatus(
+            ShowJusticeProfileStatus(
                 activity.DisplayName + " disponible dans " +
                 seconds.ToString(CultureInfo.InvariantCulture) + " s.",
                 2400);
@@ -7343,7 +7398,7 @@ public sealed partial class DonJEnemySpawner
             _justiceNextActivityTaskClearAt = JusticeCustodyFutureTime(now, 750);
         }
 
-        ShowStatus(
+        ShowJusticeProfileStatus(
             activity.DisplayName + " : " +
             activity.DurationSeconds.ToString(CultureInfo.InvariantCulture) + " s, reste dans la zone.",
             3200);
@@ -7453,7 +7508,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         JusticeMarkStateDirty();
-        ShowStatus(
+        ShowJusticeProfileStatus(
             granted > 0
                 ? activity.DisplayName + " terminée : -" + granted.ToString(CultureInfo.InvariantCulture) + " s."
                 : "Plafond de réduction d'activités déjà atteint.",
@@ -8218,6 +8273,9 @@ public sealed partial class DonJEnemySpawner
             {
             }
         }
+        // Je force la prochaine passe cadencée à renvoyer chaque gardien vers
+        // son poste, sans injecter ici un second ordre pendant le cleanup.
+        _justiceNextCustodySceneRefreshAt = 0;
         return playerRestored;
     }
 
@@ -8401,13 +8459,22 @@ public sealed partial class DonJEnemySpawner
         EnsureJusticeCustodyRelationshipGroups();
         CompactJusticeCustodyPedList(_justiceCustodyGuards);
         CompactJusticeCustodyPedList(_justiceCustodyInmates);
+        MaintainJusticeCustodyScenePositions(layout, now);
 
-        int guardTarget = _justiceCustodySite == JusticeCustodySite.Bolingbroke ? 4 : 2;
-        if (_justiceCustodyGuards.Count < guardTarget)
+        int guardTarget = _justiceCustodySite == JusticeCustodySite.Bolingbroke
+            ? JusticeCustodyMaximumGuardCount
+            : 2;
+        int guardIndex = FindJusticeCustodyVacantPedSlot(
+            _justiceCustodyGuards,
+            guardTarget);
+        if (guardIndex >= 0)
         {
-            int index = _justiceCustodyGuards.Count;
-            Vector3 position = layout.GuardPositions[Math.Min(index, layout.GuardPositions.Length - 1)];
-            float heading = layout.GuardHeadings[Math.Min(index, layout.GuardHeadings.Length - 1)];
+            Vector3 position = layout.GuardPositions[Math.Min(
+                guardIndex,
+                layout.GuardPositions.Length - 1)];
+            float heading = layout.GuardHeadings[Math.Min(
+                guardIndex,
+                layout.GuardHeadings.Length - 1)];
             Ped guard = CreateJusticeCustodyPed(
                 "s_m_m_prisguard_01",
                 position,
@@ -8423,21 +8490,35 @@ public sealed partial class DonJEnemySpawner
                 return;
             }
 
-            _justiceCustodyGuards.Add(guard);
+            if (guardIndex == _justiceCustodyGuards.Count)
+            {
+                _justiceCustodyGuards.Add(guard);
+            }
+            else
+            {
+                _justiceCustodyGuards[guardIndex] = guard;
+            }
             // Je limite la création à une seule entité par rafraîchissement afin
             // que le streaming d'un modèle ne provoque jamais une longue saccade.
             return;
         }
 
-        int inmateTarget = _justiceCustodySite == JusticeCustodySite.Bolingbroke ? 8 : 0;
-        if (_justiceCustodyInmates.Count < inmateTarget)
+        int inmateTarget = _justiceCustodySite == JusticeCustodySite.Bolingbroke
+            ? JusticeCustodyMaximumInmateCount
+            : 0;
+        int inmateIndex = FindJusticeCustodyVacantPedSlot(
+            _justiceCustodyInmates,
+            inmateTarget);
+        if (inmateIndex >= 0)
         {
-            int index = _justiceCustodyInmates.Count;
-            Vector3 position = layout.InmatePositions[Math.Min(index, layout.InmatePositions.Length - 1)];
+            Vector3 position = layout.InmatePositions[Math.Min(
+                inmateIndex,
+                layout.InmatePositions.Length - 1)];
             Ped inmate = CreateJusticeCustodyPed(
-                JusticeCustodyInmateModels[index % JusticeCustodyInmateModels.Length],
+                JusticeCustodyInmateModels[
+                    inmateIndex % JusticeCustodyInmateModels.Length],
                 position,
-                (index * 47.0f) % 360.0f,
+                (inmateIndex * 47.0f) % 360.0f,
                 false);
             if (!Entity.Exists(inmate))
             {
@@ -8449,7 +8530,221 @@ public sealed partial class DonJEnemySpawner
                 return;
             }
 
-            _justiceCustodyInmates.Add(inmate);
+            if (inmateIndex == _justiceCustodyInmates.Count)
+            {
+                _justiceCustodyInmates.Add(inmate);
+            }
+            else
+            {
+                _justiceCustodyInmates[inmateIndex] = inmate;
+            }
+        }
+    }
+
+    private int FindJusticeCustodyVacantPedSlot(List<Ped> peds, int targetCount)
+    {
+        if (peds == null)
+        {
+            return -1;
+        }
+
+        int boundedTarget = Math.Max(0, targetCount);
+        int firstVacantSlot = -1;
+        int inspectedCount = Math.Min(peds.Count, boundedTarget);
+        for (int index = 0; index < inspectedCount; index++)
+        {
+            Ped ped = peds[index];
+            if (!IsJusticeCustodyPedOwnershipValid(ped) || ped.IsDead)
+            {
+                firstVacantSlot = index;
+                break;
+            }
+        }
+
+        return SelectJusticeCustodyReplacementSlot(
+            peds.Count,
+            boundedTarget,
+            firstVacantSlot);
+    }
+
+    internal static int SelectJusticeCustodyReplacementSlot(
+        int currentCount,
+        int targetCount,
+        int firstVacantSlot)
+    {
+        int boundedCount = Math.Max(0, currentCount);
+        int boundedTarget = Math.Max(0, targetCount);
+        if (firstVacantSlot >= 0 &&
+            firstVacantSlot < Math.Min(boundedCount, boundedTarget))
+        {
+            return firstVacantSlot;
+        }
+
+        return boundedCount < boundedTarget ? boundedCount : -1;
+    }
+
+    private void MaintainJusticeCustodyScenePositions(
+        JusticeCustodyLayout layout,
+        int now)
+    {
+        if (layout == null)
+        {
+            return;
+        }
+
+        EnsureJusticeCustodySceneMaintenanceBuffers();
+        MaintainJusticeCustodyPedPosts(
+            _justiceCustodyGuards,
+            layout.GuardPositions,
+            layout.GuardHeadings,
+            _justiceCustodyGuardReturnRetryAt,
+            layout,
+            true,
+            now);
+        MaintainJusticeCustodyPedPosts(
+            _justiceCustodyInmates,
+            layout.InmatePositions,
+            null,
+            _justiceCustodyInmateReturnRetryAt,
+            layout,
+            false,
+            now);
+    }
+
+    private void MaintainJusticeCustodyPedPosts(
+        List<Ped> peds,
+        Vector3[] positions,
+        float[] headings,
+        int[] retryAt,
+        JusticeCustodyLayout layout,
+        bool guard,
+        int now)
+    {
+        if (peds == null || positions == null || retryAt == null)
+        {
+            return;
+        }
+
+        int count = Math.Min(
+            Math.Min(peds.Count, positions.Length),
+            retryAt.Length);
+        for (int index = 0; index < count; index++)
+        {
+            Ped ped = peds[index];
+            if (!IsJusticeCustodyPedOwnershipValid(ped) || ped.IsDead)
+            {
+                retryAt[index] = 0;
+                continue;
+            }
+
+            Vector3 target = positions[index];
+            bool insideAllowedVolume = guard ||
+                IsInsideJusticeCustodyAllowedArea(layout, ped.Position);
+            float distanceSquared = GetJusticeCustodyDistanceSquared(
+                ped.Position,
+                target);
+            if (!ShouldCommandJusticeCustodyPedReturn(
+                    guard,
+                    insideAllowedVolume,
+                    distanceSquared))
+            {
+                retryAt[index] = 0;
+                continue;
+            }
+            if (!JusticeCustodyHasReached(now, retryAt[index]))
+            {
+                continue;
+            }
+
+            retryAt[index] = JusticeCustodyFutureTime(
+                now,
+                JusticeCustodySceneReturnRetryMs);
+            float heading = headings != null && index < headings.Length
+                ? headings[index]
+                : 0.0f;
+            try
+            {
+                // Je laisse le navmesh ramener le PNJ sans téléport visible et
+                // je ne réémets cet ordre qu'après le backoff de scène.
+                Function.Call(
+                    Hash.TASK_FOLLOW_NAV_MESH_TO_COORD,
+                    ped.Handle,
+                    target.X,
+                    target.Y,
+                    target.Z,
+                    1.0f,
+                    -1,
+                    1.25f,
+                    true,
+                    heading);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private static bool IsInsideJusticeCustodyAllowedArea(
+        JusticeCustodyLayout layout,
+        Vector3 position)
+    {
+        if (layout == null || layout.AllowedVolumes == null)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < layout.AllowedVolumes.Length; index++)
+        {
+            JusticeCustodyVolume volume = layout.AllowedVolumes[index];
+            if (volume != null && volume.Contains(position))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal static bool ShouldCommandJusticeCustodyPedReturn(
+        bool guard,
+        bool insideAllowedVolume,
+        float distanceSquared)
+    {
+        if (float.IsNaN(distanceSquared) || distanceSquared < 0.0f)
+        {
+            return false;
+        }
+
+        return guard
+            ? distanceSquared > JusticeCustodyGuardPostReturnDistanceSquared
+            : !insideAllowedVolume;
+    }
+
+    private static float GetJusticeCustodyDistanceSquared(
+        Vector3 first,
+        Vector3 second)
+    {
+        float x = first.X - second.X;
+        float y = first.Y - second.Y;
+        float z = first.Z - second.Z;
+        return x * x + y * y + z * z;
+    }
+
+    private void EnsureJusticeCustodySceneMaintenanceBuffers()
+    {
+        if (_justiceCustodyGuardReturnRetryAt == null ||
+            _justiceCustodyGuardReturnRetryAt.Length !=
+                JusticeCustodyMaximumGuardCount)
+        {
+            _justiceCustodyGuardReturnRetryAt =
+                new int[JusticeCustodyMaximumGuardCount];
+        }
+        if (_justiceCustodyInmateReturnRetryAt == null ||
+            _justiceCustodyInmateReturnRetryAt.Length !=
+                JusticeCustodyMaximumInmateCount)
+        {
+            _justiceCustodyInmateReturnRetryAt =
+                new int[JusticeCustodyMaximumInmateCount];
         }
     }
 
@@ -8650,7 +8945,9 @@ public sealed partial class DonJEnemySpawner
             }
 
             ForgetJusticeCustodyPedOwnership(handle);
-            peds.RemoveAt(index);
+            // Je conserve l'indice du poste : le prochain spawn remplit ce trou
+            // au lieu de décaler les survivants et de dupliquer le dernier poste.
+            peds[index] = null;
         }
     }
 
@@ -8708,6 +9005,7 @@ public sealed partial class DonJEnemySpawner
         {
             _justiceCustodyPedGenerationByHandle.Clear();
         }
+        ResetJusticeCustodySceneMaintenanceBuffers();
         ResetJusticeCustodyAggressorBuffers();
 
         try
@@ -8729,6 +9027,19 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyGuardGroupHash = 0;
         _justiceCustodyInmateGroupHash = 0;
         _justiceNextCustodySceneRefreshAt = 0;
+    }
+
+    private void ResetJusticeCustodySceneMaintenanceBuffers()
+    {
+        EnsureJusticeCustodySceneMaintenanceBuffers();
+        Array.Clear(
+            _justiceCustodyGuardReturnRetryAt,
+            0,
+            _justiceCustodyGuardReturnRetryAt.Length);
+        Array.Clear(
+            _justiceCustodyInmateReturnRetryAt,
+            0,
+            _justiceCustodyInmateReturnRetryAt.Length);
     }
 
     private void ResetJusticeCustodyAggressorBuffers()

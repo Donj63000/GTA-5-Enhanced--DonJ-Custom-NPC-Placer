@@ -2349,9 +2349,23 @@ public sealed partial class DonJEnemySpawner
 
     private string GetJusticePlayedActivationDisplay()
     {
+        if (_justiceProfileSwitchPersistencePending)
+        {
+            return "SAUVEGARDE DU CHANGEMENT EN COURS";
+        }
+        if (_justiceProfileSelectionPending ||
+            !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot))
+        {
+            return "IDENTIFICATION DU PERSONNAGE EN COURS";
+        }
+        if (_justiceProfileContextBlocked ||
+            !IsJusticeRuntimeProfileContextCompatible())
+        {
+            return "SUSPENDU · CHANGEMENT EN ATTENTE";
+        }
         if (!IsJusticePlayedProfileContextReady())
         {
-            return "IDENTIFICATION / CHANGEMENT EN COURS";
+            return "SUSPENDU · CONTEXTE INDISPONIBLE";
         }
         return (_justiceEnabled ? "ACTIVÉE" : "DÉSACTIVÉE") + " · " +
                GetJusticePlayedProfileDisplay().ToUpperInvariant();

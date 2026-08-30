@@ -186,6 +186,105 @@ public sealed class RuntimeStageIsolationTests
     }
 
     [TestMethod]
+    public void OnTick_DoesNotDrawJusticeHudWhenEitherJusticeStageFailed()
+    {
+        string onTick = ExtractMethodBody(ReadSource("DonJEnemySpawner.cs"), "OnTick");
+        int terminatorHudAt = onTick.IndexOf(
+            "DrawTerminatorModeHud();",
+            StringComparison.Ordinal);
+
+        Assert.IsTrue(
+            terminatorHudAt >= 0,
+            "Le HUD Terminator doit rester indépendant de l'état du contrôleur Justice.");
+
+        string successfulJusticeCycleBlock = ExtractBlockAtMarker(
+            onTick,
+            "if (justiceEarlySucceeded && justiceLateSucceeded",
+            onTick.IndexOf(
+                "RunTickStage(RuntimeTickStage.JusticeLate)",
+                StringComparison.Ordinal));
+
+        int firstJusticeHudAt = onTick.IndexOf(
+            "DrawJusticeCustodyStatusLine();",
+            StringComparison.Ordinal);
+        int lastJusticeHudAt = onTick.LastIndexOf(
+            "DrawJusticeCustodyStatusLine();",
+            StringComparison.Ordinal);
+        Assert.AreEqual(
+            firstJusticeHudAt,
+            lastJusticeHudAt,
+            "OnTick ne doit conserver aucun dessin Justice hors du garde de cycle complet.");
+
+        StringAssert.Contains(
+            successfulJusticeCycleBlock,
+            "DrawJusticeCustodyStatusLine();",
+            "Le HUD Justice exige le succès des phases Early et Late.");
+        AssertOrdered(
+            onTick,
+            "justiceLateSucceeded =",
+            "RunTickStage(RuntimeTickStage.JusticeLate)",
+            "if (justiceEarlySucceeded && justiceLateSucceeded",
+            "DrawJusticeCustodyStatusLine();");
+    }
+
+    [TestMethod]
+    public void JusticeSuspensionHelper_ClosesEveryEarlyReturnClockWindow()
+    {
+        string justiceSource = ReadSource("DonJEnemySpawner.Justice.cs");
+        string update = ExtractMethodBody(justiceSource, "UpdateJusticeSystem");
+
+        foreach (string guard in new[]
+        {
+            "if (UpdateJusticePoliceDeathPreJudgmentHolding(player, nowRaw))",
+            "if (HasOpenJusticeProfileResetWal())",
+            "if (_justiceBackupRepairPending)"
+        })
+        {
+            string guardedReturn = ExtractBlockAtMarker(update, guard);
+            StringAssert.Contains(
+                guardedReturn,
+                "SuspendJusticeSentenceClocks(nowRaw);",
+                guard + " doit suspendre les horloges avant son retour anticipé.");
+            AssertOrdered(
+                guardedReturn,
+                "SuspendJusticeSentenceClocks(nowRaw);",
+                "return;");
+        }
+
+        string failSafe = ExtractMethodBody(
+            justiceSource,
+            "UpdateJusticeFailSafeMaintenance");
+        StringAssert.Contains(failSafe, "SuspendJusticeSentenceClocks(now);");
+
+        string suspension = ExtractMethodBody(
+            justiceSource,
+            "SuspendJusticeSentenceClocks");
+        StringAssert.Contains(suspension, "InterruptJusticeCustodyEscapeObservation();");
+        StringAssert.Contains(suspension, "ResetJusticeCustodyClock(now);");
+        StringAssert.Contains(suspension, "AdvanceJusticeInactiveCustodyProfiles(now, true);");
+    }
+
+    [TestMethod]
+    public void JusticeActiveProfileReset_ReportsTheCapturedSlot()
+    {
+        string profilesSource = ReadSource("DonJEnemySpawner.Justice.Profiles.cs");
+        string resumeReset = ExtractMethodBody(
+            profilesSource,
+            "ResumeJusticeActiveProfileResetTransaction");
+
+        AssertOrdered(
+            resumeReset,
+            "int slot = _justiceActivePlayerProfileSlot;",
+            "ReplaceJusticePlayerProfileWithEmptyState(slot)",
+            "GetJusticeProfileDisplayName(slot)");
+        Assert.IsFalse(
+            resumeReset.IndexOf(
+                "GetJusticeMenuSelectedProfileDisplay()",
+                StringComparison.Ordinal) >= 0,
+            "Le message final ne doit pas relire le sélecteur F10, qui peut changer pendant le flush.");
+    }
+
+    [TestMethod]
     public void TickErrorCooldown_IsIndependentPerStageAndWrapSafe()
     {
         Type stageType = ScriptType.GetNestedType("RuntimeTickStage", BindingFlags.NonPublic);
@@ -452,6 +551,38 @@ public sealed class RuntimeStageIsolationTests
         }
 
         Assert.Fail("Accolade fermante introuvable: " + methodName);
+        return string.Empty;
+    }
+
+    private static string ExtractBlockAtMarker(
+        string source,
+        string marker,
+        int startIndex = 0)
+    {
+        int markerIndex = source.IndexOf(marker, startIndex, StringComparison.Ordinal);
+        Assert.IsTrue(markerIndex >= 0, "Bloc source introuvable: " + marker);
+
+        int openBrace = source.IndexOf('{', markerIndex);
+        Assert.IsTrue(openBrace >= 0, "Accolade ouvrante introuvable: " + marker);
+
+        int depth = 0;
+        for (int index = openBrace; index < source.Length; index++)
+        {
+            if (source[index] == '{')
+            {
+                depth++;
+            }
+            else if (source[index] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return source.Substring(openBrace, index - openBrace + 1);
+                }
+            }
+        }
+
+        Assert.Fail("Accolade fermante introuvable: " + marker);
         return string.Empty;
     }
 

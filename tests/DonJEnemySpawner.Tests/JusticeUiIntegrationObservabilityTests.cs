@@ -259,16 +259,118 @@ public sealed class JusticeUiIntegrationObservabilityTests
         SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 1));
 
         SetField(script, "_justiceProfileContextBlocked", true);
-        Assert.AreEqual(
-            "IDENTIFICATION / CHANGEMENT EN COURS",
-            InvokeInstance(script, "GetJusticePlayedActivationDisplay"));
+        string suspendedDisplay = (string)InvokeInstance(
+            script,
+            "GetJusticePlayedActivationDisplay");
+        StringAssert.Contains(suspendedDisplay.ToUpperInvariant(), "SUSPENDU");
         Assert.IsFalse((bool)InvokeInstance(script, "IsJusticeMenuSelectedProfileCurrentlyPlayed"));
 
         SetField(script, "_justiceProfileContextBlocked", false);
+        SetField(script, "_justiceProfileSwitchPersistencePending", true);
+        string switchSaveDisplay = (string)InvokeInstance(
+            script,
+            "GetJusticePlayedActivationDisplay");
+        StringAssert.Contains(switchSaveDisplay.ToUpperInvariant(), "SAUVEGARDE");
+
+        SetField(script, "_justiceProfileSwitchPersistencePending", false);
+        SetField(script, "_justiceProfileSelectionPending", true);
+        string identificationDisplay = (string)InvokeInstance(
+            script,
+            "GetJusticePlayedActivationDisplay");
+        StringAssert.Contains(identificationDisplay.ToUpperInvariant(), "IDENTIFICATION");
+
+        SetField(script, "_justiceProfileSelectionPending", false);
         SetField(script, "_justiceActivePlayerProfileSlot", -1);
+        string unknownProfileDisplay = (string)InvokeInstance(
+            script,
+            "GetJusticePlayedActivationDisplay");
+        StringAssert.Contains(unknownProfileDisplay.ToUpperInvariant(), "IDENTIFICATION");
+    }
+
+    [TestMethod]
+    public void JusticeProfileFrontReset_ClearsTransientStatusOwnedByPreviousHero()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        foreach (string fieldName in new[]
+        {
+            "_justicePendingIncidents",
+            "_justiceRecentVictims",
+            "_justiceRecentVehicles",
+            "_justiceAllyTokens",
+            "_justiceTrackedIdentities",
+            "_justiceSelfDefenseUntilByVictim",
+            "_justiceSelfDefenseThreatByVictim"
+        })
+        {
+            InitializeFieldWithDefaultConstructor(script, fieldName);
+        }
+
+        SetField(script, "_justiceCaseState", new JusticeCaseState());
+        SetField(script, "_statusText", "Justice · ancien personnage");
+        SetField(script, "_statusUntil", int.MaxValue);
+
+        InvokeInstance(script, "ResetJusticeRuntimeFrontsForProfileChange");
+
+        Assert.AreEqual(string.Empty, GetField<string>(script, "_statusText"));
+        Assert.AreNotEqual(
+            int.MaxValue,
+            GetField<int>(script, "_statusUntil"),
+            "Le statut de l'ancien héros ne doit conserver aucune échéance active.");
+
+        SetField(script, "_statusText", "Cartel · convoi en route");
+        SetField(script, "_statusUntil", int.MaxValue);
+        InvokeInstance(script, "ResetJusticeRuntimeFrontsForProfileChange");
+        Assert.AreEqual("Cartel · convoi en route", GetField<string>(script, "_statusText"));
         Assert.AreEqual(
-            "IDENTIFICATION / CHANGEMENT EN COURS",
-            InvokeInstance(script, "GetJusticePlayedActivationDisplay"));
+            int.MaxValue,
+            GetField<int>(script, "_statusUntil"),
+            "Un statut téléphone ou faction n'appartient pas au profil Justice.");
+
+        SetField(
+            script,
+            "_statusText",
+            "Formalités administratives : 20 s, reste dans la zone.");
+        SetField(script, "_statusUntil", int.MaxValue);
+        SetField(script, "_statusOwnedByJusticeProfile", true);
+        InvokeInstance(script, "ResetJusticeRuntimeFrontsForProfileChange");
+        Assert.AreEqual(
+            string.Empty,
+            GetField<string>(script, "_statusText"),
+            "Un libellé dynamique d'activité doit suivre le détenu qui l'a créé.");
+        Assert.IsFalse(GetField<bool>(script, "_statusOwnedByJusticeProfile"));
+
+        SetField(script, "_statusOwnedByJusticeProfile", true);
+        InvokeInstance(script, "ShowStatus", "Cartel · convoi en route", 2400);
+        Assert.IsFalse(
+            GetField<bool>(script, "_statusOwnedByJusticeProfile"),
+            "Tout nouveau message générique doit retirer l'ancien propriétaire Justice.");
+
+        foreach (string justiceStatus in new[]
+        {
+            "Activation impossible : sauvegarde indisponible.",
+            "Désactivation différée : libération en cours.",
+            "Paiement disponible uniquement pour le héros joué.",
+            "Évasion en attente : sécurisation en cours.",
+            "Activité interrompue : aucune réduction.",
+            "Discipline en attente : reprise sécurisée."
+        })
+        {
+            Assert.IsTrue(
+                (bool)InvokeStatic("IsJusticeProfileScopedStatus", justiceStatus),
+                "Le statut de l'ancien héros doit être retiré : " + justiceStatus);
+        }
+
+        string custodySource = File.ReadAllText(Path.Combine(
+            GetRepositoryRoot(),
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.Justice.Custody.cs")).Replace("\r\n", "\n");
+        StringAssert.Contains(
+            custodySource,
+            "ShowJusticeProfileStatus(\n                activity.DisplayName");
+        StringAssert.Contains(
+            custodySource,
+            "ShowJusticeProfileStatus(\n            granted > 0");
     }
 
     [TestMethod]
@@ -543,6 +645,15 @@ public sealed class JusticeUiIntegrationObservabilityTests
         FieldInfo field = ScriptType.GetField(fieldName, PrivateInstance);
         Assert.IsNotNull(field, "Champ privé introuvable : " + fieldName);
         field.SetValue(target, value);
+    }
+
+    private static void InitializeFieldWithDefaultConstructor(
+        object target,
+        string fieldName)
+    {
+        FieldInfo field = ScriptType.GetField(fieldName, PrivateInstance);
+        Assert.IsNotNull(field, "Champ privé introuvable : " + fieldName);
+        field.SetValue(target, Activator.CreateInstance(field.FieldType));
     }
 
     private static List<MethodBase> ReadCalledMethods(MethodInfo method)
