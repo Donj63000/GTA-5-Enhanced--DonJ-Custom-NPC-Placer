@@ -1448,7 +1448,9 @@ public sealed partial class DonJEnemySpawner
             AdvanceJusticeInactiveCustodyProfiles(nowRaw, true);
             return;
         }
-        bool profileContextCompatible = !_justiceProfileContextBlocked &&
+        bool profileContextCompatible =
+            !_justiceProfileSwitchPersistencePending &&
+            !_justiceProfileContextBlocked &&
             IsJusticeRuntimeProfileContextCompatible();
         bool runtimeSuspended = IsJusticeRuntimeSuspended(player);
         if ((runtimeSuspended || !profileContextCompatible) &&

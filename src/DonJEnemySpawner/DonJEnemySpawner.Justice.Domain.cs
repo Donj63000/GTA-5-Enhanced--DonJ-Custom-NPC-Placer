@@ -1119,6 +1119,10 @@ internal sealed class JusticePolicy
                 caseState.LastCrimeKind = existing.Kind;
                 caseState.LastCrimeLabel = existing.DisplayName;
                 existing.IncidentId = candidate.IncidentId;
+                // Je garde l'identifiant de charge canonique synchronisé avec le
+                // dernier incident collectif fusionné. Le codec v2 exige cette
+                // paire exacte pour pouvoir relire puis publier le profil.
+                existing.ChargeId = "charge:" + existing.IncidentId;
                 existing.ConfirmedAtMs = candidate.ConfirmedAtMs;
                 RecalculateCaseAfterChargeMutation(
                     caseState,

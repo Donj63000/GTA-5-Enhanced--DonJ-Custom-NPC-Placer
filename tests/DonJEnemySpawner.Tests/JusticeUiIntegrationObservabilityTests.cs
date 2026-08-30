@@ -50,6 +50,17 @@ public sealed class JusticeUiIntegrationObservabilityTests
         SetField(script, "_justiceActivePlayerProfileSlot", 1);
         SetField(script, "_justiceCustodyPlayerSlot", 1);
         SetField(script, "_justiceCustodyRuntimeActive", true);
+        SetField(script, "_justiceCustodyPlayerHandle", 44);
+        SetField(script, "_justiceCustodyPlayerModelHash", 123);
+        SetField(
+            script,
+            "_justiceCaseState",
+            new JusticeCaseState
+            {
+                Enabled = true,
+                Phase = JusticePhase.Incarcerated,
+                SentenceSeconds = 599
+            });
         SetField(script, "_justiceProfileContextBlocked", false);
         SetField(script, "_justiceProfileSelectionPending", false);
         SetField(script, "_justiceProfileSwitchPersistencePending", false);
@@ -59,10 +70,54 @@ public sealed class JusticeUiIntegrationObservabilityTests
             script,
             "IsJusticePlayedProfileCustodyContextReady"));
 
+        List<MethodBase> custodyContextCalls = ReadCalledMethods(
+            FindMethod("IsJusticePlayedProfileCustodyContextReady", PrivateInstance));
+        Assert.IsTrue(custodyContextCalls.Any(call =>
+            call.DeclaringType == typeof(JusticePolicy) &&
+            call.Name == "IsCustodyLiveIdentityCompatible"));
+        Assert.IsFalse(custodyContextCalls.Any(call =>
+            call.Name == "IsJusticeCustodyPlayerIdentityCompatible"),
+            "Le rendu ne doit jamais relier ou muter l'identité de détention.");
+
+        SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 1));
+        SetField(script, "_justiceCustodyPlayerSlot", -1);
+        Assert.IsFalse((bool)InvokeInstance(
+            script,
+            "IsJusticePlayedProfileCustodyContextReady"),
+            "Je masque toute détention dont le propriétaire canonique reste inconnu.");
+        SetField(script, "_justiceCustodyPlayerSlot", 1);
+
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped owner = new GTA.Ped
+        {
+            Handle = 44,
+            Model = new GTA.Model(123)
+        };
+        GTA.Game.Player.Character = owner;
+        SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => -1));
+        Assert.IsTrue((bool)InvokeInstance(
+            script,
+            "IsJusticePlayedProfileCustodyContextReady"),
+            "Un modèle custom reste attribuable uniquement au même ped déjà prouvé.");
+
+        GTA.Game.Player.Character = new GTA.Ped
+        {
+            Handle = 45,
+            Model = new GTA.Model(456)
+        };
+        Assert.IsFalse((bool)InvokeInstance(
+            script,
+            "IsJusticePlayedProfileCustodyContextReady"),
+            "Un autre ped sous slot ambigu ne doit jamais conserver le bandeau de l'ancien héros.");
+
         SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 1));
         Assert.IsTrue((bool)InvokeInstance(
             script,
-            "IsJusticePlayedProfileCustodyContextReady"));
+            "IsJusticePlayedProfileCustodyContextReady"),
+            "Le bandeau doit réapparaître dès que le propriétaire canonique revient.");
+        Assert.AreEqual("9:59", InvokeInstance(script, "GetJusticeSentenceDisplay"));
+#endif
 
         SetField(script, "_justiceRuntimeSuspendedCached", true);
         Assert.IsFalse((bool)InvokeInstance(

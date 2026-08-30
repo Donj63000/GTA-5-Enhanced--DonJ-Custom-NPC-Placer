@@ -464,6 +464,45 @@ public sealed class JusticeDomainTests
     }
 
     [TestMethod]
+    public void CollectiveMerge_RefreshesCanonicalChargeIdentityAndRemainsPersistable()
+    {
+        JusticeCaseState state = NewEnabledCase();
+        JusticeRecordState record = new JusticeRecordState();
+        JusticeIncident first = ConfirmedIncident(
+            JusticeCrimeKind.AccessoryAssaultOfficer,
+            "incident:collective:first",
+            812,
+            31,
+            JusticeCircumstances.None);
+        first.IsAlliedAction = true;
+        first.AllyHandle = 701;
+        first.AllyGeneration = 41;
+
+        JusticeIncident second = ConfirmedIncident(
+            JusticeCrimeKind.AccessoryAssaultOfficer,
+            "incident:collective:second",
+            812,
+            31,
+            JusticeCircumstances.None);
+        second.IsAlliedAction = true;
+        second.AllyHandle = 702;
+        second.AllyGeneration = 42;
+
+        Assert.IsNotNull(JusticePolicy.ApplyConfirmedIncident(state, first, record));
+        JusticeCharge merged = JusticePolicy.ApplyConfirmedIncident(state, second, record);
+
+        Assert.IsNotNull(merged);
+        Assert.AreSame(state.Charges[0], merged);
+        Assert.AreEqual(second.IncidentId, merged.IncidentId);
+        Assert.AreEqual("charge:" + second.IncidentId, merged.ChargeId);
+        Assert.IsTrue(
+            JusticePolicy.TryNormalizePersistedChargeIdentity(
+                merged,
+                merged.EpisodeId),
+            "La charge fusionnée doit rester relisible par le validateur v2.");
+    }
+
+    [TestMethod]
     public void ReusedAllyHandle_WithANewGenerationCountsAsADistinctContributor()
     {
         JusticeCaseState state = NewEnabledCase();

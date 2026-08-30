@@ -2076,3 +2076,54 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: L'absence de `GTA5_Enhanced` a été revérifiée dans une commande séparée, les logs ont été collectés, puis le déploiement transactionnel n'a été lancé qu'après cette preuve. Aucun autre processus Steam/Rockstar n'a été arrêté.
 - Vérification: GTA est resté fermé pendant la copie; `deploy-game-ready.ps1` a ensuite installé et vérifié l'ENdll de SHA-256 `9C5B3FD6EF923F12BCE1913EC1662631068EC02A5DD977247CA44026EE121A1D`, le manifest `sourceDirty=false`, l'API NIB 2.11.6 et le contrat ABI 32 types/189 membres.
 - Résolution: Incident d'outillage clos. La session GTA a été arrêtée comme autorisé; elle devra être relancée après l'installation de l'artefact final aligné sur `main`.
+
+## 2026-08-30 06:44:34 +02:00 - Switch de protagoniste Justice bloqué, toggle F10 indisponible et HUD de peine figé
+- Statut: Corrigé dans la source et validé hors jeu; installation du paquet propre encore à effectuer au moment de cette entrée.
+- Contexte: Signalement en mode Histoire lors d'un changement entre Michael, Franklin et Trevor. Justice restait sur l'identification du nouveau joueur, l'activation/désactivation dans F10 ne répondait plus proprement et la ligne de détention pouvait rester visible avec un temps figé.
+- Symptôme: Le nouveau profil était activé en mémoire mais sa barrière `_justiceProfileSwitchPersistencePending` n'atteignait jamais sa révision disque. Les actions F10 qui exigent un profil joué durable restaient donc refusées et le HUD pouvait encore lire l'ancienne détention pendant la transition.
+- Sources vérifiées:
+  - `bug-reports\20260830-064424-justice-character-switch-tracking-toggle-ui-stuck` et ses copies des logs GTA/NIB/DonJ;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.log`;
+  - primaire, backup et WAL Justice du dossier de sauvegarde actif;
+  - `DonJEnemySpawner.Justice.Domain.cs`, `DonJEnemySpawner.Justice.Profiles.cs`, `DonJEnemySpawner.Justice.cs` et les tests de domaine, profils et HUD.
+- Extraits utiles:
+  - à 05:44:22 puis 05:44:23, plusieurs contributions alliées sont fusionnées dans les mêmes qualifications; à 05:44:28.419 apparaît le premier rejet writer « Invariants métier des profils Justice v2 invalides »;
+  - la reproduction headless du binaire réellement chargé produisait `ChargeId=charge:incident:headless:first` avec `IncidentId=incident:headless:second`, puis `TryNormalizePersistedChargeIdentity=false`;
+  - le primaire et le backup sur disque restent valides, respectivement génération 134 et 133, profil actif Franklin slot 1; le WAL est vide. Le graphe invalide n'existait que dans la mémoire du processus et chaque retry republiait ce même graphe.
+- Analyse / hypothèse: `ApplyConfirmedIncident` remplaçait `IncidentId` lors d'une fusion collective sans remplacer le `ChargeId` canonique correspondant. Le codec v2 exige `ChargeId == "charge:" + IncidentId`; le writer rejetait donc chaque snapshot, ce qui empêchait la confirmation disque du switch. En parallèle, les switches rapides pouvaient remplacer la barrière en cours et le rendu de détention ne revalidait pas assez tard le ped réellement joué.
+- Action menée: La fusion met désormais à jour ensemble `IncidentId` et `ChargeId`. Les bascules P vers Q vers R sont sérialisées jusqu'à `DiskRevision` avec un tick frontière; un slot inconnu ne contourne pas la publication. Une activation cible invalide restaure atomiquement le profil source, la peine, les horloges, le scheduling et les intents `RepairArrest`, puis exige une nouvelle preuve canonique. Le HUD vérifie en lecture seule le propriétaire, le slot et l'identité live du ped avant tout affichage.
+- Vérification: 125/125 tests ciblés domaine/profils/HUD; build Release avec 0 avertissement et 0 erreur; suite réelle 540/540; `tools\run-safety-checks.ps1 -UseStubApi` réussi à 576/576 dans `TestResults\safety-20260830-071249`, ABI NIB v2 valide sur 32 types et 189 membres et contrat `.ENdll` vérifié. Un audit indépendant du diff ne relève aucun P1/P2 résiduel.
+- Résolution: La boucle de rejet et les chemins de switch/HUD associés sont fermés par code et tests. Le paquet sale de la safety est volontairement non déployable; un commit propre doit encore être empaqueté puis installé avant la validation finale en jeu.
+
+## 2026-08-30 06:54:09 +02:00 - Tests stub invoqués directement avec l'API GTA réelle
+- Statut: Résolu; commande de validation corrigée.
+- Contexte: Première tentative ciblée avec `dotnet test ... -p:UseStubApi=true` lancée sans le `GtaRoot` temporaire que prépare la suite de sécurité.
+- Symptôme: La constante `DONJ_STUB_API` activait les scénarios `StubRuntime`, mais la référence résolue restait `NIBScriptHookVDotNet2.dll` du jeu. La compilation signalait donc `StubRuntime` absent, propriétés GTA en lecture seule et constructeurs de peds incompatibles.
+- Sources vérifiées: sortie complète de la commande, `DonJEnemySpawner.Tests.csproj`, `tools\run-safety-checks.ps1` et `bug-reports\20260830-070655-justice-switch-intermediate-test-failures`.
+- Extraits utiles: erreurs `CS0234 StubRuntime n'existe pas`, `CS0200 Entity.Handle est en lecture seule` et `CS7036 Ped.Ped(int)`; aucune erreur ne visait le correctif de switch lui-même.
+- Analyse / hypothèse: `UseStubApi=true` sélectionne les tests simulés mais ne construit ni ne copie seul l'assembly stub. Le workflow officiel crée d'abord un faux `GtaRoot`, y installe le stub, puis transmet simultanément les deux propriétés MSBuild.
+- Action menée: Les tests ciblés ont été relancés contre l'API réelle, puis tous les scénarios stub via `tools\run-safety-checks.ps1 -UseStubApi`.
+- Vérification: Ciblage réel 6/6 puis 125/125; safety stub 576/576, build propre et ABI valide.
+- Résolution: Échec limité à une invocation locale incomplète; aucun changement de production n'a été fait pour le contourner.
+
+## 2026-08-30 07:07:01 +02:00 - Régression intermédiaire de l'horloge d'un détenu lors du switch retour
+- Statut: Corrigé pendant l'implémentation; suites ciblée et globale vertes.
+- Contexte: Exécution de toute la classe `JusticePlayerProfilePersistenceTests` après une première fermeture trop globale du contexte pendant `_justiceProfileSwitchPersistencePending`.
+- Symptôme: `PlayerProfiles_IncarceratedHeroCanSwitchAndKeepsServingAnIsolatedSentence` échouait ligne 152: le profil redevenu actif conservait à tort `CanAdvanceCustodyInBackground=true`.
+- Sources vérifiées: sortie MSTest reproduite localement, `bug-reports\20260830-070655-justice-switch-intermediate-test-failures`, `IsJusticeRuntimeProfileContextCompatible`, `UpdateJusticeSystem` et `SnapshotActiveJusticePlayerProfile`.
+- Extraits utiles: test isolé 0/1 avec `Assert.IsFalse` ligne 152, puis même scénario 1/1 après correction.
+- Analyse / hypothèse: Faire retourner `false` à la primitive générale de compatibilité pendant le commit avait un effet de bord dans `CanAdvanceCurrentJusticeCustodyInBackground`; le snapshot du profil actif le reclassait alors comme inactif. Le gel du gameplay tardif devait rester local à `UpdateJusticeSystem`.
+- Action menée: La primitive générale a retrouvé son contrat historique. `profileContextCompatible` exige maintenant explicitement l'absence de switch pending uniquement dans le late runtime, sans influencer le calcul de l'horloge du profil actif.
+- Vérification: Ancien test d'incarcération 1/1; ensemble correctif 6/6; classes ciblées 125/125; suite réelle 540/540 et safety stub 576/576.
+- Résolution: Régression intermédiaire éliminée avant validation; aucune version contenant ce défaut n'a été commitée ni déployée.
+
+## 2026-08-30 07:05:00 +02:00 - Troisième opérande wildcard rg refusé sous Windows
+- Statut: Résolu immédiatement; aucune incidence sur le code.
+- Contexte: Recherche complémentaire du texte F10 et des barrières Justice dans `DonJEnemySpawner.Justice*.cs`.
+- Symptôme: `rg` a de nouveau reçu le wildcard de chemin comme nom littéral et a émis `os error 123`, tandis que les chemins exacts adjacents étaient lus normalement.
+- Sources vérifiées: sortie directe de `rg`, fichiers obtenus avec `rg --files` et recherches suivantes depuis le dossier `src\DonJEnemySpawner`.
+- Extraits utiles: `rg: src/DonJEnemySpawner/DonJEnemySpawner.Justice*.cs: La syntaxe du nom de fichier, de répertoire ou de volume est incorrecte. (os error 123)`.
+- Analyse / hypothèse: Même comportement PowerShell/Windows déjà consigné: ce wildcard d'opérande n'est pas expansé avant d'être transmis à `rg`.
+- Action menée: Toutes les lectures suivantes utilisent une racine de dossier, `-g` ou des chemins exacts.
+- Vérification: Les occurrences attendues ont été relues par chemins exacts; `git diff --check`, les builds et les tests ne signalent aucune conséquence.
+- Résolution: Incident read-only clos; aucun fichier n'a été modifié par cette commande.

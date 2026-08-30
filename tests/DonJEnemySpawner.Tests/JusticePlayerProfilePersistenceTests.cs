@@ -1662,6 +1662,361 @@ public sealed class JusticePlayerProfilePersistenceTests
     }
 
     [TestMethod]
+    public void PlayerProfiles_RapidSecondSwitchWaitsForFirstDiskRevisionAndOneBoundaryTick()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            InitializeProfileResetRuntimeCollections(script);
+            Invoke(script, "InitializeJusticePersistenceServices");
+            Invoke(script, "ShutdownJusticePersistenceServices");
+
+            FirstWriteBlockingAtomicFileStore store =
+                new FirstWriteBlockingAtomicFileStore();
+            JusticeRepository repository = new JusticeRepository(
+                Path.Combine(directory, "_justice_state.xml"),
+                Path.Combine(directory, "_justice_state.xml.bak"),
+                new JusticeXmlPersistenceCodec(),
+                0L,
+                store,
+                JusticeNoOpPersistenceFaultInjector.Instance,
+                10);
+            repository.Start();
+            SetField(script, "_justiceRepository", repository);
+            int[] repairArrestHoldingIntents = { 111, 222, 333 };
+            SetField(
+                script,
+                "_justiceRepairArrestPreJudgmentHoldingModelHashes",
+                (int[])repairArrestHoldingIntents.Clone());
+
+            try
+            {
+                SetField(
+                    script,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 1));
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }));
+                Assert.IsTrue(
+                    store.FirstWriteStarted.WaitOne(TimeSpan.FromSeconds(5)),
+                    "Le snapshot Q doit être retenu avant sa publication disque.");
+                Assert.AreEqual(1, GetField<int>(
+                    script,
+                    "_justiceActivePlayerProfileSlot"));
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justiceProfileSwitchPersistencePending"));
+                long qRevision = GetField<long>(
+                    script,
+                    "_justiceProfileSwitchPersistenceRevision");
+                Assert.IsTrue(qRevision > 0L);
+
+                SetField(
+                    script,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 2));
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }));
+                Assert.AreEqual(
+                    1,
+                    GetField<int>(script, "_justiceActivePlayerProfileSlot"),
+                    "R ne doit jamais écraser Q tant que sa révision n'est pas durable.");
+                Assert.AreEqual(
+                    qRevision,
+                    GetField<long>(script, "_justiceProfileSwitchPersistenceRevision"),
+                    "La barrière de Q doit garder exactement sa révision initiale.");
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justiceProfileSwitchPersistencePending"));
+
+                store.ReleaseFirstWrite.Set();
+                AwaitQueuedPersistence(script);
+
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }),
+                    "Le tick qui constate DiskRevision doit rester une frontière sans activation de R.");
+                Assert.AreEqual(1, GetField<int>(
+                    script,
+                    "_justiceActivePlayerProfileSlot"));
+                Assert.IsFalse(GetField<bool>(
+                    script,
+                    "_justiceProfileSwitchPersistencePending"));
+                Assert.AreEqual(
+                    0L,
+                    GetField<long>(script, "_justiceProfileSwitchPersistenceRevision"));
+
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }),
+                    "Le tick suivant peut activer R, mais doit attendre sa propre publication.");
+                Assert.AreEqual(2, GetField<int>(
+                    script,
+                    "_justiceActivePlayerProfileSlot"));
+                Assert.AreSame(
+                    profiles[2].CaseState,
+                    GetField<JusticeCaseState>(script, "_justiceCaseState"));
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justiceProfileSwitchPersistencePending"));
+                CollectionAssert.AreEqual(
+                    repairArrestHoldingIntents,
+                    GetField<int[]>(
+                        script,
+                        "_justiceRepairArrestPreJudgmentHoldingModelHashes"));
+                AwaitQueuedPersistence(script);
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }));
+                Assert.IsFalse(GetField<bool>(
+                    script,
+                    "_justiceProfileSwitchPersistencePending"));
+                CollectionAssert.AreEqual(
+                    repairArrestHoldingIntents,
+                    GetField<int[]>(
+                        script,
+                        "_justiceRepairArrestPreJudgmentHoldingModelHashes"),
+                    "Les intents RepairArrest restent attachés à leurs slots après deux switches valides.");
+            }
+            finally
+            {
+                store.ReleaseFirstWrite.Set();
+                repository.Stop(TimeSpan.FromSeconds(5));
+                store.Dispose();
+            }
+        });
+    }
+
+    [TestMethod]
+    public void PlayerProfiles_UnknownSlotCannotBypassPendingSwitchAndResumesAfterDurability()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            InitializeProfileResetRuntimeCollections(script);
+            Invoke(script, "InitializeJusticePersistenceServices");
+            Invoke(script, "ShutdownJusticePersistenceServices");
+
+            FirstWriteBlockingAtomicFileStore store =
+                new FirstWriteBlockingAtomicFileStore();
+            JusticeRepository repository = new JusticeRepository(
+                Path.Combine(directory, "_justice_state.xml"),
+                Path.Combine(directory, "_justice_state.xml.bak"),
+                new JusticeXmlPersistenceCodec(),
+                0L,
+                store,
+                JusticeNoOpPersistenceFaultInjector.Instance,
+                10);
+            repository.Start();
+            SetField(script, "_justiceRepository", repository);
+
+            try
+            {
+                SetField(
+                    script,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 1));
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }));
+                Assert.IsTrue(
+                    store.FirstWriteStarted.WaitOne(TimeSpan.FromSeconds(5)),
+                    "Le snapshot de Franklin doit être retenu pendant le slot transitoire.");
+
+                JusticeCaseState activeCase = GetField<JusticeCaseState>(
+                    script,
+                    "_justiceCaseState");
+                JusticeRecordState activeRecord = GetField<JusticeRecordState>(
+                    script,
+                    "_justiceRecordState");
+                long pendingRevision = GetField<long>(
+                    script,
+                    "_justiceProfileSwitchPersistenceRevision");
+                SetField(
+                    script,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => -1));
+
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }),
+                    "Un slot inconnu ne doit pas contourner la publication encore en attente.");
+                Assert.AreEqual(1, GetField<int>(
+                    script,
+                    "_justiceActivePlayerProfileSlot"));
+                Assert.AreSame(activeCase, GetField<JusticeCaseState>(
+                    script,
+                    "_justiceCaseState"));
+                Assert.AreSame(activeRecord, GetField<JusticeRecordState>(
+                    script,
+                    "_justiceRecordState"));
+                Assert.AreEqual(
+                    pendingRevision,
+                    GetField<long>(script, "_justiceProfileSwitchPersistenceRevision"));
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justiceProfileSwitchPersistencePending"));
+
+                store.ReleaseFirstWrite.Set();
+                AwaitQueuedPersistence(script);
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }),
+                    "Après DiskRevision, le dernier profil prouvé peut reprendre sous un ped sans slot.");
+                Assert.AreEqual(1, GetField<int>(
+                    script,
+                    "_justiceActivePlayerProfileSlot"));
+                Assert.AreSame(activeCase, GetField<JusticeCaseState>(
+                    script,
+                    "_justiceCaseState"));
+                Assert.IsFalse(GetField<bool>(
+                    script,
+                    "_justiceProfileSwitchPersistencePending"));
+
+                SetField(
+                    script,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 1));
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }),
+                    "Le retour du slot canonique déjà actif doit rester immédiat et stable.");
+            }
+            finally
+            {
+                store.ReleaseFirstWrite.Set();
+                repository.Stop(TimeSpan.FromSeconds(5));
+                store.Dispose();
+            }
+        });
+    }
+
+    [TestMethod]
+    public void PlayerProfiles_FailedTargetCustodyActivationRestoresSourceAtomically()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            profiles[1].CustodyXml = profiles[1].CustodyXml.Replace(
+                "site=\"None\"",
+                "site=\"Inconnu\"");
+            profiles[1].CaseState.Enabled = true;
+            profiles[1].CaseState.Phase = JusticePhase.Incarcerated;
+            profiles[1].CaseState.SentenceSeconds = 90;
+            profiles[1].CanAdvanceCustodyInBackground = true;
+            profiles[1].InactiveCustodyLastTickAt = -2000;
+            profiles[1].InactiveCustodyElapsedRemainderMs = 500;
+
+            object script = CreateHeadlessScript(profiles, 0);
+            InitializeProfileResetRuntimeCollections(script);
+            SetField(script, "_justiceStateDirty", true);
+            SetField(script, "_justiceNextStateSaveAtMs", 12345L);
+            int[] repairArrestHoldingIntents = { 111, 222, 333 };
+            SetField(
+                script,
+                "_justiceRepairArrestPreJudgmentHoldingModelHashes",
+                (int[])repairArrestHoldingIntents.Clone());
+            SetField(
+                script,
+                "_justiceCanonicalPlayerSlotOverride",
+                new Func<int>(() => 1));
+            JusticeCaseState sourceCase = profiles[0].CaseState;
+            JusticeRecordState sourceRecord = profiles[0].RecordState;
+
+            try
+            {
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }));
+                Assert.AreEqual(
+                    0,
+                    GetField<int>(script, "_justiceActivePlayerProfileSlot"),
+                    "L'échec de restauration cible ne doit jamais laisser un demi-switch actif.");
+                Assert.AreSame(sourceCase, GetField<JusticeCaseState>(
+                    script,
+                    "_justiceCaseState"));
+                Assert.AreSame(sourceRecord, GetField<JusticeRecordState>(
+                    script,
+                    "_justiceRecordState"));
+                Assert.AreEqual(sourceCase.Enabled, GetField<bool>(
+                    script,
+                    "_justiceEnabled"));
+                Assert.AreEqual(90, profiles[1].CaseState.SentenceSeconds);
+                Assert.IsTrue(profiles[1].CanAdvanceCustodyInBackground);
+                Assert.AreEqual(-2000, profiles[1].InactiveCustodyLastTickAt);
+                Assert.AreEqual(500, profiles[1].InactiveCustodyElapsedRemainderMs);
+                Assert.IsTrue(GetField<bool>(script, "_justiceStateDirty"));
+                Assert.AreEqual(12345L, GetField<long>(
+                    script,
+                    "_justiceNextStateSaveAtMs"));
+                Assert.IsFalse(GetField<bool>(
+                    script,
+                    "_justiceProfileSwitchPersistencePending"));
+                Assert.AreEqual(0L, GetField<long>(
+                    script,
+                    "_justiceProfileSwitchPersistenceRevision"));
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justiceProfileSelectionPending"),
+                    "Après rollback, un nouveau slot canonique doit encore prouver le propriétaire joué.");
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justiceProfileContextBlocked"));
+                CollectionAssert.AreEqual(
+                    repairArrestHoldingIntents,
+                    GetField<int[]>(
+                        script,
+                        "_justiceRepairArrestPreJudgmentHoldingModelHashes"),
+                    "Les intents RepairArrest déjà prouvés doivent survivre bit pour bit au double RestoreCustody du rollback.");
+
+                SetField(
+                    script,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => -1));
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }),
+                    "Le ped cible sans slot ne doit jamais rouvrir le dossier source restauré.");
+                Assert.AreSame(sourceCase, GetField<JusticeCaseState>(
+                    script,
+                    "_justiceCaseState"));
+
+                SetField(
+                    script,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 0));
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }),
+                    "Le retour canonique du héros source doit lever proprement la sélection pending.");
+                Assert.IsFalse(GetField<bool>(
+                    script,
+                    "_justiceProfileSelectionPending"));
+            }
+            finally
+            {
+                Invoke(script, "ShutdownJusticePersistenceServices");
+            }
+        });
+    }
+
+    [TestMethod]
     public void PlayerProfiles_ProfileSwitchCapturesWriterFailureBaselineBeforeEnqueue()
     {
         WithTemporaryJusticeDirectory(directory =>

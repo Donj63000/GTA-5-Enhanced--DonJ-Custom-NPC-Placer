@@ -651,10 +651,39 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        // Je n'affiche ni ne pilote jamais la detention d'un autre protagoniste.
-        // Le slot -1 reste admis pendant la courte capture qui précède sa preuve.
-        return !IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot) ||
-               _justiceCustodyPlayerSlot == _justiceActivePlayerProfileSlot;
+        // Je n'affiche jamais une détention sans propriétaire canonique prouvé.
+        // Un slot indéterminé pendant une capture reste masqué jusqu'à sa liaison.
+        if (!IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot) ||
+            _justiceCustodyPlayerSlot != _justiceActivePlayerProfileSlot)
+        {
+            return false;
+        }
+
+        try
+        {
+            Ped player = Game.Player.Character;
+            if (!Entity.Exists(player) || player.IsDead)
+            {
+                return false;
+            }
+
+            // Je contrôle le ped vivant au moment exact du rendu : un retour
+            // anticipé du runtime ou un slot custom ne peut ainsi conserver le
+            // bandeau de l'ancien héros. Cette lecture ne relie aucune identité.
+            int currentSlot = GetJusticeCanonicalPlayerSlotSafe();
+            int currentModelHash = GetJusticePedModelHashSafe(player);
+            return JusticePolicy.IsCustodyLiveIdentityCompatible(
+                _justiceCustodyPlayerSlot,
+                currentSlot,
+                _justiceCustodyPlayerHandle,
+                player.Handle,
+                _justiceCustodyPlayerModelHash,
+                currentModelHash);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void CaptureJusticeDangerActionIdentity(
@@ -762,6 +791,27 @@ public sealed partial class DonJEnemySpawner
     private bool EnsureJusticeProfileMatchesCanonicalPlayer(Ped player)
     {
         int slot = GetJusticeCanonicalPlayerSlotSafe();
+
+        if (_justiceProfileSwitchPersistencePending)
+        {
+            // Je termine toujours la publication du profil déjà activé avant
+            // d'interpréter un nouveau slot. Un switch rapide P -> Q -> R ne
+            // peut donc ni écraser la révision de Q ni mélanger deux dossiers.
+            if (!PersistPendingJusticeProfileSwitch())
+            {
+                return false;
+            }
+
+            if (IsJusticeCanonicalProfileSlot(slot) &&
+                slot != _justiceActivePlayerProfileSlot)
+            {
+                // Je conserve un tick frontière après DiskRevision. Les fronts
+                // du héros R ne seront lus qu'au passage suivant, quand Q est
+                // déjà entièrement durable et que sa barrière est retombée.
+                return false;
+            }
+        }
+
         if (!IsJusticeCanonicalProfileSlot(slot))
         {
             // Un ped transforme (Iron Man, tenue custom) peut ne plus exposer de
@@ -786,11 +836,6 @@ public sealed partial class DonJEnemySpawner
 
         if (slot == _justiceActivePlayerProfileSlot)
         {
-            if (_justiceProfileSwitchPersistencePending &&
-                !PersistPendingJusticeProfileSwitch())
-            {
-                return false;
-            }
             _justiceProfileSelectionPending = false;
             return true;
         }
@@ -834,12 +879,60 @@ public sealed partial class DonJEnemySpawner
 
         FinalizeJusticePursuitStateBeforeProfileSwitch(GetJusticeWantedLevelSafe());
         SnapshotActiveJusticePlayerProfile();
+        int previousSlot = _justiceActivePlayerProfileSlot;
+        JusticePlayerProfileState targetProfile = _justicePlayerProfiles[slot];
+        bool targetCanAdvanceCustodyInBackground =
+            targetProfile.CanAdvanceCustodyInBackground;
+        int targetSentenceSeconds = targetProfile.CaseState != null
+            ? targetProfile.CaseState.SentenceSeconds
+            : 0;
+        int targetInactiveCustodyLastTickAt =
+            targetProfile.InactiveCustodyLastTickAt;
+        int targetInactiveCustodyElapsedRemainderMs =
+            targetProfile.InactiveCustodyElapsedRemainderMs;
+        bool stateDirtyBeforeTargetAdvance = _justiceStateDirty;
+        long nextStateSaveAtBeforeTargetAdvance = _justiceNextStateSaveAtMs;
         AdvanceJusticeInactiveCustodyProfileClock(
-            _justicePlayerProfiles[slot],
+            targetProfile,
             switchAt,
             false);
         if (!ActivateJusticePlayerProfile(slot))
         {
+            // Je rends au profil cible ses horloges exactes puis je recharge le
+            // snapshot typé du héros source. Une détention cible incohérente ne
+            // peut ainsi laisser un demi-switch actif ni armer une publication.
+            targetProfile.CanAdvanceCustodyInBackground =
+                targetCanAdvanceCustodyInBackground;
+            if (targetProfile.CaseState != null)
+            {
+                targetProfile.CaseState.SentenceSeconds = targetSentenceSeconds;
+            }
+            targetProfile.InactiveCustodyLastTickAt =
+                targetInactiveCustodyLastTickAt;
+            targetProfile.InactiveCustodyElapsedRemainderMs =
+                targetInactiveCustodyElapsedRemainderMs;
+
+            bool sourceRestored =
+                IsJusticeCanonicalProfileSlot(previousSlot) &&
+                previousSlot != slot &&
+                ActivateJusticePlayerProfile(previousSlot);
+            // NormalizeLoadedJusticeState recalcule ce cache pendant la
+            // réactivation. Je rétablis ensuite le scheduling exact qui
+            // précédait uniquement l'avance spéculative du profil cible.
+            _justiceStateDirty = stateDirtyBeforeTargetAdvance;
+            _justiceNextStateSaveAtMs = nextStateSaveAtBeforeTargetAdvance;
+            _justiceProfileSwitchPersistencePending = false;
+            _justiceProfileSwitchPersistenceRevision = 0L;
+            _justiceProfileSwitchPersistenceWriteFailures = 0L;
+            // Après un rollback je réclame une nouvelle preuve canonique. Un
+            // slot -1 du ped cible ne doit surtout pas rouvrir le dossier source.
+            _justiceProfileSelectionPending = true;
+            _justiceProfileContextBlocked = true;
+            LogWarning(
+                "Justice.Profil",
+                sourceRestored
+                    ? "Activation du profil cible refusée; profil source restauré sans publication."
+                    : "Activation du profil cible et restauration du profil source impossibles; contexte Justice maintenu bloqué.");
             return false;
         }
 
@@ -968,6 +1061,10 @@ public sealed partial class DonJEnemySpawner
         CancelJusticeWantedClearRetry();
 
         EnsureJusticePlayerProfilesInitialized();
+        int[] repairArrestHoldingIntents =
+            _justiceRepairArrestPreJudgmentHoldingModelHashes == null
+                ? null
+                : (int[])_justiceRepairArrestPreJudgmentHoldingModelHashes.Clone();
         JusticePlayerProfileState profile = _justicePlayerProfiles[slot];
         profile.CanAdvanceCustodyInBackground = false;
         profile.InactiveCustodyLastTickAt = 0;
@@ -993,9 +1090,22 @@ public sealed partial class DonJEnemySpawner
         _justiceLastCanonicalPlayerModelHash = profile.LastCanonicalPlayerModel;
         _justiceActivePlayerProfileSlot = slot;
 
-        bool custodyRestored = profile.CustodySnapshot != null
-            ? RestoreJusticeCustodyPersistenceSnapshot(profile.CustodySnapshot)
-            : ReadJusticeCustodyXmlFragment(profile.CustodyXml);
+        bool custodyRestored;
+        try
+        {
+            custodyRestored = profile.CustodySnapshot != null
+                ? RestoreJusticeCustodyPersistenceSnapshot(profile.CustodySnapshot)
+                : ReadJusticeCustodyXmlFragment(profile.CustodyXml);
+        }
+        finally
+        {
+            // Le reset générique de la détention nettoie aussi le holding
+            // physique singulier, ce qui est souhaité au changement de héros.
+            // Je conserve en revanche les intents RepairArrest par slot : ils
+            // représentent des fronts déjà prouvés qui survivent à l'aller-retour.
+            _justiceRepairArrestPreJudgmentHoldingModelHashes =
+                repairArrestHoldingIntents;
+        }
         if (!custodyRestored)
         {
             return false;
