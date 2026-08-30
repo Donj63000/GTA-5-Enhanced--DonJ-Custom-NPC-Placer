@@ -2127,3 +2127,69 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Toutes les lectures suivantes utilisent une racine de dossier, `-g` ou des chemins exacts.
 - Vérification: Les occurrences attendues ont été relues par chemins exacts; `git diff --check`, les builds et les tests ne signalent aucune conséquence.
 - Résolution: Incident read-only clos; aucun fichier n'a été modifié par cette commande.
+
+## 2026-08-30 07:26:09 +02:00 - Contacts téléphone Cartel, Ballas et limousine masqués par Justice
+- Statut: Corrigé dans la source et validé hors jeu; installation live à effectuer après création du commit propre.
+- Contexte: Le répertoire personnalisé `C` / `R` / `L` était présent au démarrage, puis disparaissait après certaines séquences de Justice avancée, notamment une capture dont le transfert restait en attente.
+- Symptôme: Ouvrir le téléphone n'affichait plus Cartel, Ballas ni l'escorte haute sécurité. Le défaut pouvait persister tant que le runtime Justice considérait encore la garde à vue active.
+- Sources vérifiées: `bug-reports\20260830-072603-phone-services-cartel-ballas-limousine-disappear`, logs NIB et `DonJCustomNpcPlacer.log` live, état durable `_justice_state.xml`, historique Git depuis `61d6a2f1`, `DonJEnemySpawner.cs`, sources Justice Custody/Profiles et tests téléphone/Justice.
+- Extraits utiles: le log live active Justice à `05:43:42`, signale des snapshots invalides dès `05:44:28`, puis `Justice.Capture - Transfert différé : précommit du jugement indisponible` à `05:47:26` et un timeout à `05:51:55`; aucune exception `Tick.CartelEarly`, `Tick.CartelLate` ou `OnKeyDown` n'est présente. Dans le code, `if (JusticeIsCustodyActive) return;` précédait directement `UpdateCartelPhoneContact(player)`.
+- Analyse / hypothèse: Le gel ajouté pour empêcher les IA et spawns de services pendant la détention court-circuitait par erreur aussi la détection et le rendu du téléphone. L'ancien build live était en outre resté en phase `Captured` après une panne de writer Justice, ce qui rendait ce court-circuit durable. La resynchronisation des identifiants Justice était déjà corrigée au HEAD courant, mais le couplage interface/IA restait une régression indépendante.
+- Action menée: Le rendu C/R/L est exécuté avant le gel Justice. Les trois contacts restent visibles avec un statut d'indisponibilité pendant transfert, détention ou maintien pré-jugement propriétaire; seules leurs actions et les passes IA précoce/tardive sont suspendues. C/R/L sont consommées jusqu'au relâchement même si le téléphone se ferme. Une grâce native positive de 350 ms absorbe les faux négatifs d'affichage sans jamais autoriser une commande et elle est vidée à la mort ou au changement de ped.
+- Vérification: Revue indépendante terminée sans défaut bloquant; tests ciblés téléphone/Justice `7/7`; `tools\run-safety-checks.ps1 -UseStubApi` réussi dans `TestResults\safety-20260830-183435` avec ABI NIB v2 valide (`32` types, `189` membres) et `580/580`; `dotnet build GTA5modDEV.sln -c Release` réussi avec zéro avertissement et zéro erreur; `dotnet test GTA5modDEV.sln -c Release` réussi `541/541`; `git diff --check` propre avant journalisation.
+- Résolution: Le menu ne dépend plus de la progression saine de Justice et ne peut donc plus disparaître à cause d'un état de détention ancien ou légitime. Les appels restent volontairement bloqués dans l'enceinte et exigent une nouvelle pression après libération.
+
+## 2026-08-30 18:14:00 +02:00 - Invocations de recherche et de tests stub incomplètes pendant le diagnostic téléphone
+- Statut: Corrigé immédiatement; aucun impact sur le code ou les données GTA.
+- Contexte: Diagnostic local avant la première Safety officielle.
+- Symptôme: Deux recherches `rg` recevaient un wildcard de chemin Windows littéral et retournaient `os error 123`. Une commande directe `dotnet test -p:UseStubApi=true` conservait le vrai `GtaRoot` et compilait alors les scénarios `DONJ_STUB_API` contre l'API GTA réelle, produisant de nombreuses erreurs `StubRuntime` et propriétés en lecture seule.
+- Sources vérifiées: sorties directes des commandes fautives, `DonJEnemySpawner.Tests.csproj`, `tools\run-safety-checks.ps1`, chemins retrouvés avec `rg --files`.
+- Extraits utiles: `La syntaxe du nom de fichier, de répertoire ou de volume est incorrecte. (os error 123)`; erreurs de compilation indiquant notamment que `StubRuntime` n'existe pas avec l'assembly NIB réel.
+- Analyse / hypothèse: Les wildcards de chemin n'étaient pas développés par PowerShell et l'option `UseStubApi` seule ne remplace pas le `GtaRoot`; le workflow officiel doit construire le stub puis fournir simultanément le faux root et le dossier Scripts temporaire.
+- Action menée: Les recherches ont été relancées depuis les dossiers avec `-g` ou des chemins exacts. Tous les tests stub suivants passent par la Safety ou fournissent explicitement `GtaRoot`, `GtaScriptsDir` et `UseStubApi=true`.
+- Vérification: Les recherches corrigées couvrent les sources attendues; tests ciblés finaux `7/7` et Safety finale `580/580`.
+- Résolution: Incidents d'outillage clos, sans contournement ni modification du produit.
+
+## 2026-08-30 18:15:35 +02:00 - Première Safety téléphone arrêtée par l'import Keys manquant dans les tests
+- Statut: Corrigé; build et suites finales verts.
+- Contexte: Première exécution `tools\run-safety-checks.ps1 -UseStubApi`, résultats `TestResults\safety-20260830-181517` et rapport `bug-reports\20260830-181525-safety-failure`.
+- Symptôme: Le mod compilait, mais le projet de tests échouait avec trois `CS0103` sur `Keys.C`, `Keys.R` et `Keys.L`.
+- Sources vérifiées: `TestResults\safety-20260830-181517\logs\build-release.log`, nouveau test comportemental téléphone et références du projet MSTest.
+- Extraits utiles: `Le nom 'Keys' n'existe pas dans le contexte actuel`, trois occurrences ligne 1085 de l'état intermédiaire du test.
+- Analyse / hypothèse: Le test utilisait directement l'enum WinForms sans importer `System.Windows.Forms`; le code de production n'était pas en erreur.
+- Action menée: Ajout de l'import explicite `using System.Windows.Forms;` dans le fichier de tests.
+- Vérification: Compilation Release finale à zéro erreur; tests ciblés `7/7`, Safety `580/580` et suite réelle `541/541`.
+- Résolution: Fixture de test corrigée sans changement du comportement runtime.
+
+## 2026-08-30 18:18:21 +02:00 - Deux contrats source utilisaient encore l'ancienne signature téléphone
+- Statut: Corrigé; toutes les assertions correspondantes passent.
+- Contexte: Deuxième Safety stub, résultats `TestResults\safety-20260830-181549` et rapport `bug-reports\20260830-181813-safety-failure`.
+- Symptôme: La suite terminait à `577/579`; deux extractions source ne trouvaient plus `private void UpdateCartelPhoneContact(Ped player)` après l'ajout du paramètre `servicesAvailable`.
+- Sources vérifiées: `TestResults\safety-20260830-181549\logs\test-release.log`, `SourceFile_UpdateCartelConvoyLateLimitsHeavyMaintenance` et `SourceFile_HighSecurityEscortConsumesLKeyUntilRelease`.
+- Extraits utiles: `Le marqueur ... 'private void UpdateCartelPhoneContact(Ped player)' est introuvable dans la source.`
+- Analyse / hypothèse: Défaut limité à deux bornes textuelles devenues obsolètes; les nouveaux tests comportementaux étaient déjà verts.
+- Action menée: Les deux marqueurs ciblent désormais la signature réelle `(Ped player, bool servicesAvailable)` sans assouplir leurs assertions métier.
+- Vérification: Tests ciblés puis Safety finale réussis, respectivement `7/7` et `580/580`.
+- Résolution: Contrats source réalignés sur l'API privée réellement exécutée.
+
+## 2026-08-30 18:29:00 +02:00 - Fixture téléphone non initialisée lors du test fermeture et réouverture
+- Statut: Corrigé dans le test; aucun défaut runtime.
+- Contexte: Test ciblé après ajout des verrous C/R persistants jusqu'au relâchement.
+- Symptôme: `PhoneContact_CustodyKeepsOverlayPathAndConsumesAllCommands` levait une `NullReferenceException` dans `CleanupCartelHandleSets` lorsque la branche disponible dessinait l'overlay.
+- Sources vérifiées: trace MSTest ciblée, `DrawCartelPhoneContactOverlay`, `CleanupCartelHandleSets` et helper `CreateScript` fondé sur `FormatterServices.GetUninitializedObject`.
+- Extraits utiles: la trace pointait le `foreach (int handle in _cartelNpcHandles)`; ce champ `readonly` était null uniquement parce que le constructeur est volontairement contourné dans la fixture headless.
+- Analyse / hypothèse: Le test atteignait pour la première fois le statut Cartel disponible sur un objet non construit. En jeu, toutes les collections sont initialisées par leurs initialiseurs de champs.
+- Action menée: Une factory de test initialise par réflexion les `List`, `HashSet`, `Dictionary` et `Queue` runtime avant ce scénario, sans modifier le code de production.
+- Vérification: Même filtre ciblé relancé avec succès, puis `7/7`, Safety `580/580` et suite réelle `541/541`.
+- Résolution: Fixture rendue représentative de l'initialisation normale du script.
+
+## 2026-08-30 18:33:58 +02:00 - Dernière Safety bloquée par deux noms locaux téléphone obsolètes
+- Statut: Corrigé; Safety suivante entièrement verte.
+- Contexte: Passe `TestResults\safety-20260830-183105`, rapport `bug-reports\20260830-183350-safety-failure`, après uniformisation de la lecture des touches en début de tick.
+- Symptôme: Un seul test échouait et la suite terminait à `579/580`; l'inspection cherchait encore `bool cPressed` et `bool rPressed` au lieu de `cPressedNow` et `rPressedNow`.
+- Sources vérifiées: `TestResults\safety-20260830-183105\logs\test-release.log` et `SourceFile_PhoneContactKeepsCartelOnCEnemyRaidOnRAndEscortOnL`.
+- Extraits utiles: `ne contient pas la chaîne 'bool cPressed = Game.IsKeyPressed(Keys.C);'`.
+- Analyse / hypothèse: Assertion textuelle obsolète après mutualisation volontaire de l'état clavier; aucun échec comportemental, build ou ABI associé.
+- Action menée: Les deux attentes ont été mises à jour vers les noms locaux effectivement utilisés, en conservant les vérifications des appels Cartel/Ballas/limousine.
+- Vérification: Filtre téléphone `7/7`; Safety suivante `TestResults\safety-20260830-183435` réussie `580/580`; suite réelle `541/541`.
+- Résolution: Dernier faux négatif supprimé; aucune assertion métier n'a été retirée.

@@ -1027,6 +1027,8 @@ L : escorte haute sécurité
 
 Ces touches doivent être actives uniquement dans le contexte prévu, principalement quand le téléphone joueur est ouvert ou quand le système d'escorte demande une validation route.
 
+L'affichage du répertoire téléphone reste indépendant du gel Justice : pendant une capture, un transfert, une détention ou un maintien provisoire appartenant au héros courant, les trois contacts restent visibles mais leurs commandes sont suspendues. Les IA Cartel, Ballas et escorte restent figées et aucun spawn n'est autorisé dans l'enceinte.
+
 Le mod vérifie l'état téléphone avec native :
 
 NativeIsPedRunningMobilePhoneTask = 0x2AFE52F782F25775UL
@@ -1034,6 +1036,11 @@ NativeIsPedRunningMobilePhoneTask = 0x2AFE52F782F25775UL
 Règles :
 
 - utiliser des latches pour éviter plusieurs appels sur une pression ;
+- consommer C, R et L pendant une suspension Justice afin qu'une touche tenue ne parte pas à la libération ;
+- exécuter le rendu téléphone avant le garde qui fige les IA de service ;
+- conserver au maximum 350 ms une détection positive du téléphone pour absorber un faux négatif natif ponctuel ;
+- lier cette grâce au handle du ped et la réinitialiser au respawn ou au changement de protagoniste ;
+- ne jamais autoriser une commande pendant la seule grâce : la native doit être positive sur le tick courant ;
 - garder des cooldowns courts mais réels ;
 - ne pas relancer une équipe active sans gérer son retrait ;
 - afficher un statut clair au joueur ;

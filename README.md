@@ -394,6 +394,8 @@ In practice, this creates a cleaner scene: guards, vehicles, and objects do not 
 
 The phone lets you quickly launch three types of in-game activity: `C` calls allied Cartel protection, `R` triggers a hostile Ballas wave to create combat around the scene, and `L` calls a high-security escort with a limousine and armored convoy.
 
+The three contacts stay visible whenever the phone is open, including during an Advanced Justice transfer or detention. In that situation they are clearly marked as temporarily unavailable, and no reinforcement, raid, or escort can spawn inside the custody area. They become usable again after release and a fresh key press.
+
 ### Cartel Call
 
 <table>
@@ -1091,6 +1093,7 @@ Menu navigation remains keyboard-only; the redesign does not add mouse or contro
 | Key / state | Action |
 |---|---|
 | Player phone open | Shows the `Cartel`, `Ballas`, and `High-security escort` contacts |
+| Advanced Justice transfer / detention | Keeps all three contacts visible but temporarily blocks their calls |
 | `C` | Call Cartel gunmen |
 | `C` with an active Cartel team | Make the active team withdraw |
 | `R` | Call a hostile Ballas wave to create activity around the player |

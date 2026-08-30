@@ -50,6 +50,7 @@ namespace GTA
         public static Func<Ped, Ped, bool> CombatHandler { get; set; }
         public static Func<Ped, Entity> KillerHandler { get; set; }
         public static Func<Player, Entity> TargetedEntityHandler { get; set; }
+        public static Func<Keys, bool> KeyPressedHandler { get; set; }
         public static Ped[] NearbyPeds { get; set; } = new Ped[0];
         public static Vehicle[] NearbyVehicles { get; set; } = new Vehicle[0];
         public static Vehicle[] AllVehicles { get; set; } = new Vehicle[0];
@@ -77,6 +78,7 @@ namespace GTA
             CombatHandler = null;
             KillerHandler = null;
             TargetedEntityHandler = null;
+            KeyPressedHandler = null;
             NearbyPeds = new Ped[0];
             NearbyVehicles = new Vehicle[0];
             AllVehicles = new Vehicle[0];
@@ -457,7 +459,11 @@ namespace GTA
         public static bool IsPaused { get; set; }
         public static bool MissionFlag { get; set; }
 
-        public static bool IsKeyPressed(Keys key) => false;
+        public static bool IsKeyPressed(Keys key)
+        {
+            Func<Keys, bool> handler = StubRuntime.KeyPressedHandler;
+            return handler != null && handler(key);
+        }
         public static void DisableAllControlsThisFrame(int index) { }
         public static void DisableControlThisFrame(int index, Control control) { }
         public static float GetDisabledControlNormal(int index, Control control) => 0.0f;

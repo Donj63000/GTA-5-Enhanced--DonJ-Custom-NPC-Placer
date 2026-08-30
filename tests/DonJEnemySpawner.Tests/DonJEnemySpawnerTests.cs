@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
+using System.Windows.Forms;
 using System.Xml;
 using System.Xml.Linq;
 using GTA;
@@ -691,11 +692,21 @@ public class DonJEnemySpawnerTests
         string lateBlock = ExtractSourceSection(
             source,
             "private void UpdateCartelConvoyLate()",
-            "private void UpdateCartelPhoneContact(Ped player)");
+            "private void UpdateCartelPhoneContact(Ped player, bool servicesAvailable)");
 
         Assert.IsTrue(
             lateBlock.IndexOf("Game.GameTime >= _nextCartelLateMaintenanceAt", StringComparison.Ordinal) >= 0,
             "La passe tardive Cartel doit etre cadencee par un cooldown dedie.");
+        int playerIndex = lateBlock.IndexOf("Ped player = Game.Player.Character;", StringComparison.Ordinal);
+        int justiceGateIndex = lateBlock.IndexOf(
+            "if (!ArePhoneServicesAvailableDuringJustice(player))",
+            StringComparison.Ordinal);
+        int maintenanceIndex = lateBlock.IndexOf(
+            "MaintainCartelTeamWeaponsAndDrivers(player, true);",
+            StringComparison.Ordinal);
+        Assert.IsTrue(
+            playerIndex >= 0 && justiceGateIndex > playerIndex && maintenanceIndex > justiceGateIndex,
+            "La passe tardive doit respecter le même verrou Justice propriétaire que la passe principale.");
         Assert.IsTrue(
             lateBlock.IndexOf("_nextCartelLateMaintenanceAt = Game.GameTime + CartelLateMaintenanceIntervalMs;", StringComparison.Ordinal) >= 0,
             "La passe tardive Cartel doit memoriser sa prochaine execution.");
@@ -985,19 +996,19 @@ public class DonJEnemySpawnerTests
         string source = File.ReadAllText(GetSourceFilePath());
         string contactBlock = ExtractSourceSection(
             source,
-            "private void UpdateCartelPhoneContact(Ped player)",
+            "private void UpdateCartelPhoneContact(Ped player, bool servicesAvailable)",
             "private bool IsPlayerPhoneOpen(Ped player)");
         string overlayBlock = ExtractSourceSection(
             source,
-            "private void DrawCartelPhoneContactOverlay()",
+            "private void DrawCartelPhoneContactOverlay(bool servicesAvailable)",
             "private void ToggleCartelCall()");
 
         StringAssert.Contains(contactBlock, "_cartelPhoneKeyLatch = false;");
         StringAssert.Contains(contactBlock, "_enemyRaidPhoneKeyLatch = false;");
         StringAssert.Contains(contactBlock, "_highSecurityEscortPhoneKeyLatch = false;");
-        StringAssert.Contains(contactBlock, "bool cPressed = Game.IsKeyPressed(Keys.C);");
+        StringAssert.Contains(contactBlock, "bool cPressedNow = Game.IsKeyPressed(Keys.C);");
         StringAssert.Contains(contactBlock, "ToggleCartelCall();");
-        StringAssert.Contains(contactBlock, "bool rPressed = Game.IsKeyPressed(Keys.R);");
+        StringAssert.Contains(contactBlock, "bool rPressedNow = Game.IsKeyPressed(Keys.R);");
         StringAssert.Contains(contactBlock, "CallEnemyRaid();");
         StringAssert.Contains(contactBlock, "bool lPressedNow = Game.IsKeyPressed(Keys.L);");
         StringAssert.Contains(contactBlock, "bool lPressed = lPressedNow;");
@@ -1008,8 +1019,275 @@ public class DonJEnemySpawnerTests
         StringAssert.Contains(overlayBlock, "int liveEnemies = CountLiveEnemyRaidMembers();");
         StringAssert.Contains(overlayBlock, "_nextEnemyRaidCallAllowedAt - Game.GameTime");
         StringAssert.Contains(overlayBlock, "DrawText(HighSecurityEscortContactName");
-        StringAssert.Contains(overlayBlock, "DrawText(GetHighSecurityEscortPhoneStatus()");
+        StringAssert.Contains(overlayBlock, "GetHighSecurityEscortPhoneStatus()");
     }
+
+    [TestMethod]
+    public void SourceFile_PhoneOverlayRunsBeforeJusticeFreezesServiceAi()
+    {
+        string source = File.ReadAllText(GetSourceFilePath());
+        string updateBlock = ExtractSourceSection(
+            source,
+            "private void UpdateCartelContactAndConvoy()",
+            "private bool ArePhoneServicesAvailableDuringJustice(Ped player)");
+        string contactBlock = ExtractSourceSection(
+            source,
+            "private void UpdateCartelPhoneContact(Ped player, bool servicesAvailable)",
+            "private bool IsPlayerPhoneOpen(Ped player)");
+        string overlayBlock = ExtractSourceSection(
+            source,
+            "private void DrawCartelPhoneContactOverlay(bool servicesAvailable)",
+            "private void ToggleCartelCall()");
+
+        int availabilityIndex = updateBlock.IndexOf(
+            "ArePhoneServicesAvailableDuringJustice(player)",
+            StringComparison.Ordinal);
+        int phoneIndex = updateBlock.IndexOf(
+            "UpdateCartelPhoneContact(player, phoneServicesAvailable)",
+            StringComparison.Ordinal);
+        int justiceGuardIndex = updateBlock.IndexOf(
+            "if (!phoneServicesAvailable)",
+            StringComparison.Ordinal);
+        int convoyIndex = updateBlock.IndexOf(
+            "UpdateCartelConvoyState(player)",
+            StringComparison.Ordinal);
+
+        Assert.IsTrue(
+            availabilityIndex >= 0 && phoneIndex > availabilityIndex &&
+            justiceGuardIndex > phoneIndex && convoyIndex > justiceGuardIndex,
+            "Le téléphone doit être rendu avant le gel Justice, puis les IA seulement après ce garde.");
+
+        int suspendedGateIndex = contactBlock.IndexOf(
+            "if (!servicesAvailable || !_playerPhoneNativeOpenThisTick)",
+            StringComparison.Ordinal);
+        int suspendedReturnIndex = contactBlock.IndexOf(
+            "return;",
+            suspendedGateIndex,
+            StringComparison.Ordinal);
+        int cartelCallIndex = contactBlock.IndexOf("ToggleCartelCall();", StringComparison.Ordinal);
+        int enemyCallIndex = contactBlock.IndexOf("CallEnemyRaid();", StringComparison.Ordinal);
+        int escortCallIndex = contactBlock.IndexOf(
+            "ToggleHighSecurityEscortCall();",
+            StringComparison.Ordinal);
+
+        Assert.IsTrue(
+            suspendedGateIndex >= 0 && suspendedReturnIndex > suspendedGateIndex &&
+            cartelCallIndex > suspendedReturnIndex && enemyCallIndex > suspendedReturnIndex &&
+            escortCallIndex > suspendedReturnIndex,
+            "Une suspension Justice doit consommer C/R/L avant tout appel de service.");
+        int unconditionalSuspensionIndex = contactBlock.IndexOf(
+            "if (!servicesAvailable)",
+            StringComparison.Ordinal);
+        int phoneProbeIndex = contactBlock.IndexOf(
+            "bool phoneOpen = IsPlayerPhoneOpen(player);",
+            StringComparison.Ordinal);
+        Assert.IsTrue(
+            unconditionalSuspensionIndex >= 0 && phoneProbeIndex > unconditionalSuspensionIndex,
+            "C/R/L doivent être consommées pendant Justice même si le téléphone est fermé.");
+        StringAssert.Contains(contactBlock, "_highSecurityEscortRouteKeyLatch = true;");
+        StringAssert.Contains(contactBlock, "_highSecurityEscortLCommandConsumedUntilRelease = true;");
+        StringAssert.Contains(contactBlock, "_cartelPhoneCommandConsumedUntilRelease = true;");
+        StringAssert.Contains(contactBlock, "_enemyRaidPhoneCommandConsumedUntilRelease = true;");
+        StringAssert.Contains(overlayBlock, "C : indisponible pendant transfert / détention");
+        StringAssert.Contains(overlayBlock, "R : indisponible pendant transfert / détention");
+        StringAssert.Contains(overlayBlock, "L : indisponible pendant transfert / détention");
+    }
+
+#if DONJ_STUB_API
+    [TestMethod]
+    public void PhoneServicesAvailability_BlocksEveryCustodyRuntimeBoundary()
+    {
+        GTA.StubRuntime.Reset();
+        object script = CreateScript();
+        Ped player = GTA.Game.Player.Character;
+        player.Handle = 80;
+
+        Assert.IsTrue((bool)InvokeInstance(
+            script,
+            "ArePhoneServicesAvailableDuringJustice",
+            player));
+
+        SetFieldValue(script, "_justiceCustodyRuntimeActive", true);
+        Assert.IsFalse((bool)InvokeInstance(
+            script,
+            "ArePhoneServicesAvailableDuringJustice",
+            player));
+
+        SetFieldValue(script, "_justiceCustodyRuntimeActive", false);
+        SetFieldValue(script, "_justiceCustodyTransferPending", true);
+        Assert.IsFalse((bool)InvokeInstance(
+            script,
+            "ArePhoneServicesAvailableDuringJustice",
+            player));
+
+        SetFieldValue(script, "_justiceCustodyTransferPending", false);
+        SetFieldValue(script, "_justiceCustodyResumePending", true);
+        Assert.IsFalse((bool)InvokeInstance(
+            script,
+            "ArePhoneServicesAvailableDuringJustice",
+            player));
+    }
+
+    [TestMethod]
+    public void PhoneContact_CustodyKeepsOverlayPathAndConsumesAllCommands()
+    {
+        GTA.StubRuntime.Reset();
+        Ped player = GTA.Game.Player.Character;
+        player.Handle = 81;
+        ulong phoneNative = GetStaticFieldValue<ulong>("NativeIsPedRunningMobilePhoneTask");
+        bool nativePhoneOpen = true;
+        GTA.StubRuntime.NativeCallHandler = (hash, arguments) =>
+            hash == phoneNative ? (object)nativePhoneOpen : null;
+        GTA.StubRuntime.KeyPressedHandler = key =>
+            key == Keys.C || key == Keys.R || key == Keys.L;
+
+        object script = CreateScriptWithInitializedCollections();
+        InvokeInstance(script, "UpdateCartelPhoneContact", player, false);
+
+        Assert.IsTrue(GetFieldValue<bool>(script, "_cartelPhoneKeyLatch"));
+        Assert.IsTrue(GetFieldValue<bool>(script, "_enemyRaidPhoneKeyLatch"));
+        Assert.IsTrue(GetFieldValue<bool>(script, "_highSecurityEscortPhoneKeyLatch"));
+        Assert.IsTrue(GetFieldValue<bool>(
+            script,
+            "_cartelPhoneCommandConsumedUntilRelease"));
+        Assert.IsTrue(GetFieldValue<bool>(
+            script,
+            "_enemyRaidPhoneCommandConsumedUntilRelease"));
+        Assert.IsTrue(GetFieldValue<bool>(script, "_highSecurityEscortRouteKeyLatch"));
+        Assert.IsTrue(GetFieldValue<bool>(
+            script,
+            "_highSecurityEscortLCommandConsumedUntilRelease"));
+        Assert.AreEqual(0, GetFieldValue<int>(script, "_nextCartelCallAllowedAt"));
+        Assert.AreEqual(0, GetFieldValue<int>(script, "_nextEnemyRaidCallAllowedAt"));
+        Assert.IsTrue(
+            GTA.StubRuntime.NativeCalls.All(call => call.Hash == phoneNative),
+            "Le chemin suspendu ne doit appeler aucune native de spawn ou de service.");
+
+        nativePhoneOpen = false;
+        GTA.Game.GameTime = 351;
+        InvokeInstance(script, "UpdateCartelPhoneContact", player, false);
+        Assert.IsFalse(GetFieldValue<bool>(script, "_cartelPhoneKeyLatch"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_enemyRaidPhoneKeyLatch"));
+        Assert.IsTrue(GetFieldValue<bool>(
+            script,
+            "_cartelPhoneCommandConsumedUntilRelease"));
+        Assert.IsTrue(GetFieldValue<bool>(
+            script,
+            "_enemyRaidPhoneCommandConsumedUntilRelease"));
+
+        nativePhoneOpen = true;
+        InvokeInstance(script, "UpdateCartelPhoneContact", player, true);
+        Assert.AreEqual(
+            0,
+            GetFieldValue<int>(script, "_nextCartelCallAllowedAt"),
+            "C maintenu ne doit pas partir après fermeture puis réouverture du téléphone.");
+        Assert.AreEqual(
+            0,
+            GetFieldValue<int>(script, "_nextEnemyRaidCallAllowedAt"),
+            "R maintenu ne doit pas partir après fermeture puis réouverture du téléphone.");
+
+        GTA.StubRuntime.KeyPressedHandler = key => false;
+        InvokeInstance(script, "UpdateCartelPhoneContact", player, false);
+
+        Assert.IsFalse(GetFieldValue<bool>(script, "_cartelPhoneKeyLatch"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_enemyRaidPhoneKeyLatch"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_highSecurityEscortPhoneKeyLatch"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_highSecurityEscortRouteKeyLatch"));
+        Assert.IsFalse(GetFieldValue<bool>(
+            script,
+            "_cartelPhoneCommandConsumedUntilRelease"));
+        Assert.IsFalse(GetFieldValue<bool>(
+            script,
+            "_enemyRaidPhoneCommandConsumedUntilRelease"));
+        Assert.IsFalse(GetFieldValue<bool>(
+            script,
+            "_highSecurityEscortLCommandConsumedUntilRelease"));
+
+        object closedPhoneScript = CreateScriptWithInitializedCollections();
+        nativePhoneOpen = false;
+        GTA.StubRuntime.KeyPressedHandler = key => key == Keys.C || key == Keys.R;
+        InvokeInstance(closedPhoneScript, "UpdateCartelPhoneContact", player, false);
+        Assert.IsTrue(GetFieldValue<bool>(
+            closedPhoneScript,
+            "_cartelPhoneCommandConsumedUntilRelease"));
+        Assert.IsTrue(GetFieldValue<bool>(
+            closedPhoneScript,
+            "_enemyRaidPhoneCommandConsumedUntilRelease"));
+
+        nativePhoneOpen = true;
+        InvokeInstance(closedPhoneScript, "UpdateCartelPhoneContact", player, true);
+        Assert.AreEqual(0, GetFieldValue<int>(closedPhoneScript, "_nextCartelCallAllowedAt"));
+        Assert.AreEqual(0, GetFieldValue<int>(closedPhoneScript, "_nextEnemyRaidCallAllowedAt"));
+    }
+
+    [TestMethod]
+    public void PlayerPhoneDetection_GraceIsShortAndNeverCrossesPedHandle()
+    {
+        GTA.StubRuntime.Reset();
+        object script = CreateScript();
+        Ped firstPlayer = GTA.Game.Player.Character;
+        firstPlayer.Handle = 91;
+        ulong phoneNative = GetStaticFieldValue<ulong>("NativeIsPedRunningMobilePhoneTask");
+        bool nativePhoneOpen = true;
+        bool nativeThrows = false;
+        GTA.StubRuntime.NativeCallHandler = (hash, arguments) =>
+        {
+            if (hash != phoneNative)
+            {
+                return null;
+            }
+            if (nativeThrows)
+            {
+                throw new MissingMethodException("Sonde téléphone indisponible.");
+            }
+            return nativePhoneOpen;
+        };
+
+        GTA.Game.GameTime = 1000;
+        Assert.IsTrue((bool)InvokeInstance(script, "IsPlayerPhoneOpen", firstPlayer));
+
+        nativePhoneOpen = false;
+        GTA.Game.GameTime = 1350;
+        Assert.IsTrue(
+            (bool)InvokeInstance(script, "IsPlayerPhoneOpen", firstPlayer),
+            "La dernière confirmation doit couvrir exactement la courte grâce prévue.");
+        Assert.IsFalse(GetFieldValue<bool>(script, "_playerPhoneNativeOpenThisTick"));
+
+        GTA.Game.GameTime = 1351;
+        Assert.IsFalse((bool)InvokeInstance(script, "IsPlayerPhoneOpen", firstPlayer));
+
+        nativePhoneOpen = true;
+        GTA.Game.GameTime = 2000;
+        Assert.IsTrue((bool)InvokeInstance(script, "IsPlayerPhoneOpen", firstPlayer));
+        nativeThrows = true;
+        GTA.Game.GameTime = 2200;
+        Assert.IsTrue(
+            (bool)InvokeInstance(script, "IsPlayerPhoneOpen", firstPlayer),
+            "Une panne native ponctuelle doit être absorbée sans autoriser les commandes.");
+        Assert.IsFalse(GetFieldValue<bool>(script, "_playerPhoneNativeOpenThisTick"));
+
+        Ped secondPlayer = new Ped { Handle = 92 };
+        nativeThrows = false;
+        nativePhoneOpen = false;
+        GTA.Game.GameTime = 2250;
+        Assert.IsFalse(
+            (bool)InvokeInstance(script, "IsPlayerPhoneOpen", secondPlayer),
+            "La grâce du premier héros ne doit jamais suivre le nouveau ped.");
+        Assert.AreEqual(92, GetFieldValue<int>(script, "_playerPhoneOpenPlayerHandle"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_playerPhoneOpenGraceActive"));
+
+        nativePhoneOpen = true;
+        GTA.Game.GameTime = 2300;
+        Assert.IsTrue((bool)InvokeInstance(script, "IsPlayerPhoneOpen", secondPlayer));
+        secondPlayer.IsDead = true;
+        GTA.Game.GameTime = 2310;
+        Assert.IsFalse(
+            (bool)InvokeInstance(script, "IsPlayerPhoneOpen", secondPlayer),
+            "La mort doit vider la grâce même si GTA réutilise ensuite le même handle.");
+        Assert.AreEqual(0, GetFieldValue<int>(script, "_playerPhoneOpenPlayerHandle"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_playerPhoneOpenGraceActive"));
+    }
+#endif
 
     [TestMethod]
     public void SourceFile_HighSecurityEscortUsesPartialDedicatedAiAndCleanup()
@@ -1282,7 +1560,7 @@ public class DonJEnemySpawnerTests
 
         string phoneBlock = ExtractSourceSection(
             mainSource,
-            "private void UpdateCartelPhoneContact(Ped player)",
+            "private void UpdateCartelPhoneContact(Ped player, bool servicesAvailable)",
             "private bool IsPlayerPhoneOpen(Ped player)");
 
         string routeBlock = ExtractSourceSection(
@@ -2981,6 +3259,32 @@ public class DonJEnemySpawnerTests
     private static object CreateScript()
     {
         return FormatterServices.GetUninitializedObject(ScriptType);
+    }
+
+    private static object CreateScriptWithInitializedCollections()
+    {
+        object script = CreateScript();
+
+        foreach (FieldInfo field in ScriptType.GetFields(PrivateInstance))
+        {
+            if (field.GetValue(script) != null || !field.FieldType.IsGenericType)
+            {
+                continue;
+            }
+
+            Type genericDefinition = field.FieldType.GetGenericTypeDefinition();
+            if (genericDefinition != typeof(List<>) &&
+                genericDefinition != typeof(HashSet<>) &&
+                genericDefinition != typeof(Dictionary<,>) &&
+                genericDefinition != typeof(Queue<>))
+            {
+                continue;
+            }
+
+            field.SetValue(script, Activator.CreateInstance(field.FieldType));
+        }
+
+        return script;
     }
 
     private static object CreateModelOption(string displayName, bool isCustom, int hash)

@@ -11372,9 +11372,16 @@ private void DrawMenu()
     private const int CartelRapidDrivingStyle = ProfessionalDrivingStyle;
 
     private const ulong NativeIsPedRunningMobilePhoneTask = 0x2AFE52F782F25775UL;
+    private const int PhoneOpenDetectionGraceMs = 350;
 
     private bool _cartelPhoneKeyLatch;
     private bool _enemyRaidPhoneKeyLatch;
+    private bool _cartelPhoneCommandConsumedUntilRelease;
+    private bool _enemyRaidPhoneCommandConsumedUntilRelease;
+    private bool _playerPhoneNativeOpenThisTick;
+    private bool _playerPhoneOpenGraceActive;
+    private int _playerPhoneOpenLastConfirmedAt;
+    private int _playerPhoneOpenPlayerHandle;
     private bool _cartelConvoyActive;
     private bool _cartelConvoyDismissing;
 
@@ -11492,10 +11499,17 @@ private void DrawMenu()
 
         if (!Entity.Exists(player))
         {
+            ResetPlayerPhoneOpenDetection();
             return;
         }
 
-        if (JusticeIsCustodyActive)
+        bool phoneServicesAvailable = ArePhoneServicesAvailableDuringJustice(player);
+
+        // Je garde les trois contacts visibles même quand Justice suspend leurs
+        // effets. Le gel ci-dessous ne doit concerner que les IA et les spawns.
+        UpdateCartelPhoneContact(player, phoneServicesAvailable);
+
+        if (!phoneServicesAvailable)
         {
             // Je fige le raid sans supprimer ses entités : aucun ennemi ne doit
             // être relocalisé dans la prison ou au commissariat. Son état reprend
@@ -11503,10 +11517,22 @@ private void DrawMenu()
             return;
         }
 
-        UpdateCartelPhoneContact(player);
         UpdateCartelConvoyState(player);
         UpdateEnemyRaidState(player);
         UpdateHighSecurityEscortState(player);
+    }
+
+    private bool ArePhoneServicesAvailableDuringJustice(Ped player)
+    {
+        if (JusticeIsCustodyActive)
+        {
+            return false;
+        }
+
+        // Je suspends aussi les spawns pendant un maintien provisoire réellement
+        // rattaché au héros courant, sans bloquer le téléphone d'un autre profil.
+        return _justicePreJudgmentHoldingSource == JusticePreJudgmentHoldingSource.None ||
+               !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player);
     }
 
     /*
@@ -11516,14 +11542,14 @@ private void DrawMenu()
      */
     private void UpdateCartelConvoyLate()
     {
-        if (JusticeIsCustodyActive)
+        Ped player = Game.Player.Character;
+
+        if (!Entity.Exists(player))
         {
             return;
         }
 
-        Ped player = Game.Player.Character;
-
-        if (!Entity.Exists(player))
+        if (!ArePhoneServicesAvailableDuringJustice(player))
         {
             return;
         }
@@ -11543,9 +11569,21 @@ private void DrawMenu()
         }
     }
 
-    private void UpdateCartelPhoneContact(Ped player)
+    private void UpdateCartelPhoneContact(Ped player, bool servicesAvailable)
     {
+        bool cPressedNow = Game.IsKeyPressed(Keys.C);
+        bool rPressedNow = Game.IsKeyPressed(Keys.R);
         bool lPressedNow = Game.IsKeyPressed(Keys.L);
+
+        if (!cPressedNow)
+        {
+            _cartelPhoneCommandConsumedUntilRelease = false;
+        }
+
+        if (!rPressedNow)
+        {
+            _enemyRaidPhoneCommandConsumedUntilRelease = false;
+        }
 
         /*
          * Latch global pour la touche L :
@@ -11556,7 +11594,18 @@ private void DrawMenu()
          */
         if (!lPressedNow)
         {
+            _highSecurityEscortRouteKeyLatch = false;
             _highSecurityEscortLCommandConsumedUntilRelease = false;
+        }
+
+        if (!servicesAvailable)
+        {
+            // Je consomme aussi une pression commencée téléphone fermé : aucune
+            // touche saisie en détention ne doit devenir un appel à la libération.
+            ConsumePhoneServiceCommandKeysUntilRelease(
+                cPressedNow,
+                rPressedNow,
+                lPressedNow);
         }
 
         bool phoneOpen = IsPlayerPhoneOpen(player);
@@ -11569,30 +11618,45 @@ private void DrawMenu()
             return;
         }
 
-        DrawCartelPhoneContactOverlay();
+        DrawCartelPhoneContactOverlay(servicesAvailable);
 
-        bool cPressed = Game.IsKeyPressed(Keys.C);
+        if (!servicesAvailable || !_playerPhoneNativeOpenThisTick)
+        {
+            // Je consomme les touches pendant la détention ou une grâce native :
+            // aucun appel ne part si GTA ne confirme pas le téléphone ce tick.
+            _cartelPhoneKeyLatch = cPressedNow;
+            _enemyRaidPhoneKeyLatch = rPressedNow;
+            _highSecurityEscortPhoneKeyLatch = lPressedNow;
+            ConsumePhoneServiceCommandKeysUntilRelease(
+                cPressedNow,
+                rPressedNow,
+                lPressedNow);
 
-        if (!cPressed)
+            return;
+        }
+
+        if (!cPressedNow)
         {
             _cartelPhoneKeyLatch = false;
         }
-        else if (!_cartelPhoneKeyLatch)
+        else if (!_cartelPhoneKeyLatch &&
+                 !_cartelPhoneCommandConsumedUntilRelease)
         {
             _cartelPhoneKeyLatch = true;
             ToggleCartelCall();
+            _cartelPhoneCommandConsumedUntilRelease = true;
         }
 
-        bool rPressed = Game.IsKeyPressed(Keys.R);
-
-        if (!rPressed)
+        if (!rPressedNow)
         {
             _enemyRaidPhoneKeyLatch = false;
         }
-        else if (!_enemyRaidPhoneKeyLatch)
+        else if (!_enemyRaidPhoneKeyLatch &&
+                 !_enemyRaidPhoneCommandConsumedUntilRelease)
         {
             _enemyRaidPhoneKeyLatch = true;
             CallEnemyRaid();
+            _enemyRaidPhoneCommandConsumedUntilRelease = true;
         }
 
         bool lPressed = lPressedNow;
@@ -11616,24 +11680,94 @@ private void DrawMenu()
         }
     }
 
-    private bool IsPlayerPhoneOpen(Ped player)
+    private void ConsumePhoneServiceCommandKeysUntilRelease(
+        bool cPressedNow,
+        bool rPressedNow,
+        bool lPressedNow)
     {
-        if (!Entity.Exists(player))
+        if (cPressedNow)
         {
-            return false;
+            _cartelPhoneCommandConsumedUntilRelease = true;
         }
 
-        try
+        if (rPressedNow)
         {
-            return Function.Call<bool>((Hash)NativeIsPedRunningMobilePhoneTask, player.Handle);
+            _enemyRaidPhoneCommandConsumedUntilRelease = true;
         }
-        catch
+
+        if (lPressedNow)
         {
-            return false;
+            _highSecurityEscortRouteKeyLatch = true;
+            _highSecurityEscortLCommandConsumedUntilRelease = true;
         }
     }
 
-    private void DrawCartelPhoneContactOverlay()
+    private bool IsPlayerPhoneOpen(Ped player)
+    {
+        if (!Entity.Exists(player) || player.IsDead)
+        {
+            // Je supprime aussi la grâce à la mort : GTA peut réutiliser le même
+            // handle au respawn, mais le nouveau ped doit repartir d'un état net.
+            ResetPlayerPhoneOpenDetection();
+            return false;
+        }
+
+        int playerHandle = player.Handle;
+        if (_playerPhoneOpenPlayerHandle != playerHandle)
+        {
+            // Je ne transporte jamais la grâce téléphone vers un autre ped lors
+            // d'un respawn ou d'un changement Franklin/Michael/Trevor.
+            ResetPlayerPhoneOpenDetection();
+            _playerPhoneOpenPlayerHandle = playerHandle;
+        }
+
+        bool nativePhoneOpen = false;
+        try
+        {
+            nativePhoneOpen = Function.Call<bool>(
+                (Hash)NativeIsPedRunningMobilePhoneTask,
+                playerHandle);
+        }
+        catch
+        {
+            // Je laisse la courte grâce absorber une indisponibilité native
+            // ponctuelle, sans masquer durablement une erreur ni l'étendre.
+        }
+
+        _playerPhoneNativeOpenThisTick = nativePhoneOpen;
+
+        int now = Game.GameTime;
+        if (nativePhoneOpen)
+        {
+            _playerPhoneOpenGraceActive = true;
+            _playerPhoneOpenLastConfirmedAt = now;
+            return true;
+        }
+
+        if (!_playerPhoneOpenGraceActive)
+        {
+            return false;
+        }
+
+        int elapsed = unchecked(now - _playerPhoneOpenLastConfirmedAt);
+        if (elapsed >= 0 && elapsed <= PhoneOpenDetectionGraceMs)
+        {
+            return true;
+        }
+
+        _playerPhoneOpenGraceActive = false;
+        return false;
+    }
+
+    private void ResetPlayerPhoneOpenDetection()
+    {
+        _playerPhoneNativeOpenThisTick = false;
+        _playerPhoneOpenGraceActive = false;
+        _playerPhoneOpenLastConfirmedAt = 0;
+        _playerPhoneOpenPlayerHandle = 0;
+    }
+
+    private void DrawCartelPhoneContactOverlay(bool servicesAvailable)
     {
         int x = 845;
         int y = 420;
@@ -11649,7 +11783,11 @@ private void DrawMenu()
 
         string cartelStatus;
 
-        if (HasActiveCartelTeam())
+        if (!servicesAvailable)
+        {
+            cartelStatus = "C : indisponible pendant transfert / détention";
+        }
+        else if (HasActiveCartelTeam())
         {
             cartelStatus = "C : rappeler / faire replier l'équipe active";
         }
@@ -11664,30 +11802,42 @@ private void DrawMenu()
 
         DrawText(cartelStatus, x + 18, y + 76, 0.285f, Color.FromArgb(230, 230, 230), false, false);
 
-        int liveEnemies = CountLiveEnemyRaidMembers();
-        int enemyCooldownRemaining = Math.Max(0, (_nextEnemyRaidCallAllowedAt - Game.GameTime + 999) / 1000);
-
         DrawText(EnemyRaidContactName, x + 18, y + 106, 0.42f, Color.FromArgb(235, 190, 235), false, true);
 
         string enemyStatus;
 
-        if (enemyCooldownRemaining > 0)
+        if (!servicesAvailable)
         {
-            enemyStatus = "R : ennemis disponibles dans " + enemyCooldownRemaining.ToString(CultureInfo.InvariantCulture) + " s";
-        }
-        else if (liveEnemies > 0)
-        {
-            enemyStatus = "R : appeler une autre vague ennemie (" + liveEnemies.ToString(CultureInfo.InvariantCulture) + " actifs)";
+            enemyStatus = "R : indisponible pendant transfert / détention";
         }
         else
         {
-            enemyStatus = "R : appeler des ennemis armés en véhicules";
+            int liveEnemies = CountLiveEnemyRaidMembers();
+            int enemyCooldownRemaining = Math.Max(
+                0,
+                (_nextEnemyRaidCallAllowedAt - Game.GameTime + 999) / 1000);
+
+            if (enemyCooldownRemaining > 0)
+            {
+                enemyStatus = "R : ennemis disponibles dans " + enemyCooldownRemaining.ToString(CultureInfo.InvariantCulture) + " s";
+            }
+            else if (liveEnemies > 0)
+            {
+                enemyStatus = "R : appeler une autre vague ennemie (" + liveEnemies.ToString(CultureInfo.InvariantCulture) + " actifs)";
+            }
+            else
+            {
+                enemyStatus = "R : appeler des ennemis armés en véhicules";
+            }
         }
 
         DrawText(enemyStatus, x + 18, y + 137, 0.285f, Color.FromArgb(230, 230, 230), false, false);
 
         DrawText(HighSecurityEscortContactName, x + 18, y + 164, 0.42f, Color.FromArgb(170, 210, 255), false, true);
-        DrawText(GetHighSecurityEscortPhoneStatus(), x + 18, y + 195, 0.285f, Color.FromArgb(230, 230, 230), false, false);
+        string escortStatus = servicesAvailable
+            ? GetHighSecurityEscortPhoneStatus()
+            : "L : indisponible pendant transfert / détention";
+        DrawText(escortStatus, x + 18, y + 195, 0.285f, Color.FromArgb(230, 230, 230), false, false);
     }
 
     private void ToggleCartelCall()
