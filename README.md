@@ -9,13 +9,164 @@
   <img src="images-readme/acceuil.png" alt="DonJ Custom NPC Placer - mod presentation image" width="100%">
 </p>
 
+## Installation express / Quick Start
+
+> [!CAUTION]
+> **Mode Histoire / Story Mode uniquement.** Ce mod est fait pour GTA V Enhanced en solo : ne l'utilise jamais dans GTA Online. Ferme le jeu avant de copier des fichiers — GTA aime avoir le dernier mot, mais on peut lui éviter ce débat.
+
+> [!TIP]
+> **Tu n'as rien à compiler.** Télécharge simplement le package vérifié de **DonJ Custom NPC Placer**, copie les bons fichiers aux bons endroits, puis ouvre le menu avec `F10`.
+
+### Français : ta mission installation
+
+Pas besoin d'être expert : suis les étapes dans l'ordre et coche-les une par une. À la fin, tu auras installé **notre** mod, `DonJ Custom NPC Placer`.
+
+#### 1. Prépare les prérequis
+
+| À installer | À quoi ça sert | Où cela va |
+|---|---|---|
+| [Microsoft .NET Framework 4.8 Runtime](https://dotnet.microsoft.com/en-us/download/dotnet-framework/net48) | Permet d'exécuter les mods .NET. | Installation Windows normale. |
+| [Script Hook V](https://www.dev-c.com/gtav/scripthookv/) | Charge les scripts GTA ; prends aussi `xinput1_4.dll` fourni pour Enhanced. | Dossier principal de GTA. |
+| [NIBScriptHookVDotNet pour GTA Enhanced](https://www.patreon.com/posts/nibmods-menu-and-22783974) | Charge les scripts .NET de notre mod. | Dossier principal de GTA. |
+
+Dans le téléchargement NIB, choisis bien la version **GTA V Enhanced** lorsqu'elle est proposée. Les fichiers ScriptHook/NIB vont à côté de l'exécutable du jeu, **pas** dans `Scripts`.
+
+#### 2. Trouve le bon dossier GTA
+
+Dans Steam : **Bibliothèque** → clic droit sur **Grand Theft Auto V Enhanced** → **Gérer** → **Parcourir les fichiers locaux**.
+
+Tu es au bon endroit si tu vois ce fichier :
+
+```text
+GTA5_Enhanced.exe
+```
+
+Crée un dossier nommé exactement `Scripts` s'il n'existe pas encore. C'est le seul sous-dossier qui recevra notre mod.
+
+#### 3. Télécharge notre mod depuis GitHub
+
+1. Ouvre la page [Safety du dépôt](https://github.com/Donj63000/GTA-5-Enhanced--DonJ-Custom-NPC-Placer/actions/workflows/safety.yml).
+2. Choisis la dernière exécution avec une coche verte, dont la branche est **`main`** et l'événement est **`push`**.
+3. Descends jusqu'à **Artifacts** et télécharge exactement :
+
+   ```text
+   DonJCustomNpcPlacer-game-ready
+   ```
+
+4. Décompresse l'archive téléchargée.
+
+> [!IMPORTANT]
+> N'utilise pas **Code → Download ZIP** : c'est le code source, pas le mod prêt à jouer. Utilise uniquement l'artefact `DonJCustomNpcPlacer-game-ready` et les noms de fichiers indiqués ci-dessous.
+
+#### 4. Copie les fichiers au bon endroit
+
+L'archive contient `DonJCustomNpcPlacer.ENdll`, `manifest.json`, `DonJCustomNpcPlacer.pdb` (facultatif) et `INSTALLATION_SIMPLE.txt`.
+
+Copie uniquement `DonJCustomNpcPlacer.ENdll` et `manifest.json` dans `Scripts`. Renomme ensuite `manifest.json` en **`DonJCustomNpcPlacer.manifest.json`**. Tu peux aussi copier le `.pdb` si tu veux des logs plus lisibles. Laisse `INSTALLATION_SIMPLE.txt` hors de `Scripts` et ne copie jamais le dossier entier de l'archive.
+
+Ton installation doit ressembler à ceci :
+
+```text
+Grand Theft Auto V Enhanced\
+├── GTA5_Enhanced.exe
+├── ScriptHookV.dll
+├── xinput1_4.dll
+├── NIBScriptHookVDotNet.asi
+├── NIBScriptHookVDotNet2.dll
+└── Scripts\
+    ├── DonJCustomNpcPlacer.ENdll
+    ├── DonJCustomNpcPlacer.manifest.json
+    └── DonJCustomNpcPlacer.pdb             (facultatif)
+```
+
+#### 5. Lance et teste le mod
+
+1. Lance GTA V Enhanced et entre en **mode Histoire**.
+2. Appuie sur `F10` : le menu DonJ doit s'ouvrir.
+3. Pour un premier test, choisis `Placement type: NPC`, sélectionne un modèle, démarre `Precise camera placement`, puis place le PNJ avec `Enter` ou le clic gauche.
+
+> [!TIP]
+> `F10` ne fait rien ? Respire : vérifie d'abord le dossier `Scripts`, les quatre fichiers à la racine du jeu et le mode Histoire. Ensuite, suis la [procédure détaillée](#installation) ou le [dépannage](#troubleshooting).
+
+### English: your installation mission
+
+No expert knowledge needed: follow the steps in order and tick them off one at a time. At the end, you will have installed **our** mod, `DonJ Custom NPC Placer`.
+
+#### 1. Get the prerequisites ready
+
+| Install this | Why you need it | Where it goes |
+|---|---|---|
+| [Microsoft .NET Framework 4.8 Runtime](https://dotnet.microsoft.com/en-us/download/dotnet-framework/net48) | Lets Windows run .NET mods. | Install it normally in Windows. |
+| [Script Hook V](https://www.dev-c.com/gtav/scripthookv/) | Loads GTA scripts; also take the supplied Enhanced `xinput1_4.dll`. | GTA's main folder. |
+| [NIBScriptHookVDotNet for GTA Enhanced](https://www.patreon.com/posts/nibmods-menu-and-22783974) | Loads our mod's .NET scripts. | GTA's main folder. |
+
+When NIB offers a choice, select the **GTA V Enhanced** version. ScriptHook/NIB files belong next to the game executable, **not** inside `Scripts`.
+
+#### 2. Find the correct GTA folder
+
+In Steam: **Library** → right-click **Grand Theft Auto V Enhanced** → **Manage** → **Browse local files**.
+
+You are in the right folder when you can see:
+
+```text
+GTA5_Enhanced.exe
+```
+
+Create a folder named exactly `Scripts` if it is missing. This is the only subfolder that receives our mod.
+
+#### 3. Download our mod from GitHub
+
+1. Open the repository's [Safety page](https://github.com/Donj63000/GTA-5-Enhanced--DonJ-Custom-NPC-Placer/actions/workflows/safety.yml).
+2. Choose the latest run with a green check mark whose branch is **`main`** and whose event is **`push`**.
+3. Scroll to **Artifacts** and download exactly:
+
+   ```text
+   DonJCustomNpcPlacer-game-ready
+   ```
+
+4. Extract the downloaded archive.
+
+> [!IMPORTANT]
+> Do not use **Code → Download ZIP**: that is source code, not the playable mod. Use only the `DonJCustomNpcPlacer-game-ready` artifact and the exact file names below.
+
+#### 4. Copy the files to the right place
+
+The archive contains `DonJCustomNpcPlacer.ENdll`, `manifest.json`, the optional `DonJCustomNpcPlacer.pdb`, and `INSTALLATION_SIMPLE.txt`.
+
+Copy only `DonJCustomNpcPlacer.ENdll` and `manifest.json` into `Scripts`. Then rename `manifest.json` to **`DonJCustomNpcPlacer.manifest.json`**. You may also copy the `.pdb` for clearer logs. Keep `INSTALLATION_SIMPLE.txt` outside `Scripts`, and never copy the whole archive folder.
+
+Your finished installation should look like this:
+
+```text
+Grand Theft Auto V Enhanced\
+├── GTA5_Enhanced.exe
+├── ScriptHookV.dll
+├── xinput1_4.dll
+├── NIBScriptHookVDotNet.asi
+├── NIBScriptHookVDotNet2.dll
+└── Scripts\
+    ├── DonJCustomNpcPlacer.ENdll
+    ├── DonJCustomNpcPlacer.manifest.json
+    └── DonJCustomNpcPlacer.pdb             (optional)
+```
+
+#### 5. Launch and test the mod
+
+1. Launch GTA V Enhanced and enter **Story Mode**.
+2. Press `F10`: the DonJ menu should open.
+3. For a first test, choose `Placement type: NPC`, select a model, start `Precise camera placement`, then place the NPC with `Enter` or left click.
+
+> [!TIP]
+> Nothing happens when you press `F10`? Take a breath: first check the `Scripts` folder, the four files in GTA's main folder, and Story Mode. Then follow the [detailed installation guide](#installation) or [troubleshooting guide](#troubleshooting).
+
 ## Table of Contents
 
+- [Installation express / Quick Start](#installation-express--quick-start)
 - [Main Features](#main-features)
 - [Respawn / Automatic Respawn](#respawn--automatic-respawn)
 - [Terminator Mode](#terminator-mode)
 - [Advanced Justice](#advanced-justice)
-- [Installation](#installation)
+- [Detailed Installation](#installation)
 - [Usage](#usage)
 - [Quick Example](#quick-example)
 - [Saves](#saves)
@@ -31,7 +182,9 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><strong>Installation</strong></a>
+  <a href="#installation-express--quick-start"><strong>Installation express / Quick Start</strong></a>
+  |
+  <a href="#installation"><strong>Detailed installation</strong></a>
   |
   <a href="#usage"><strong>Usage</strong></a>
   |

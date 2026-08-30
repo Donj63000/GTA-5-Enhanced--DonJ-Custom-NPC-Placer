@@ -1910,3 +1910,18 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Le premier échec de snapshot entièrement non destructif bascule désormais vers un inventaire préservé, précommité avant le téléport. Les états préservés ou ambigus ne rejouent jamais `RemoveAll`; une restitution ambiguë attend la libération réelle. Le handler de transfert conserve la phase `Transporting`, rend le joueur mobile et retente avec un délai borné à cinq secondes sans créer de nouveau `TransferRollback`. La reprise des anciens WAL de rollback reste compatible. L'évasion demeure impossible tant que le joueur se trouve dans l'enveloppe extérieure de l'enceinte et exige six secondes continues réellement hors prison.
 - Vérification: Tests Justice ciblés réussis `93/93`, puis tests de durcissement `22/22`; `dotnet build GTA5modDEV.sln -c Release` réussi avec zéro avertissement et zéro erreur; `dotnet test GTA5modDEV.sln -c Release --no-build` réussi `485/485`; `tools\run-safety-checks.ps1` réussi `485/485` dans `TestResults\safety-20260830-015013`, avec contrat ABI NIB v2 valide (`32` types, `189` membres) et paquet `.ENdll` vérifié.
 - Résolution: Une mort ou arrestation policière ne peut plus devenir une remise en liberté technique à cause de l'inventaire ou du timeout. Le transfert reste obligatoire vers Mission Row ou Bolingbroke selon la peine, sous retries sécurisés jusqu'à confirmation physique.
+
+## 2026-08-30 04:38:50 +02:00 - Échec intermittent de persistance Justice pendant la validation du guide README
+- Statut: Instable, non corrigé hors périmètre; la dernière validation complète est réussie.
+- Contexte: Validation de la documentation d'installation bilingue dans un worktree propre basé sur `origin/main`, sans modification du code Justice.
+- Symptôme: La suite `safety-20260830-043159` a échoué une fois sur `PlayerProfiles_SuccessfulResetWritesTheEmptyProfileToPrimaryAndBackup`: après corruption volontaire du primaire, le chargement depuis le `.bak` a retrouvé `recidivism=2` au lieu de `0`.
+- Sources vérifiées:
+  - `TestResults\safety-20260830-043159\logs\test-release.log` et `safety-tests.trx`;
+  - `bug-reports\20260830-043422-safety-failure\crash-list-entry.md` et les logs collectés automatiquement;
+  - `tests\DonJEnemySpawner.Tests\JusticePlayerProfilePersistenceTests.cs`, test et helpers de persistance concernés;
+  - trois relances isolées du test, puis `TestResults\safety-20260830-043607\safety-tests.trx`.
+- Extraits utiles: l'échec signale `Attendu : <0>, Réel : <2>` à la ligne 750 du test; les trois relances isolées réussissent ensuite `1/1`, et la relance complète Safety réussit `507/507` avec ABI NIB v2 valide.
+- Analyse / hypothèse: Le symptôme est compatible avec une course intermittente entre l'écriture asynchrone du reset et la copie de sauvegarde. Il n'est pas lié au README, au test documentaire ou au package de DonJ Custom NPC Placer.
+- Action menée: Les logs ont été collectés via la suite de sécurité; aucune modification Justice hors demande n'a été appliquée. Le nouveau guide et son test restent isolés de cet incident.
+- Vérification: Test Justice concerné réussi trois fois de suite; `tools\run-safety-checks.ps1 -UseStubApi` relancé avec succès (`507/507`, package vérifié, refus attendu de la source sale).
+- Résolution: L'incident est consigné pour une investigation Justice dédiée. La documentation demandée est validée par la dernière passe complète verte.
