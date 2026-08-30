@@ -76,8 +76,10 @@ public sealed partial class DonJEnemySpawner
             _justiceLegalReleaseFinalizationPending ||
             _justiceCustodyTransferRollbackFinalizationPending ||
             _justiceActiveProfileResetPending ||
+            HasOpenJusticeProfileResetWal() ||
             _justiceBackupRepairPending ||
             _justiceProfileSwitchPersistencePending ||
+            HasOpenJusticeDeathFrontForProfileSlot(slot) ||
             (activeProfile && HasJusticeProfilePendingRecoveryWal(profile)) ||
             (!activeProfile && HasJusticeProfileCustodyRecovery(profile)) ||
             (!activeProfile && HasJusticeCustodyRecoveryState()) ||
@@ -141,8 +143,10 @@ public sealed partial class DonJEnemySpawner
             _justiceLegalReleaseFinalizationPending ||
             _justiceCustodyTransferRollbackFinalizationPending ||
             _justiceActiveProfileResetPending ||
+            HasOpenJusticeProfileResetWal() ||
             _justiceBackupRepairPending ||
             _justiceProfileSwitchPersistencePending ||
+            HasOpenJusticeDeathFrontForProfileSlot(slot) ||
             (activeProfile && HasJusticeProfilePendingRecoveryWal(selectedProfile)) ||
             (!activeProfile && HasJusticeProfileCustodyRecovery(selectedProfile)) ||
             (!activeProfile && HasJusticeCustodyRecoveryState()) ||
@@ -178,57 +182,20 @@ public sealed partial class DonJEnemySpawner
         {
             SnapshotActiveJusticePlayerProfile();
         }
-        JusticePlayerProfileState previousProfile = _justicePlayerProfiles[slot];
-        if (!ResetJusticePlayerProfile(slot))
+        if (!BeginJusticeProfileResetWalTransaction(slot))
         {
             ShowStatus(
-                "Réinitialisation refusée : aucune donnée d'inventaire ne sera perdue.",
-                3800);
+                "Réinitialisation différée : transaction durable indisponible.",
+                4000);
             return;
         }
-        bool primaryResetCommitted;
-        if (!PersistJusticeProfileResetRedundantly(out primaryResetCommitted))
+        if (!TryResumePendingJusticeProfileResetWal())
         {
-            if (primaryResetCommitted)
-            {
-                // Je garde le profil vide si le primaire a déjà été remplacé. Le
-                // prochain flush sale réécrira la même génération dans le backup,
-                // sans faire croire que la remise à zéro a été annulée en mémoire.
-                ShowStatus(
-                    "Réinitialisation appliquée; copie de secours à confirmer…",
-                    4000);
-                return;
-            }
-
-            // Tant qu'aucun primaire vide n'a été committé, je peux encore rendre
-            // exactement le profil précédent et annoncer une véritable annulation.
-            _justicePlayerProfiles[slot] = previousProfile;
-            if (activeProfile)
-            {
-                ActivateJusticePlayerProfile(slot);
-                _justiceProfileSelectionPending = false;
-                _justiceProfileContextBlocked = false;
-            }
-            JusticeMarkStateDirty();
-            ShowStatus("Réinitialisation annulée : sauvegarde indisponible, réessaie.", 4000);
+            ShowStatus(
+                "Réinitialisation enregistrée; confirmation du backup en cours…",
+                4000);
             return;
         }
-        ShowStatus(GetJusticeMenuSelectedProfileDisplay() + " : profil Justice réinitialisé.", 4200);
-    }
-
-    private bool PersistJusticeProfileResetRedundantly(out bool primaryResetCommitted)
-    {
-        primaryResetCommitted = JusticeFlushStateNow();
-        if (!primaryResetCommitted)
-        {
-            return false;
-        }
-
-        // Je force la génération vide une seconde fois : File.Replace place alors
-        // le même reset dans le primaire et son .bak. Une corruption ultérieure du
-        // primaire ne peut donc jamais ressusciter le dossier supprimé.
-        JusticeMarkStateDirty();
-        return JusticeFlushStateNow();
     }
 
     private bool BeginJusticeActiveProfileResetTransaction(int slot)
@@ -300,6 +267,17 @@ public sealed partial class DonJEnemySpawner
         if (!EnsureJusticeActiveProfileResetPrecommitRedundant())
         {
             return false;
+        }
+        if (!EnsureJusticeDeathFrontsDurableBeforeDestructiveTransaction())
+        {
+            return false;
+        }
+        if (_justicePursuitDeathObservedDuringSuspension)
+        {
+            // Je ne remplace le profil qu'après la preuve redondante du front et
+            // du reset; un crash reprendra alors le reset sans ressusciter la mort.
+            ClearPendingJusticeDeathCapture();
+            JusticeMarkStateDirty();
         }
 
         if (HasJusticeCustodyRecoveryState() && !JusticeAmnestyCustody())
@@ -517,7 +495,9 @@ public sealed partial class DonJEnemySpawner
 
         // Je refuse toute remise a zero susceptible de supprimer le seul snapshot
         // d'armes encore recuperable, meme lorsque le profil vise est inactif.
-        if (HasJusticeProfileCustodyRecovery(target) ||
+        if (HasOpenJusticeProfileResetWal() ||
+            HasOpenJusticeDeathFrontForProfileSlot(slot) ||
+            HasJusticeProfileCustodyRecovery(target) ||
             slot != _justiceActivePlayerProfileSlot && HasJusticeCustodyRecoveryState())
         {
             return false;
@@ -1022,6 +1002,9 @@ public sealed partial class DonJEnemySpawner
         }
 
         NormalizeLoadedJusticeState();
+        _justicePoliceDeathRespawnMaskIntentPending =
+            _justicePursuitDeathObservedDuringSuspension &&
+            !JusticeIsCustodyActive;
         _justiceActiveProfileResetPending =
             HasPendingJusticeProfileResetOperation(_justiceCaseState);
         // Ce cache est volontairement runtime : après chaque chargement, je
@@ -1636,12 +1619,20 @@ public sealed partial class DonJEnemySpawner
             return pendingSlot == -1 && pendingModel == 0;
         }
 
-        return caseState != null && caseState.Enabled &&
-               IsLoadedJusticeCaseActive(caseState) &&
-               (IsJusticeCustodyPhase(caseState.Phase) ||
-                caseState.Phase == JusticePhase.Wanted ||
-                caseState.Phase == JusticePhase.Surrendering ||
-                caseState.Phase == JusticePhase.Fugitive);
+        if (caseState == null || !caseState.Enabled)
+        {
+            return false;
+        }
+
+        bool materializedCase = IsLoadedJusticeCaseActive(caseState) &&
+            (IsJusticeCustodyPhase(caseState.Phase) ||
+             caseState.Phase == JusticePhase.Wanted ||
+             caseState.Phase == JusticePhase.Surrendering ||
+             caseState.Phase == JusticePhase.Fugitive);
+        bool rawPoliceDeathAwaitingMaterialization =
+            !IsLoadedJusticeCaseActive(caseState) &&
+            caseState.Phase == JusticePhase.AtLarge;
+        return materializedCase || rawPoliceDeathAwaitingMaterialization;
     }
 
     private static bool IsJusticePendingLegalReleaseValid(

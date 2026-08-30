@@ -295,6 +295,43 @@ internal sealed class JusticeWriteAheadLog
         }
     }
 
+    internal bool HasOpenTransactionKind(string operationKind)
+    {
+        if (string.IsNullOrWhiteSpace(operationKind))
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            foreach (JusticeWalRecord record in _latestByTransaction.Values)
+            {
+                if (!record.IsTerminal && string.Equals(
+                        record.OperationKind,
+                        operationKind,
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    internal IReadOnlyList<JusticeWalRecord> GetLatestTransactions()
+    {
+        lock (_gate)
+        {
+            List<JusticeWalRecord> latest = new List<JusticeWalRecord>(
+                _latestByTransaction.Values);
+            latest.Sort(delegate(JusticeWalRecord left, JusticeWalRecord right)
+            {
+                return left.Sequence.CompareTo(right.Sequence);
+            });
+            return new ReadOnlyCollection<JusticeWalRecord>(latest);
+        }
+    }
+
     internal bool CompactIfNoOpenTransactions()
     {
         lock (_gate)

@@ -403,46 +403,281 @@ public sealed class JusticeCustodyHardeningTests
     }
 
     [TestMethod]
-    public void CustodyTransfer_AllFailureStagesReachTheSameTimeoutRollback()
+    public void CustodyTransfer_AllFailureStagesKeepCustodyPendingAndRetry()
     {
         string source = ReadCustodySource();
         string transfer = ExtractMethodBody(source, "CompleteJusticeCustodyTransfer");
         string failure = ExtractMethodBody(source, "HandleJusticeCustodyTransferFailure");
 
         Assert.AreEqual(
-            4,
+            6,
             CountOccurrences(transfer, "HandleJusticeCustodyTransferFailure(player, now)"),
-            "Le snapshot joueur, le WAL, l'inventaire et le téléport doivent partager le même timeout.");
+            "Le snapshot joueur, les deux reprises WAL, le fallback durable, l'inventaire et le téléport doivent partager le même retry.");
         Assert.IsFalse(transfer.Contains("RegisterJusticeCustodyTransferFailure(now)"));
         AssertOrdered(
             failure,
             "RegisterJusticeCustodyTransferFailure(now)",
-            "JusticeCustodyTransferTimeoutMs",
-            "TryRollbackJusticeCustodyTransfer(player, now)",
             "EnsureJusticeCustodyPlayerMobility(player)");
+        Assert.IsFalse(
+            failure.Contains("TryRollbackJusticeCustodyTransfer"),
+            "Une panne technique ne doit jamais libérer le détenu sous mandat.");
+        Assert.IsFalse(failure.Contains("JusticePhase.AtLarge"));
+        Assert.IsFalse(failure.Contains("_justiceCustodyTransferPrecommitConfirmed"));
+        Assert.IsFalse(failure.Contains("_justiceCustodyFallbackPrecommitPending"));
+        Assert.AreEqual(
+            1,
+            CountOccurrences(source, "TryRollbackJusticeCustodyTransfer("),
+            "Le rollback historique ne doit plus avoir aucun appelant runtime.");
+        AssertOrdered(
+            transfer,
+            "if (!_justiceCustodyTransferPrecommitConfirmed)",
+            "PersistJusticeCriticalPrecommitRedundantly(",
+            "\"CompleteJusticeCustodyTransfer\"",
+            "_justiceCustodyTransferPrecommitConfirmed = true",
+            "if (_justiceCustodyFallbackPrecommitPending)",
+            "// Je reprends exactement la frontière du fallback",
+            "_justiceCustodyFallbackPrecommitPending = false",
+            "JusticeInventoryPreparationResult inventoryPreparation");
+        AssertOrdered(
+            transfer,
+            "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
+            "CanContinueJusticeCustodyTransferWithoutInventoryConfiscation(",
+            "EnterJusticeNonDestructiveCustodyFallback(player, now)",
+            "_justiceCustodyFallbackPrecommitPending = true",
+            "\"CompleteJusticeCustodyTransfer\"",
+            "_justiceCustodyFallbackPrecommitPending = false",
+            "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)");
+
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        SetField(script, "_justiceCustodyTransferPrecommitConfirmed", true);
+        SetField(script, "_justiceCustodyFallbackPrecommitPending", true);
+        Invoke(script, "ResetJusticeCustodyTransferRetryState");
+        Assert.IsFalse(GetField<bool>(
+            script,
+            "_justiceCustodyTransferPrecommitConfirmed"));
+        Assert.IsFalse(GetField<bool>(
+            script,
+            "_justiceCustodyFallbackPrecommitPending"));
     }
 
     [TestMethod]
-    public void CustodyTransferRollback_NeverRestoresATransitionFreezeAndClosesPursuitEpoch()
+    public void CustodyTransferTimeout_KeepsTheSentenceAndSchedulesAnotherBoundedAttempt()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        JusticeCaseState state = new JusticeCaseState
+        {
+            Enabled = true,
+            Phase = JusticePhase.Transporting,
+            CustodyEpisodeId = "custody:timeout"
+        };
+        SetField(script, "_justiceCaseState", state);
+        SetField(script, "_justiceEnabled", true);
+        SetField(script, "_justiceCustodyRuntimeActive", true);
+        SetField(script, "_justiceCustodyTransferPending", true);
+        SetField(script, "_justiceCustodyTransferStartedAt", 1);
+        SetField(script, "_justiceNextCustodyTransferAttemptAt", 0);
+        SetField(script, "_justiceCustodyTransferFailureCount", 0);
+        SetField(script, "_justiceCustodyTransferTimeoutLogged", false);
+        SetField(script, "_justiceCustodyTransferPrecommitConfirmed", true);
+        SetField(script, "_justiceCustodyFallbackPrecommitPending", true);
+
+        const int now = 30001;
+        Invoke(script, "HandleJusticeCustodyTransferFailure", null, now);
+
+        Assert.AreEqual(JusticePhase.Transporting, state.Phase);
+        Assert.AreEqual("custody:timeout", state.CustodyEpisodeId);
+        Assert.AreEqual(0, state.CompletedOperationIds.Count,
+            "Le timeout ne doit créer aucune opération de remise en liberté.");
+        Assert.IsTrue(GetField<bool>(script, "_justiceCustodyTransferPending"));
+        Assert.AreEqual(1, GetField<int>(script, "_justiceCustodyTransferFailureCount"));
+        Assert.IsTrue(GetField<bool>(script, "_justiceCustodyTransferTimeoutLogged"));
+        Assert.IsTrue(GetField<bool>(script, "_justiceCustodyTransferPrecommitConfirmed"));
+        Assert.IsTrue(GetField<bool>(script, "_justiceCustodyFallbackPrecommitPending"));
+        int retryDelay = unchecked(
+            GetField<int>(script, "_justiceNextCustodyTransferAttemptAt") - now);
+        Assert.IsTrue(retryDelay > 0 && retryDelay <= 5000,
+            "Le retry doit rester cadencé et borné à cinq secondes.");
+    }
+
+    [TestMethod]
+    public void InventorySnapshotFailure_ImmediatelyUsesTheSafePreservedFallback()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        Type preparationType = GetNestedType("JusticeInventoryPreparationResult");
+        Type inventoryStateType = GetNestedType("JusticeInventoryCustodyState");
+        object retryableFailure = Enum.Parse(preparationType, "RetryableFailure");
+
+        SetField(
+            script,
+            "_justiceInventoryCustodyState",
+            Enum.Parse(inventoryStateType, "CapturePending"));
+        SetField(script, "_justiceWeaponSnapshot", null);
+        SetField(script, "_justiceInventoryRemoved", false);
+        SetField(script, "_justiceWeaponControlsLocked", false);
+        SetField(script, "_justiceDeferredInventoryRestore", false);
+
+        Assert.IsTrue((bool)Invoke(
+            script,
+            "CanContinueJusticeCustodyTransferWithoutInventoryConfiscation",
+            retryableFailure));
+
+        SetField(
+            script,
+            "_justiceInventoryCustodyState",
+            Enum.Parse(inventoryStateType, "RemovalPending"));
+        Assert.IsFalse((bool)Invoke(
+            script,
+            "CanContinueJusticeCustodyTransferWithoutInventoryConfiscation",
+            retryableFailure),
+            "Un retrait déjà engagé doit rester dans le chemin de retry durable.");
+
+        SetField(
+            script,
+            "_justiceInventoryCustodyState",
+            Enum.Parse(inventoryStateType, "UnsupportedPreserved"));
+        object preservedPreparation = Invoke(
+            script,
+            "EnsureJusticeInventoryReadyForCustodyTransfer",
+            null,
+            1000);
+        Assert.AreEqual("Ready", preservedPreparation.ToString(),
+            "Un fallback préservé rechargé ne doit pas relancer le snapshot.");
+
+        object snapshot = CreateValidatedEmptyWeaponSnapshot();
+        SetField(
+            script,
+            "_justiceInventoryCustodyState",
+            Enum.Parse(inventoryStateType, "RestoreAmbiguous"));
+        SetField(script, "_justiceWeaponSnapshot", snapshot);
+        SetField(script, "_justiceDeferredInventoryRestore", true);
+        object ambiguousPreparation = Invoke(
+            script,
+            "EnsureJusticeInventoryReadyForCustodyTransfer",
+            null,
+            1000);
+        Assert.AreEqual("Ready", ambiguousPreparation.ToString(),
+            "Un état ambigu durable ne doit jamais rejouer RemoveAll.");
+
+        JusticeCaseState custodyState = new JusticeCaseState
+        {
+            Enabled = true,
+            Phase = JusticePhase.Transporting,
+            CustodyEpisodeId = "custody:ambiguous"
+        };
+        SetField(script, "_justiceCaseState", custodyState);
+        SetField(script, "_justiceCustodyPlayerHandle", 42);
+        SetField(script, "_justiceCustodyPlayerModelHash", 84);
+        SetField(script, "_justiceCustodyPlayerSlot", 1);
+        SetField(script, "_justiceNextDeferredInventoryRestoreAt", 0);
+        Invoke(script, "RetryJusticeDeferredInventoryRestore", null, 1000);
+        Assert.AreEqual(42, GetField<int>(script, "_justiceCustodyPlayerHandle"));
+        Assert.AreEqual(84, GetField<int>(script, "_justiceCustodyPlayerModelHash"));
+        Assert.AreEqual(1, GetField<int>(script, "_justiceCustodyPlayerSlot"));
+        Assert.IsTrue(GetField<bool>(script, "_justiceDeferredInventoryRestore"),
+            "La restitution ambiguë doit attendre la libération réelle.");
+
+        string source = ReadCustodySource();
+        string fallback = ExtractMethodBody(
+            source,
+            "EnterJusticeNonDestructiveCustodyFallback");
+        Assert.IsFalse(fallback.Contains("TryRollbackJusticeCustodyTransfer"));
+        StringAssert.Contains(fallback, "détention maintenue");
+
+        string ensure = ExtractMethodBody(
+            source,
+            "EnsureJusticeInventoryReadyForCustodyTransfer");
+        AssertOrdered(
+            ensure,
+            "bool preservedInventoryReady",
+            "bool ambiguousInventoryReady",
+            "if (preservedInventoryReady || ambiguousInventoryReady)",
+            "return JusticeInventoryPreparationResult.Ready");
+
+        string confiscationRetry = ExtractMethodBody(
+            source,
+            "RetryJusticeInventoryConfiscationIfDue");
+        AssertOrdered(
+            confiscationRetry,
+            "JusticeInventoryCustodyState.UnsupportedPreserved",
+            "JusticeInventoryCustodyState.RestoreAmbiguous",
+            "JusticeInventoryCustodyState.RestorePending",
+            "return JusticeInventoryPreparationResult.Ready",
+            "RemoveJusticePlayerWeaponsSafe(player)");
+
+        string deferredRestore = ExtractMethodBody(
+            source,
+            "RetryJusticeDeferredInventoryRestore");
+        AssertOrdered(
+            deferredRestore,
+            "JusticeIsCustodyActive",
+            "return;",
+            "RestoreJusticeWeaponSnapshotMergeSafe(player, true, true)");
+    }
+
+    [TestMethod]
+    public void RemovedVerifiedInventory_IsTerminalDuringTheCustodyTick()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        Type inventoryStateType = GetNestedType("JusticeInventoryCustodyState");
+        object removedVerified = Enum.Parse(inventoryStateType, "RemovedVerified");
+        JusticeCaseState state = new JusticeCaseState
+        {
+            Enabled = true,
+            Phase = JusticePhase.Incarcerated,
+            CustodyEpisodeId = "custody:inventory-terminal"
+        };
+        SetField(script, "_justiceCaseState", state);
+        SetField(script, "_justiceWeaponSnapshot", CreateValidatedEmptyWeaponSnapshot());
+        SetField(script, "_justiceInventoryCustodyState", removedVerified);
+        SetField(script, "_justiceInventoryRemoved", true);
+        SetField(script, "_justiceWeaponControlsLocked", false);
+        SetField(script, "_justiceNextInventoryPersistenceRetryAt", 0);
+        SetField(script, "_justiceStateDirty", false);
+
+        object result = Invoke(
+            script,
+            "RetryJusticeInventoryConfiscationIfDue",
+            null,
+            1000);
+
+        Assert.AreEqual("Ready", result.ToString());
+        Assert.AreEqual(
+            "RemovedVerified",
+            GetField<object>(script, "_justiceInventoryCustodyState").ToString());
+        Assert.IsTrue(GetField<bool>(script, "_justiceInventoryRemoved"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceWeaponControlsLocked"));
+        Assert.IsFalse(
+            GetField<bool>(script, "_justiceStateDirty"),
+            "Le tick stable ne doit ni réarmer une barrière ni rejouer RemoveAll.");
+    }
+
+    [TestMethod]
+    public void CustodyTransferRollback_MigratesToRetryWithoutTechnicalRelease()
     {
         string source = ReadCustodySource();
         string rollback = ExtractMethodBody(source, "ResumeJusticeCustodyTransferRollback");
-        string transientRestore = ExtractMethodBody(
-            source,
-            "RestoreJusticeCustodyPlayerTransientStateForRollback");
 
         AssertOrdered(
             rollback,
-            "bool disciplineEnded = EndJusticeCustodyDiscipline(player)",
-            "RestoreJusticeCustodyPlayerTransientStateForRollback(player)",
-            "CleanupJusticeCustodyEntitiesAndGroups()",
-            "_justicePursuitActive = false",
-            "_justiceWantedEpisodeStartedAtMs = 0L");
-        AssertOrdered(
-            transientRestore,
-            "_justiceCustodyStoredFrozen = false",
-            "RestoreJusticeCustodyPlayerTransientState(player)",
-            "EnsureJusticeCustodyPlayerMobility(player)");
+            "HasJusticeCustodyOperation(JusticeOperationKind.TransferRollback)",
+            "CompletedOperationIds.Remove(rollbackId)",
+            "_justiceCaseState.Phase = JusticePhase.Transporting",
+            "_justiceCaseState.HasWarrant = false",
+            "_justiceCustodyRuntimeActive = true",
+            "_justiceCustodyTransferPending = true",
+            "_justiceCustodyResumePending = true",
+            "ResetJusticeCustodyTransferRetryState()",
+            "EnsureJusticeCustodyTransferRollbackPrecommitRedundant()",
+            "_justiceCustodyTransferRollbackFinalizationPending = false");
+        Assert.IsFalse(
+            rollback.Contains("RestoreJusticeInventoryForLegalRelease"),
+            "La migration historique ne doit jamais restituer l'inventaire d'un détenu.");
+        Assert.IsFalse(
+            rollback.Contains("RestoreJusticeCustodyPlayerTransientStateForRollback"),
+            "La migration ne doit jamais remettre le détenu en liberté dans le monde.");
+        Assert.IsFalse(
+            rollback.Contains("remise en liberté technique"),
+            "Le message et le comportement historiques doivent être supprimés.");
     }
 
     [TestMethod]
@@ -465,7 +700,7 @@ public sealed class JusticeCustodyHardeningTests
         AssertOrdered(
             transfer,
             "StoreJusticeCustodyPlayerState(player)",
-            "PersistJusticeCriticalPrecommitRedundantly()",
+            "_justiceCustodyTransferPrecommitConfirmed = true",
             "JusticeInventoryPreparationResult inventoryPreparation",
             "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
             "inventoryPreparation != JusticeInventoryPreparationResult.Ready",

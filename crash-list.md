@@ -1878,3 +1878,153 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Les dix comparaisons sont remplacées par `object.ReferenceEquals`, ce qui conserve la détection des états de placement partiels sans appeler un opérateur GTA. Le test de régression vérifie explicitement ce garde-fou pour la caméra de placement.
 - Vérification: `tools\run-safety-checks.ps1` réussit dans `TestResults\safety-20260829-231422` avec `481/481`; `dotnet build GTA5modDEV.sln -c Release` termine avec zéro avertissement/zéro erreur; `dotnet test GTA5modDEV.sln -c Release` réussit `481/481`. Le validateur ABI contrôle le livrable installé contre `NIBScriptHookVDotNet2.dll` avec `runtimeValidated=true`, `32` références de types et `189` références de membres.
 - Résolution: Le correctif d'immortalité reste appliqué et le livrable de test valide a remplacé l'ENdll, le PDB et le manifest GTA. Le manifest installé indique volontairement `sourceDirty=true`; la version précédente reste sauvegardée dans `TestResults\safety-20260829-231422\gta-predeploy-backup-20260829-231422`.
+
+## 2026-08-30 01:18:02 +02:00 - Assertion de contrat Justice sensible au retour à la ligne C#
+- Statut: Corrigé et validation complète réussie.
+- Contexte: Première exécution ciblée de `JusticeRuntimeContractTests` juste après l'application de `DonJ_GTA5_Justice_Prison_Respawn_Escape.patch`.
+- Symptôme: `RuntimeJustice_PoliceCustodyMaterializesExactlyOneMinimalCaseBeforeCapture` échouait car son assertion cherchait l'expression `HasJusticePoliceCustodyEvidence(...) || liveArrestEvidence` sur une seule ligne, alors que le code C# la met volontairement en forme sur deux lignes.
+- Sources vérifiées:
+  - `bug-reports\20260830-011749-echec-test-justice-prison-respawn-escape`;
+  - sortie de `dotnet test GTA5modDEV.sln -c Release --no-build --filter "FullyQualifiedName~JusticeRuntimeContractTests"`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.cs`;
+  - `tests\DonJEnemySpawner.Tests\JusticeRuntimeContractTests.cs`.
+- Extraits utiles: la première exécution signalait uniquement l'absence de la chaîne contiguë attendue; l'expression réellement présente est `HasJusticePoliceCustodyEvidence(wantedLevel, player, dead) ||` suivie de `liveArrestEvidence` à la ligne suivante.
+- Analyse / hypothèse: Défaut limité au test d'inspection source; la logique de preuve de capture policière et le code gameplay du patch ne sont pas en cause.
+- Action menée: L'assertion textuelle fragile est remplacée par une expression régulière qui accepte les espaces et retours à la ligne autour de l'opérateur `||`, sans relâcher le contrat fonctionnel contrôlé.
+- Vérification: Test ciblé réussi `72/72`; `dotnet build GTA5modDEV.sln -c Release` réussi sans avertissement ni erreur; `dotnet test GTA5modDEV.sln -c Release --no-build` réussi `483/483`; `tools\run-safety-checks.ps1` réussi `483/483` avec ABI NIB v2 valide.
+- Résolution: Le contrat reste strict sur la preuve policière et n'échoue plus à cause d'un formatage C# équivalent.
+
+## 2026-08-30 01:43:37 +02:00 - Libération technique après une mort policière avec peine de prison
+- Statut: Corrigé et validation complète locale réussie.
+- Contexte: Test réel de GTA V Enhanced après le correctif de respawn Justice. Le joueur est mort pendant une poursuite policière avec des étoiles et une peine calculée de 1 800 secondes.
+- Symptôme: Après le respawn GTA à l'hôpital, le mod affichait `transfert impossible, remise en liberté technique sous mandat` au lieu de transférer le joueur à Bolingbroke.
+- Sources vérifiées:
+  - `bug-reports\20260830-013408-justice-respawn-prison-evasion`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\NIBScriptHookVDotNet.log`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.log`;
+  - `C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts\DonJEnemySpawnerSaves\_justice_state.xml`;
+  - `src\DonJEnemySpawner\DonJEnemySpawner.Justice.Custody.cs`;
+  - `tests\DonJEnemySpawner.Tests\JusticeCustodyHardeningTests.cs` et `JusticeRuntimeContractTests.cs`.
+- Extraits utiles: Le runtime journalise successivement `Capture apres mort en poursuite`, trois snapshots d'inventaire indisponibles, `Inventaire incompatible après trois essais`, puis `Transfert annulé après timeout; inventaire rendu et dossier conservé sous mandat`. Le XML final portait `phase=AtLarge`, `warrant=true`, `sentenceSeconds=1800` et aucune détention active.
+- Analyse / hypothèse: La détection de la mort policière, le jugement et le choix de peine fonctionnaient. L'échec venait du fallback inventaire : un snapshot non lisible appelait explicitement le rollback de transfert, et le timeout générique créait le même rollback. Une panne technique annulait donc à tort la détention avant tout téléport vérifié.
+- Action menée: Le premier échec de snapshot entièrement non destructif bascule désormais vers un inventaire préservé, précommité avant le téléport. Les états préservés ou ambigus ne rejouent jamais `RemoveAll`; une restitution ambiguë attend la libération réelle. Le handler de transfert conserve la phase `Transporting`, rend le joueur mobile et retente avec un délai borné à cinq secondes sans créer de nouveau `TransferRollback`. La reprise des anciens WAL de rollback reste compatible. L'évasion demeure impossible tant que le joueur se trouve dans l'enveloppe extérieure de l'enceinte et exige six secondes continues réellement hors prison.
+- Vérification: Tests Justice ciblés réussis `93/93`, puis tests de durcissement `22/22`; `dotnet build GTA5modDEV.sln -c Release` réussi avec zéro avertissement et zéro erreur; `dotnet test GTA5modDEV.sln -c Release --no-build` réussi `485/485`; `tools\run-safety-checks.ps1` réussi `485/485` dans `TestResults\safety-20260830-015013`, avec contrat ABI NIB v2 valide (`32` types, `189` membres) et paquet `.ENdll` vérifié.
+- Résolution: Une mort ou arrestation policière ne peut plus devenir une remise en liberté technique à cause de l'inventaire ou du timeout. Le transfert reste obligatoire vers Mission Row ou Bolingbroke selon la peine, sous retries sécurisés jusqu'à confirmation physique.
+
+## 2026-08-30 01:58:34 +02:00 - Erreur de parsing du contrôle préalable au push
+- Statut: Corrigé; aucune commande distante ni mutation Git exécutée par la tentative fautive.
+- Contexte: Contrôle de propreté de la copie isolée avant le fast-forward de `origin/main`.
+- Symptôme: PowerShell a levé un `ParserError` avant d'exécuter la commande, car une apostrophe typographique dans le message d'exception a été interprétée comme un délimiteur de chaîne.
+- Sources vérifiées: sortie directe de la commande fautive et `bug-reports\20260830-015834-powershell-push-check-parser`.
+- Extraits utiles: `Unexpected token 'est' in expression or statement.`
+- Analyse / hypothèse: Défaut limité à la chaîne du diagnostic PowerShell; le commit, le dépôt distant, le package et les fichiers GTA n'ont pas été touchés.
+- Action menée: La relance utilise uniquement un message ASCII sans apostrophe ambiguë et conserve le push non forcé.
+- Vérification: La première commande s'est arrêtée au parseur avant `git fetch` et `git push`; le hash distant est relu après la relance.
+- Résolution: Incident d'outillage isolé, sans impact produit.
+
+## 2026-08-30 05:31:16 +02:00 - Respawn hôpital et transfert technique observés avec un ancien build installé
+- Statut: Diagnostiqué; correctifs source et tests validés, redéploiement live et preuve en jeu encore requis.
+- Contexte: Audit du signalement selon lequel une mort policière avec étoiles réapparaissait à l'hôpital puis aboutissait à « transfert impossible, remise en liberté technique sous mandat », alors que la peine devait conduire à Mission Row ou Bolingbroke.
+- Symptôme: GTA effectuait d'abord son respawn à l'hôpital; le mod reconnaissait ensuite la mort en poursuite, mais abandonnait le transfert après les retries d'inventaire et replaçait le dossier sous mandat. Le binaire live contrôlé pendant la passe était toujours l'ENdll installé à 01:55, antérieur aux changements non encore redéployés de l'audit courant.
+- Sources vérifiées:
+  - bug-reports\20260830-053450-safety-failure\raw-logs\Grand-Theft-Auto-V-Enhanced__Scripts__DonJCustomNpcPlacer.log;
+  - bug-reports\20260830-053450-safety-failure\raw-logs\Grand-Theft-Auto-V-Enhanced__NIBScriptHookVDotNet.log;
+  - C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.ENdll et manifest.json;
+  - src\DonJEnemySpawner\DonJEnemySpawner.Justice.Custody.cs et les tests Justice de détention/respawn.
+- Extraits utiles:
+  - log DonJ à 01:33:01: « Capture apres mort en poursuite », à 01:33:11: « Identité du protagoniste reliée après son respawn », puis à 01:33:57: « Transfert annulé après timeout; inventaire rendu et dossier conservé sous mandat »;
+  - le manifest live identifie le commit d8fc62c347d0409ca38beaf39cb9c2649363068f, un ENdll de 803328 octets et le SHA-256 5B0359F411A22C414CB78D58F4B2FF1DC35464D2414239B4C4B8AF8322CEB105;
+  - NIB recharge encore cet ENdll à 05:31:16, avant le redéploiement des corrections de la passe.
+- Analyse / hypothèse: Le passage transitoire par l'hôpital est le respawn GTA, mais le mod doit ensuite conserver un écran/holding fail-closed et rétablir physiquement la détention. Le message de remise en liberté venait de l'ancien chemin de fallback du build installé; ce binaire ne pouvait pas servir de preuve contre le code courant non encore déployé.
+- Action menée: L'état du binaire live a été comparé au worktree, puis les chemins de mort en détention, CustodyRebind, panne WAL et panne du writer asynchrone ont été durcis pour conserver la peine, suspendre sa progression hors enceinte et n'effectuer le fade-in qu'après confinement et mobilité vérifiés.
+- Vérification: Les tests ciblés de détention et de persistance sont verts, puis la chaîne stub safety-20260830-060440 réussit 571/571 avec contrat ABI valide. Le manifest live reste toutefois celui de l'ancien build au moment de cette entrée.
+- Résolution: Le défaut est fermé dans la source et verrouillé hors jeu; la résolution opérationnelle reste conditionnée à l'installation du nouveau package puis à une reproduction GTA confirmant le réveil au poste ou en prison selon la peine.
+
+## 2026-08-30 05:34:56 +02:00 - Safety 053450 arrêtée par quatre contrats Justice
+- Statut: Corrigé; la suite complète ultérieure est verte.
+- Contexte: Première passe globale tools\run-safety-checks.ps1 -UseStubApi après intégration concurrente des durcissements Justice, rapport bug-reports\20260830-053450-safety-failure et résultats TestResults\safety-20260830-053241.
+- Symptôme: La build Release et le contrôle ABI réussissaient, mais la suite MSTest terminait avec 4 échecs, 558 réussites et 562 tests au total.
+- Sources vérifiées:
+  - TestResults\safety-20260830-053241\logs\test-release.log et safety-tests.trx;
+  - TestResults\safety-20260830-053241\logs\verify-nib-abi.log;
+  - bug-reports\20260830-053450-safety-failure;
+  - JusticeCustodyHardeningTests.cs, JusticePreJudgmentHoldingTests.cs et JusticeRuntimeEdgeContractTests.cs.
+- Extraits utiles:
+  - DeferredAndShutdownRestore_AreExactDurableAndNeverRemoveAll: attendu 6 domaines, réel 7;
+  - CustodyMobility_IsVerifiedAfterTeleportAndRepairedBeforeSentenceProgress: marqueur player.FreezePosition = false absent ou désordonné;
+  - PreJudgmentHolding_AcceptsOnlyProvenCustomModelAndPreservesIntentOnHeroSwitch: Assert.IsFalse échoue;
+  - LoadedPursuitWithoutWanted_BecomesWarrantWithoutCreatingACharge: l'ancienne attente exigeait un mandat immédiat pour Surrendering sans étoile.
+- Analyse / hypothèse: Trois assertions d'inspection décrivaient une structure intermédiaire devenue obsolète pendant l'extraction des helpers et la reprise différée de Surrendering. Le scénario holding révélait en plus que l'identité custom contradictoire et le changement de protagoniste devaient être traités explicitement sans perdre l'intention propriétaire.
+- Action menée: Les contrats ont été réalignés sur les helpers exécutables et l'état final des domaines de nettoyage; la détention pré-jugement conserve l'intention lors d'un switch de héros et refuse un modèle custom non prouvé; la reprise Surrendering attend sa sonde BUSTED sans inventer de charge ni forcer prématurément un mandat.
+- Vérification: L'échec est reproduit exactement à 4/562 dans le TRX. Les passes ciblées suivantes corrigent ces quatre cas et la safety finale safety-20260830-060440 réussit 571/571; le validateur ABI confirme 32 types et 189 membres.
+- Résolution: Aucun échec de cette passe ne subsiste dans la suite finale; aucune donnée GTA live n'a été mutée par la safety.
+
+## 2026-08-30 05:41:32 +02:00 - Safety 054118 avec trois échecs dont un writer asynchrone résiduel
+- Statut: Corrigé; contrats stabilisés et isolation asynchrone validée.
+- Contexte: Deuxième passe globale stub après correction des quatre échecs précédents, rapport bug-reports\20260830-054118-safety-failure et résultats TestResults\safety-20260830-053830.
+- Symptôme: La suite terminait avec 3 échecs, 559 réussites et 562 tests. Deux inspections source ne correspondaient plus au code refactoré; JusticePersistence_AFailureIsRateLimitedAndRetriesAfterOneSecond attendait 0 mais observait 2100 après 30 secondes.
+- Sources vérifiées:
+  - TestResults\safety-20260830-053830\logs\test-release.log et safety-tests.trx;
+  - TestResults\safety-20260830-053830\logs\verify-nib-abi.log;
+  - bug-reports\20260830-054118-safety-failure;
+  - JusticeRuntimeContractTests.cs, JusticeVoluntaryPaymentTests.cs et le repository de persistance Justice.
+- Extraits utiles:
+  - CustodyRespawn_MaskPrecedesPersistenceAndSurvivesBlockedTicks: marqueur Ped player = null absent ou désordonné;
+  - CustodyReload_PreservesPendingConfiscationAndWaitsForDisciplineBeforeRelease: attendu 7 domaines de nettoyage, réel 6;
+  - JusticePersistence_AFailureIsRateLimitedAndRetriesAfterOneSecond: attendu 0, réel 2100, durée 30 s.
+- Analyse / hypothèse: Les deux premiers défauts étaient des contrats textuels rattrapés par l'extraction d'un helper et la stabilisation du nettoyage final. Le troisième provenait d'un échec asynchrone ancien encore observable après le test qui l'avait créé; ce stale async failure contaminait la mesure de cadence du fixture suivant sans constituer une panne runtime reproductible.
+- Action menée: Les inspections ont été déplacées vers les helpers réellement responsables. Les fixtures de persistance attendent et isolent désormais la fin du writer et de ses diagnostics avant de mesurer le retry suivant, afin qu'aucun état asynchrone d'un test précédent ne traverse la frontière du scénario.
+- Vérification: L'échec initial est conservé dans le TRX à 3/562. Le filtre ciblé passe ensuite de 118/120 à 120/120 et safety-20260830-060440 termine à 571/571 avec build et ABI verts.
+- Résolution: Les assertions obsolètes et la contamination temporelle sont supprimées; aucun relâchement du contrat métier ni acceptation d'une panne writer réelle n'a été introduit.
+
+## 2026-08-30 05:47:06 +02:00 - Premier glob de chemins refusé par rg sous Windows
+- Statut: Résolu immédiatement; recherche relancée avec des filtres compatibles.
+- Contexte: Recherche read-only des fronts Justice dans plusieurs fichiers source et tests pendant l'analyse CustodyRebind.
+- Symptôme: rg a reçu directement les opérandes src/DonJEnemySpawner/DonJEnemySpawner.Justice*.cs et tests/DonJEnemySpawner.Tests/Justice*Tests.cs; Windows a répondu deux fois « La syntaxe du nom de fichier, de répertoire ou de volume est incorrecte. (os error 123) ».
+- Sources vérifiées: sortie directe de rg, arborescence confirmée par rg --files, puis mêmes motifs recherchés depuis les dossiers parents.
+- Extraits utiles: les deux chemins contenant un astérisque ont été transmis littéralement à rg au lieu d'être développés par PowerShell.
+- Analyse / hypothèse: Sur cette invocation Windows, le shell n'expanse pas ces globs de chemins comme attendu; rg tente donc d'ouvrir un nom Windows invalide. Le code et les tests recherchés ne sont pas en cause.
+- Action menée: Les relances utilisent les dossiers comme racines et les options -g DonJEnemySpawner.Justice*.cs et -g Justice*Tests.cs, ou des chemins exacts obtenus avec rg --files.
+- Vérification: Les recherches corrigées retournent les occurrences attendues sans os error 123 et sans écriture fichier.
+- Résolution: Incident d'outillage read-only clos; aucun résultat produit ni fichier du projet n'a été altéré.
+
+## 2026-08-30 05:54:00 +02:00 - Second glob mixte refusé par rg sous Windows
+- Statut: Résolu immédiatement; aucune incidence sur le diagnostic.
+- Contexte: Recherche complémentaire du reset de holding et des nouveaux latches après une première édition de Custody.cs.
+- Symptôme: Une commande mélangeait le fichier exact DonJEnemySpawner.Justice.Custody.cs avec l'opérande src/DonJEnemySpawner/DonJEnemySpawner.Justice*.cs. rg a bien traité le fichier exact mais a de nouveau émis os error 123 pour le chemin wildcard littéral.
+- Sources vérifiées: sortie directe de la commande, résultats partiels du chemin exact et liste rg --files du dossier src\DonJEnemySpawner.
+- Extraits utiles: « rg: src/DonJEnemySpawner/DonJEnemySpawner.Justice*.cs: La syntaxe du nom de fichier, de répertoire ou de volume est incorrecte. (os error 123) ».
+- Analyse / hypothèse: Même cause Windows que le premier incident, reproduite par un second opérande glob direct; les occurrences affichées depuis Custody.cs restaient valides mais la recherche multi-fichier était incomplète.
+- Action menée: Le wildcard de chemin a été supprimé et remplacé par une racine de dossier assortie de -g, puis les fichiers sensibles ont été relus par chemins exacts avant édition.
+- Vérification: La recherche de remplacement couvre toutes les sources Justice visées sans erreur; le diff fonctionnel a ensuite été vérifié séparément.
+- Résolution: Deuxième incident rg clos, limité à une commande de lecture et sans mutation.
+
+## 2026-08-30 06:02:12 +02:00 - Filtre ciblé à 118/120 après stabilisation des helpers Justice
+- Statut: Corrigé; même filtre relancé à 120/120.
+- Contexte: Validation ciblée des contrats Justice après extraction du helper de restauration et introduction du streaming staged pour le holding de détention.
+- Symptôme: La première exécution réussissait 118 tests sur 120. Les deux seuls échecs étaient des inspections source encore attachées à l'ancien emplacement du code.
+- Sources vérifiées:
+  - sortie console des deux exécutions ciblées;
+  - tests\DonJEnemySpawner.Tests\JusticeCustodyHardeningTests.cs;
+  - tests\DonJEnemySpawner.Tests\JusticeRuntimeContractTests.cs;
+  - src\DonJEnemySpawner\DonJEnemySpawner.Justice.Custody.cs.
+- Extraits utiles: première exécution 118/120, puis relance du même filtre 120/120. Aucun fichier TRX dédié n'a été conservé pour ces deux commandes ciblées.
+- Analyse / hypothèse: Le comportement runtime n'avait pas régressé. Une inspection cherchait encore la restauration dans l'ancien corps de méthode; l'autre supposait un téléport immédiat alors que le holding charge désormais sol et collision par étapes.
+- Action menée: Le premier contrat vérifie le helper de restauration exécutable; le second fixture simule explicitement un sol valide et une collision chargée tout en conservant stricts les autres retours natifs.
+- Vérification: Le même ensemble de 120 tests est relancé sans élargir les assertions et réussit 120/120; la safety globale suivante confirme 571/571.
+- Résolution: Deux faux négatifs de tests supprimés; le contrat couvre désormais la structure et le streaming réellement exécutés.
+
+## 2026-08-30 06:04:07 +02:00 - Safety 060359 refusée par une surcharge native hors contrat ABI
+- Statut: Corrigé; ABI et safety globale validées.
+- Contexte: Passe TestResults\safety-20260830-060352 après ajout de la vérification du sol du holding pré-jugement.
+- Symptôme: Le build Release réussissait, mais le validateur arrêtait la chaîne avant les tests avec ABI040 sur Function.Call générique recevant Hash puis six InputArgument séparés.
+- Sources vérifiées:
+  - TestResults\safety-20260830-060352\safety-failure.txt;
+  - bug-reports\20260830-060359-safety-failure;
+  - src\DonJEnemySpawner\DonJEnemySpawner.Justice.Custody.cs, méthode IsJusticePreJudgmentHoldingGroundReady;
+  - TestResults\safety-20260830-060440\logs\verify-nib-abi.log et test-release.log.
+- Extraits utiles: ABI040 identifie generic=1, return=!!0 et params=Hash suivi de six InputArgument; cette forme correspondait à une surcharge CLR fixe non autorisée par le contrat NIB v2.
+- Analyse / hypothèse: L'écriture syntaxique de six arguments permettait au compilateur du stub de sélectionner une surcharge d'arité fixe absente du contrat live, au lieu de la seule forme validée Function.Call<T>(Hash, params InputArgument[]).
+- Action menée: Les six valeurs sont construites dans un InputArgument[] explicite, puis ce lot unique est passé à Function.Call<bool>. Aucun assouplissement du validateur ABI n'a été effectué.
+- Vérification: La relance safety-20260830-060440 valide 32 références de types et 189 références de membres, compile sans erreur puis réussit 571/571; son résumé porte Statut: OK.
+- Résolution: Le nouvel appel natif est lié à la surcharge params réellement disponible dans NIB 2.11.6 et la régression ABI est bloquée par la chaîne de sécurité.

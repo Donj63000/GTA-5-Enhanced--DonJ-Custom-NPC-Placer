@@ -40,6 +40,83 @@ public sealed class JusticeWalRecoveryTests
     }
 
     [TestMethod]
+    public void Wal_HasOpenTransactionKindDistinguishesOpenAndTerminalWithoutListAllocation()
+    {
+        string directory = CreateTempDirectory();
+        string path = Path.Combine(directory, "justice.wal");
+        try
+        {
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(path);
+            wal.Append(Record(
+                "profile-reset:one",
+                "ProfileResetResult",
+                JusticeWalState.Prepared,
+                1L));
+            wal.Append(Record(
+                "payment:other",
+                "voluntary-fine",
+                JusticeWalState.Prepared,
+                1L));
+
+            Assert.IsTrue(wal.HasOpenTransactionKind("ProfileResetResult"));
+            Assert.IsTrue(wal.HasOpenTransactionKind("voluntary-fine"));
+            Assert.IsFalse(wal.HasOpenTransactionKind("DeathFront"));
+
+            wal.Append(Record(
+                "profile-reset:one",
+                "ProfileResetResult",
+                JusticeWalState.Rejected,
+                1L));
+            Assert.IsFalse(
+                wal.HasOpenTransactionKind("ProfileResetResult"),
+                "Une transaction terminale ne doit plus bloquer son type.");
+            Assert.IsTrue(
+                wal.HasOpenTransactionKind("voluntary-fine"),
+                "La terminaison d'un type ne doit pas masquer les autres ouverts.");
+
+            JusticeWriteAheadLog reloaded = new JusticeWriteAheadLog(path);
+            Assert.IsFalse(reloaded.HasOpenTransactionKind("ProfileResetResult"));
+            Assert.IsTrue(reloaded.HasOpenTransactionKind("voluntary-fine"));
+
+            string walSource = File.ReadAllText(Path.Combine(
+                GetRepositoryRoot(),
+                "src",
+                "DonJEnemySpawner",
+                "DonJEnemySpawner.Justice.Wal.cs"));
+            string kindReader = ExtractSourceMethod(
+                walSource,
+                "internal bool HasOpenTransactionKind(string operationKind)");
+            StringAssert.Contains(kindReader, "_latestByTransaction");
+            Assert.IsFalse(
+                kindReader.Contains("GetOpenTransactions("),
+                "Le prédicat par type ne doit pas matérialiser la liste triée.");
+            Assert.IsFalse(
+                kindReader.Contains("new List<JusticeWalRecord>"),
+                "La lecture chaude doit rester sans allocation de liste.");
+
+            string resetSource = File.ReadAllText(Path.Combine(
+                GetRepositoryRoot(),
+                "src",
+                "DonJEnemySpawner",
+                "DonJEnemySpawner.Justice.Persistence.ProfileReset.cs"));
+            string resetGuard = ExtractSourceMethod(
+                resetSource,
+                "private bool HasOpenJusticeProfileResetWal()");
+            StringAssert.Contains(resetGuard, "HasOpenTransactionKind(");
+            StringAssert.Contains(
+                resetGuard,
+                "JusticeProfileResetWalOperationKind");
+            Assert.IsFalse(
+                resetGuard.Contains("GetOpenTransactions("),
+                "Le garde appelé à chaque tick doit utiliser le prédicat WAL sans allocation.");
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [TestMethod]
     public void Wal_RejectsSkippedChangedAndPostTerminalTransitions()
     {
         string directory = CreateTempDirectory();
@@ -348,9 +425,22 @@ public sealed class JusticeWalRecoveryTests
 
     private static JusticeWalRecord Record(JusticeWalState state, long persistenceRevision)
     {
-        return new JusticeWalRecord(
+        return Record(
             "payment:one",
             "voluntary-fine",
+            state,
+            persistenceRevision);
+    }
+
+    private static JusticeWalRecord Record(
+        string transactionId,
+        string operationKind,
+        JusticeWalState state,
+        long persistenceRevision)
+    {
+        return new JusticeWalRecord(
+            transactionId,
+            operationKind,
             0,
             state,
             persistenceRevision,
@@ -372,6 +462,46 @@ public sealed class JusticeWalRecoveryTests
         string path = Path.Combine(Path.GetTempPath(), "DonJJusticeWal-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static string ExtractSourceMethod(string source, string signature)
+    {
+        int start = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.IsTrue(start >= 0, "Méthode source absente : " + signature);
+        int openingBrace = source.IndexOf('{', start);
+        Assert.IsTrue(openingBrace > start, "Corps source absent : " + signature);
+        int depth = 0;
+        for (int index = openingBrace; index < source.Length; index++)
+        {
+            if (source[index] == '{')
+            {
+                depth++;
+            }
+            else if (source[index] == '}' && --depth == 0)
+            {
+                return source.Substring(start, index - start + 1);
+            }
+        }
+
+        Assert.Fail("Corps source incomplet : " + signature);
+        return string.Empty;
+    }
+
+    private static string GetRepositoryRoot()
+    {
+        DirectoryInfo directory = new DirectoryInfo(
+            AppDomain.CurrentDomain.BaseDirectory);
+        while (directory != null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "GTA5modDEV.sln")))
+            {
+                return directory.FullName;
+            }
+            directory = directory.Parent;
+        }
+
+        Assert.Fail("Racine du dépôt GTA5modDEV introuvable.");
+        return string.Empty;
     }
 
     private sealed class OneShotWalFaultInjector : IJusticePersistenceFaultInjector

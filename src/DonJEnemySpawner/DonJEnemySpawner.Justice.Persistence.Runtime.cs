@@ -11,6 +11,8 @@ public sealed partial class DonJEnemySpawner
 {
     private const int JusticePersistenceFlushTimeoutMs = 2500;
     private const int JusticePersistenceTestFlushTimeoutMs = 30000;
+    private const int JusticePersistenceInitializationRetryMinimumMs = 1000;
+    private const int JusticePersistenceInitializationRetryMaximumMs = 30000;
     private const string JusticeWalFileName = "_justice_state.wal";
     private const string JusticeV1MigrationBackupFileName = "_justice_state.v1.bak";
 
@@ -21,6 +23,9 @@ public sealed partial class DonJEnemySpawner
     private long[] _justiceProfilePersistenceGenerations;
     private int _justiceLoadedSchemaMajor = JusticeStateVersion;
     private bool _justicePersistenceServicesUnavailable;
+    private bool _justicePersistenceInitializationFailurePermanent;
+    private int _justicePersistenceInitializationFailureCount;
+    private long _justiceNextPersistenceInitializationRetryAtMs;
     private string _justicePersistenceLastError = string.Empty;
     private long _justiceLastPersistenceCompletedAtUtcTicks;
     private long _justiceObservedRepositoryWriteFailures;
@@ -47,13 +52,21 @@ public sealed partial class DonJEnemySpawner
 
     private void InitializeJusticePersistenceServices()
     {
-        if (_justiceRepository != null || _justicePersistenceServicesUnavailable)
+        if (_justiceRepository != null)
+        {
+            return;
+        }
+        if (_justicePersistenceServicesUnavailable &&
+            (_justicePersistenceInitializationFailurePermanent ||
+             _justiceMonotonicTimeMs <
+                _justiceNextPersistenceInitializationRetryAtMs))
         {
             return;
         }
 
         try
         {
+            _justicePersistenceServicesUnavailable = false;
             EnsureJusticeProfilePersistenceGenerations();
             string directory = GetSaveDirectory();
             Directory.CreateDirectory(directory);
@@ -79,12 +92,48 @@ public sealed partial class DonJEnemySpawner
                 new JusticeXmlPersistenceCodec(),
                 Math.Max(0L, _justicePersistenceRevision));
             _justiceRepository.Start();
+            FinalizeJusticeWalTransactionsWhoseSnapshotIsDurable();
             _justicePersistenceServicesUnavailable = false;
+            _justicePersistenceInitializationFailurePermanent = false;
+            _justicePersistenceInitializationFailureCount = 0;
+            _justiceNextPersistenceInitializationRetryAtMs = 0L;
             _justicePersistenceLastError = string.Empty;
         }
         catch (Exception exception)
         {
+            JusticeRepository failedRepository = _justiceRepository;
+            _justiceRepository = null;
+            if (failedRepository != null)
+            {
+                try
+                {
+                    failedRepository.Stop(TimeSpan.FromMilliseconds(
+                        JusticePersistenceFlushTimeoutMs));
+                    failedRepository.Dispose();
+                }
+                catch
+                {
+                    // Je conserve l'erreur d'initialisation d'origine. Le nettoyage
+                    // défensif d'un writer partiellement créé ne doit pas la masquer.
+                }
+            }
+            _justiceWriteAheadLog = null;
             _justicePersistenceServicesUnavailable = true;
+            _justicePersistenceInitializationFailurePermanent =
+                exception is InvalidDataException || exception is XmlException;
+            _justicePersistenceInitializationFailureCount = Math.Min(
+                30,
+                _justicePersistenceInitializationFailureCount + 1);
+            int exponent = Math.Min(
+                5,
+                Math.Max(0, _justicePersistenceInitializationFailureCount - 1));
+            long retryDelay = Math.Min(
+                JusticePersistenceInitializationRetryMaximumMs,
+                (long)JusticePersistenceInitializationRetryMinimumMs << exponent);
+            _justiceNextPersistenceInitializationRetryAtMs =
+                _justiceMonotonicTimeMs >= long.MaxValue - retryDelay
+                    ? long.MaxValue
+                    : _justiceMonotonicTimeMs + retryDelay;
             _justicePersistenceLastError = exception.GetType().Name + ": " + exception.Message;
             LogException("Justice.Repository.Initialisation", exception);
         }
@@ -189,7 +238,6 @@ public sealed partial class DonJEnemySpawner
             RegisterJusticePersistenceFailure("checkpoint refusé par le repository");
             return;
         }
-        MarkAttemptedJusticeWalTransactionsResultQueued(snapshot.Revision);
         FinalizeJusticeWalTransactionsWhoseSnapshotIsDurable();
     }
 
@@ -224,7 +272,6 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        MarkAttemptedJusticeWalTransactionsResultQueued(snapshot.Revision);
         FinalizeJusticeWalTransactionsWhoseSnapshotIsDurable();
         return true;
     }
@@ -264,6 +311,17 @@ public sealed partial class DonJEnemySpawner
         }
 
         _justiceObservedRepositoryWriteFailures = diagnostics.WriteFailures;
+        if (diagnostics.IsCaughtUp &&
+            diagnostics.DiskRevision >= _justiceLastQueuedPersistenceRevision &&
+            string.IsNullOrWhiteSpace(diagnostics.LastError))
+        {
+            // Je peux observer tardivement les échecs d'une ancienne révision
+            // après que sa remplaçante valide a déjà atteint le disque. Dans ce
+            // cas le repository est revenu à un état sain : je n'arme pas un
+            // nouveau délai de retry contre une panne désormais acquittée.
+            return false;
+        }
+
         RegisterJusticePersistenceFailure(
             "writer asynchrone: " +
             (string.IsNullOrWhiteSpace(diagnostics.LastError)
@@ -274,12 +332,9 @@ public sealed partial class DonJEnemySpawner
 
     private bool PersistJusticeCriticalPrecommitToWal(string caller)
     {
-        if (_justicePersistenceServicesUnavailable)
-        {
-            return false;
-        }
         InitializeJusticePersistenceServices();
-        if (_justiceRepository == null || _justiceWriteAheadLog == null)
+        if (_justiceRepository == null || _justiceWriteAheadLog == null ||
+            _justicePersistenceServicesUnavailable)
         {
             return false;
         }
@@ -316,7 +371,12 @@ public sealed partial class DonJEnemySpawner
         JusticePersistenceSnapshot snapshot;
         if (!TryCaptureJusticePersistenceSnapshot(out snapshot))
         {
-            RegisterJusticePersistenceFailure("capture du précommit impossible");
+            string captureError = _justicePersistenceLastError;
+            RegisterJusticePersistenceFailure(
+                "capture du précommit impossible" +
+                (string.IsNullOrWhiteSpace(captureError)
+                    ? string.Empty
+                    : " : " + captureError));
             return false;
         }
 
@@ -1026,18 +1086,55 @@ public sealed partial class DonJEnemySpawner
 
         try
         {
-            // Le snapshot complet est déjà relu et validé sur disque. Le thread
-            // GTA n'écrit maintenant que deux petites frames bornées : Prepared,
-            // puis Attempted immédiatement avant l'effet externe.
-            _justiceWriteAheadLog.Append(prepared);
-            _justiceWriteAheadLog.Append(new JusticeWalRecord(
-                prepared.TransactionId,
-                prepared.OperationKind,
-                prepared.ProfileSlot,
-                JusticeWalState.Attempted,
-                prepared.PersistenceRevision,
-                prepared.CreatedAtUtcTicks,
-                prepared.Fields));
+            JusticeWalRecord latest = _justiceWriteAheadLog.GetLatest(
+                prepared.TransactionId);
+            if (latest != null &&
+                !IsJusticeCriticalBarrierWalRecordExact(latest))
+            {
+                throw new InvalidDataException(
+                    "La frontière WAL durable ne correspond plus à sa barrière runtime.");
+            }
+
+            // Le snapshot complet est déjà relu et validé sur disque. Je reprends
+            // chaque frame séparément : une panne après Flush peut avoir rendu la
+            // transition durable sans rendre son acquittement à l'appelant.
+            if (latest == null)
+            {
+                latest = _justiceWriteAheadLog.Append(prepared);
+            }
+            if (latest.State == JusticeWalState.Prepared)
+            {
+                if (latest.PersistenceRevision != _justiceCriticalBarrierRevision)
+                {
+                    throw new InvalidDataException(
+                        "La révision Prepared ne correspond plus à sa barrière runtime.");
+                }
+                latest = _justiceWriteAheadLog.Append(new JusticeWalRecord(
+                    prepared.TransactionId,
+                    prepared.OperationKind,
+                    prepared.ProfileSlot,
+                    JusticeWalState.Attempted,
+                    prepared.PersistenceRevision,
+                    prepared.CreatedAtUtcTicks,
+                    prepared.Fields));
+            }
+            if (latest.State == JusticeWalState.Rejected)
+            {
+                // Le propriétaire n'a reçu aucun droit d'effet. Je libère la
+                // barrière, puis son prochain tick préparera une nouvelle révision.
+                ClearJusticeCriticalBarrier();
+                return false;
+            }
+            if (latest.State != JusticeWalState.Attempted ||
+                latest.PersistenceRevision != _justiceCriticalBarrierRevision)
+            {
+                throw new InvalidDataException(
+                    "La frontière WAL n'est pas reprenable avant son effet.");
+            }
+
+            // Une barrière runtime encore présente avec Attempted prouve que
+            // l'acquittement de cette Append a été perdu : Clear précède toujours
+            // le seul return true qui autorise le propriétaire à agir.
             ClearJusticeCriticalBarrier();
             return true;
         }
@@ -1050,6 +1147,43 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
+    private bool IsJusticeCriticalBarrierWalRecordExact(JusticeWalRecord record)
+    {
+        return record != null &&
+               string.Equals(
+                   record.TransactionId,
+                   _justiceCriticalBarrierTransactionId,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   record.OperationKind,
+                   _justiceCriticalBarrierOperationKind,
+                   StringComparison.Ordinal) &&
+               record.ProfileSlot == _justiceCriticalBarrierProfileSlot &&
+               record.PersistenceRevision >= _justiceCriticalBarrierRevision &&
+               record.CreatedAtUtcTicks == _justiceCriticalBarrierCreatedAtUtcTicks &&
+               HasExactJusticeWalFields(
+                   record,
+                   "snapshotRevision",
+                   "profileGeneration",
+                   "identityKey",
+                   "boundary",
+                   "schemaMajor") &&
+               ReadWalLong(record, "snapshotRevision", -1L) ==
+                   _justiceCriticalBarrierRevision &&
+               ReadWalLong(record, "profileGeneration", -1L) ==
+                   _justiceCriticalBarrierProfileGeneration &&
+               string.Equals(
+                   ReadWalString(record, "identityKey", string.Empty),
+                   _justiceCriticalBarrierIdentityKey,
+                   StringComparison.Ordinal) &&
+               string.Equals(
+                   ReadWalString(record, "boundary", string.Empty),
+                   _justiceCriticalBarrierCaller,
+                   StringComparison.Ordinal) &&
+               ReadWalInt(record, "schemaMajor", -1) ==
+                   JusticeXmlPersistenceCodec.SchemaMajor;
+    }
+
     private void ClearJusticeCriticalBarrier()
     {
         _justiceCriticalBarrierCaller = string.Empty;
@@ -1060,6 +1194,68 @@ public sealed partial class DonJEnemySpawner
         _justiceCriticalBarrierProfileGeneration = 0L;
         _justiceCriticalBarrierCreatedAtUtcTicks = 0L;
         _justiceCriticalBarrierProfileSlot = -1;
+    }
+
+    private bool TryRejectJusticeCriticalBarrierBeforeCustodyDeath()
+    {
+        if (_justiceCriticalBarrierRevision <= 0L)
+        {
+            return true;
+        }
+        if (_justiceWriteAheadLog == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            JusticeWalRecord latest = _justiceWriteAheadLog.GetLatest(
+                _justiceCriticalBarrierTransactionId);
+            if (latest != null &&
+                !IsJusticeCriticalBarrierWalRecordExact(latest))
+            {
+                throw new InvalidDataException(
+                    "La frontière WAL du décès ne correspond plus à sa barrière runtime.");
+            }
+            if (latest != null &&
+                (latest.State == JusticeWalState.Ambiguous ||
+                 latest.State == JusticeWalState.Confirmed))
+            {
+                // Je refuse d'effacer une preuve disant que l'effet a pu
+                // commencer. Ce cas anormal reste bloqué pour être repris par
+                // son contrôleur au lieu d'inventer un état de décès concurrent.
+                return false;
+            }
+            if (latest != null &&
+                (latest.State == JusticeWalState.Prepared ||
+                 latest.State == JusticeWalState.Attempted))
+            {
+                // La barrière runtime prouve que le contrôleur n'a pas reçu le
+                // droit de franchir cette frontière, même si l'ACK Attempted a été
+                // perdu après Flush. Je ferme la frame avant de publier le décès.
+                _justiceWriteAheadLog.Append(new JusticeWalRecord(
+                    latest.TransactionId,
+                    latest.OperationKind,
+                    latest.ProfileSlot,
+                    JusticeWalState.Rejected,
+                    latest.PersistenceRevision,
+                    latest.CreatedAtUtcTicks,
+                    latest.Fields));
+            }
+
+            ClearJusticeCriticalBarrier();
+            LogInfo(
+                "Justice.WAL.Deces",
+                "Frontière critique sans effet rejetée avant persistance du décès en détention.");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            RegisterJusticePersistenceFailure(
+                "rejet de la frontière critique avant décès impossible");
+            LogException("Justice.WAL.Deces", exception);
+            return false;
+        }
     }
 
     private bool TryRejectJusticeCriticalBarrierForProfileChange(int nextProfileSlot)
@@ -1126,6 +1322,14 @@ public sealed partial class DonJEnemySpawner
             if (_justiceRepository == null || _justicePersistenceServicesUnavailable)
             {
                 return false;
+            }
+
+            if (HasJusticeDeathFrontPersistenceWork())
+            {
+                // Je qualifie d'abord toute révision déjà terminée par le writer.
+                // Une nouvelle capture ne peut ainsi ni masquer ni déplacer une
+                // preuve résultat qui vient d'atteindre le disque.
+                FinalizeJusticeWalTransactionsWhoseSnapshotIsDurable();
             }
 
             PrepareJusticeActiveProfileForPersistence();
@@ -1280,6 +1484,9 @@ public sealed partial class DonJEnemySpawner
         _justiceNextStateSaveAtMs = 0L;
         _justiceNextCheckpointAtMs = _justiceMonotonicTimeMs + JusticeStateCheckpointMs;
         _justiceNextStateFlushAttemptAtMs = 0L;
+
+        TrackJusticeDeathFrontResultSnapshots(snapshot);
+        TrackJusticeProfileResetResultSnapshots(snapshot);
 
         bool persisted = true;
         if (waitForDisk)
@@ -1557,38 +1764,43 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
-    private void MarkAttemptedJusticeWalTransactionsResultQueued(long snapshotRevision)
+    private void MarkAttemptedJusticeWalTransactionsWhoseResultIsDurable(
+        long diskRevision)
     {
-        if (_justiceWriteAheadLog == null)
+        if (_justiceWriteAheadLog == null || diskRevision <= 0L)
         {
             return;
         }
-        try
+
+        IReadOnlyList<JusticeWalRecord> open =
+            _justiceWriteAheadLog.GetOpenTransactions();
+        for (int index = 0; index < open.Count; index++)
         {
-            IReadOnlyList<JusticeWalRecord> open =
-                _justiceWriteAheadLog.GetOpenTransactions();
-            for (int index = 0; index < open.Count; index++)
-            {
-                JusticeWalRecord record = open[index];
-                if (record.State != JusticeWalState.Attempted ||
-                    snapshotRevision <= record.PersistenceRevision)
-                {
-                    continue;
-                }
-                _justiceWriteAheadLog.Append(new JusticeWalRecord(
-                    record.TransactionId,
+            JusticeWalRecord record = open[index];
+            if (record.State != JusticeWalState.Attempted ||
+                string.Equals(
                     record.OperationKind,
-                    record.ProfileSlot,
-                    JusticeWalState.Ambiguous,
-                    snapshotRevision,
-                    record.CreatedAtUtcTicks,
-                    record.Fields));
+                    JusticeDeathFrontOperationKind,
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    record.OperationKind,
+                    JusticeProfileResetWalOperationKind,
+                    StringComparison.Ordinal) ||
+                diskRevision <= record.PersistenceRevision)
+            {
+                continue;
             }
-        }
-        catch (Exception exception)
-        {
-            _justicePersistenceLastError = exception.GetType().Name + ": " + exception.Message;
-            LogException("Justice.WAL.Resultat", exception);
+            _justiceWriteAheadLog.Append(new JusticeWalRecord(
+                record.TransactionId,
+                record.OperationKind,
+                record.ProfileSlot,
+                JusticeWalState.Ambiguous,
+                diskRevision,
+                record.CreatedAtUtcTicks,
+                record.Fields));
+            // Je programme la rotation suivante qui prouvera que le backup
+            // contient lui aussi le résultat avant la confirmation terminale.
+            JusticeMarkStateDirty();
         }
     }
 
@@ -1601,16 +1813,51 @@ public sealed partial class DonJEnemySpawner
         try
         {
             long diskRevision = _justiceRepository.GetDiagnostics().DiskRevision;
+            AdvanceJusticeDeathFrontWalResults(diskRevision);
+            AdvanceJusticeProfileResetWalResults(diskRevision);
+            // Je ne qualifie jamais un résultat sur la seule acceptation du
+            // writer. La révision qui acquitte l'effet doit déjà être relue sur
+            // disque, sinon un crash pourrait faire référencer un XML inexistant.
+            MarkAttemptedJusticeWalTransactionsWhoseResultIsDurable(
+                diskRevision);
             IReadOnlyList<JusticeWalRecord> open =
                 _justiceWriteAheadLog.GetOpenTransactions();
             for (int index = 0; index < open.Count; index++)
             {
                 JusticeWalRecord record = open[index];
                 if (record.State != JusticeWalState.Ambiguous ||
-                    record.PersistenceRevision > diskRevision)
+                    string.Equals(
+                        record.OperationKind,
+                        JusticeDeathFrontOperationKind,
+                        StringComparison.Ordinal) ||
+                    string.Equals(
+                        record.OperationKind,
+                        JusticeProfileResetWalOperationKind,
+                        StringComparison.Ordinal) ||
+                    record.PersistenceRevision >= diskRevision)
                 {
+                    if (record.State == JusticeWalState.Ambiguous &&
+                        !string.Equals(
+                            record.OperationKind,
+                            JusticeDeathFrontOperationKind,
+                            StringComparison.Ordinal) &&
+                        !string.Equals(
+                            record.OperationKind,
+                            JusticeProfileResetWalOperationKind,
+                            StringComparison.Ordinal) &&
+                        record.PersistenceRevision >= diskRevision &&
+                        record.PersistenceRevision == diskRevision)
+                    {
+                        // La rotation suivante place le résultat générique dans
+                        // le backup. DeathFront possède son tracker dédié et ne
+                        // passe jamais par cette confirmation générique.
+                        JusticeMarkStateDirty();
+                    }
                     continue;
                 }
+                // Je garde Ambiguous tant que seul le primaire contient le
+                // résultat. Une révision disque strictement suivante prouve que
+                // File.Replace a aussi poussé ce résultat dans le backup.
                 _justiceWriteAheadLog.Append(new JusticeWalRecord(
                     record.TransactionId,
                     record.OperationKind,
@@ -1669,10 +1916,36 @@ public sealed partial class DonJEnemySpawner
         IReadOnlyList<JusticeWalRecord> open = _justiceWriteAheadLog.GetOpenTransactions();
         JusticeWalRecord newestFineDebit = null;
         JusticeWalRecord newestVoluntaryPayment = null;
+        JusticeWalRecord newestProfileResetResult = null;
+        List<JusticeWalRecord> inventoryConfiscations =
+            new List<JusticeWalRecord>();
         for (int index = 0; index < open.Count; index++)
         {
             JusticeWalRecord candidate = open[index];
-            if (candidate.OperationKind == "FineDebit")
+            if (string.Equals(
+                    candidate.OperationKind,
+                    JusticeDeathFrontOperationKind,
+                    StringComparison.Ordinal))
+            {
+                RecoverJusticeDeathFrontFromWal(candidate);
+            }
+            else if (string.Equals(
+                         candidate.OperationKind,
+                         JusticeProfileResetWalOperationKind,
+                         StringComparison.Ordinal))
+            {
+                if (newestProfileResetResult != null && !string.Equals(
+                        newestProfileResetResult.TransactionId,
+                        candidate.TransactionId,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        "Plusieurs resets de profil sont ouverts dans le WAL.");
+                }
+                newestProfileResetResult = candidate;
+                RecoverJusticeProfileResetFromWal(candidate);
+            }
+            else if (candidate.OperationKind == "FineDebit")
             {
                 if (newestFineDebit != null && !string.Equals(
                         newestFineDebit.TransactionId,
@@ -1696,10 +1969,55 @@ public sealed partial class DonJEnemySpawner
                 }
                 newestVoluntaryPayment = candidate;
             }
-            else if (candidate.PersistenceRevision > _justicePersistenceRevision)
+            else
             {
-                throw new InvalidDataException(
-                    "Le WAL Justice référence un snapshot critique absent ou plus ancien.");
+                if (!HasExactJusticeWalFields(
+                        candidate,
+                        "snapshotRevision",
+                        "profileGeneration",
+                        "identityKey",
+                        "boundary",
+                        "schemaMajor") ||
+                    ReadWalInt(candidate, "schemaMajor", -1) !=
+                        JusticeXmlPersistenceCodec.SchemaMajor)
+                {
+                    throw new InvalidDataException(
+                        "Le WAL Justice contient une frontière critique invalide.");
+                }
+
+                long referencedSnapshotRevision = ReadWalLong(
+                    candidate,
+                    "snapshotRevision",
+                    -1L);
+                bool invalidRevision = referencedSnapshotRevision <= 0L ||
+                    referencedSnapshotRevision > _justicePersistenceRevision ||
+                    candidate.PersistenceRevision < referencedSnapshotRevision ||
+                    (candidate.State != JusticeWalState.Ambiguous &&
+                     candidate.PersistenceRevision != referencedSnapshotRevision);
+                if (invalidRevision)
+                {
+                    throw new InvalidDataException(
+                        "Le WAL Justice référence un snapshot critique absent ou incohérent.");
+                }
+                if (candidate.State == JusticeWalState.Prepared)
+                {
+                    // Prepared n'a pas encore rendu la main à son contrôleur :
+                    // aucun effet externe n'a pu commencer. Je ferme cette frame
+                    // orpheline avant que le retry crée une nouvelle transaction.
+                    RejectJusticePreparedWalBeforeEffect(candidate);
+                    continue;
+                }
+                if (string.Equals(
+                        candidate.OperationKind,
+                        "Inventory",
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        ReadWalString(candidate, "boundary", string.Empty),
+                        "InventoryConfiscation",
+                        StringComparison.Ordinal))
+                {
+                    inventoryConfiscations.Add(candidate);
+                }
             }
         }
 
@@ -1719,6 +2037,33 @@ public sealed partial class DonJEnemySpawner
         {
             throw new InvalidDataException("Intention de paiement volontaire WAL invalide.");
         }
+        for (int index = 0; index < inventoryConfiscations.Count; index++)
+        {
+            RecoverJusticeInventoryConfiscationFromWal(
+                inventoryConfiscations[index]);
+        }
+
+        // Les versions antérieures confirmaient dès que seul le primaire portait
+        // le résultat. Si ce primaire est perdu, le terminal conservé protège le
+        // backup précommit : je le traite comme une confiscation ambiguë ciblée.
+        IReadOnlyList<JusticeWalRecord> latest =
+            _justiceWriteAheadLog.GetLatestTransactions();
+        for (int index = 0; index < latest.Count; index++)
+        {
+            JusticeWalRecord candidate = latest[index];
+            if (candidate.State == JusticeWalState.Confirmed &&
+                string.Equals(
+                    candidate.OperationKind,
+                    "Inventory",
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    ReadWalString(candidate, "boundary", string.Empty),
+                    "InventoryConfiscation",
+                    StringComparison.Ordinal))
+            {
+                RecoverJusticeInventoryConfiscationFromWal(candidate);
+            }
+        }
 
         // Chaque contrôleur reprend selon l'état durable : Prepared peut encore
         // armer une tentative, tandis qu'Attempted/Ambiguous interdit tout replay.
@@ -1729,6 +2074,178 @@ public sealed partial class DonJEnemySpawner
                 open.Count.ToString(CultureInfo.InvariantCulture) +
                 " frontière(s) critique(s) reprise(s) depuis le snapshot durable.");
         }
+    }
+
+    private void RejectJusticePreparedWalBeforeEffect(JusticeWalRecord record)
+    {
+        if (record == null || record.State != JusticeWalState.Prepared ||
+            _justiceWriteAheadLog == null)
+        {
+            return;
+        }
+
+        _justiceWriteAheadLog.Append(new JusticeWalRecord(
+            record.TransactionId,
+            record.OperationKind,
+            record.ProfileSlot,
+            JusticeWalState.Rejected,
+            Math.Max(record.PersistenceRevision, _justicePersistenceRevision),
+            record.CreatedAtUtcTicks,
+            record.Fields));
+    }
+
+    private void RecoverJusticeInventoryConfiscationFromWal(
+        JusticeWalRecord record)
+    {
+        if (record == null ||
+            !string.Equals(record.OperationKind, "Inventory", StringComparison.Ordinal) ||
+            (record.State != JusticeWalState.Attempted &&
+             record.State != JusticeWalState.Ambiguous &&
+             record.State != JusticeWalState.Confirmed) ||
+            !string.Equals(
+                ReadWalString(record, "boundary", string.Empty),
+                "InventoryConfiscation",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        long referencedSnapshotRevision = ReadWalLong(
+            record,
+            "snapshotRevision",
+            -1L);
+        if (referencedSnapshotRevision <= 0L)
+        {
+            throw new InvalidDataException(
+                "Le WAL de confiscation référence un snapshot absent.");
+        }
+
+        EnsureJusticePlayerProfilesInitialized();
+        EnsureJusticeProfilePersistenceGenerations();
+        if (!IsJusticeCanonicalProfileSlot(record.ProfileSlot) ||
+            record.ProfileSlot >= _justicePlayerProfiles.Length)
+        {
+            throw new InvalidDataException(
+                "Le WAL de confiscation cible un profil Justice invalide.");
+        }
+
+        JusticePlayerProfileState targetProfile =
+            _justicePlayerProfiles[record.ProfileSlot];
+        long expectedGeneration =
+            _justiceProfilePersistenceGenerations[record.ProfileSlot];
+        long walGeneration = ReadWalLong(record, "profileGeneration", -1L);
+        if (targetProfile == null || walGeneration < 0L)
+        {
+            throw new InvalidDataException(
+                "Le WAL de confiscation ne possède plus son profil.");
+        }
+        if (expectedGeneration > walGeneration)
+        {
+            // Une génération plus récente du même profil contient déjà le
+            // résultat ou une supersession explicite : je ne la dégrade jamais.
+            return;
+        }
+        if (expectedGeneration < walGeneration ||
+            !string.Equals(
+                ReadWalString(record, "identityKey", string.Empty),
+                CreateJusticeProfileIdentityKey(targetProfile),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Le WAL de confiscation ne correspond pas à l'identité persistée.");
+        }
+
+        if (record.ProfileSlot != _justiceActivePlayerProfileSlot)
+        {
+            JusticeCustodyPersistenceSnapshot inactiveCustody =
+                targetProfile.CustodySnapshot;
+            if (inactiveCustody != null &&
+                (inactiveCustody.InventoryState ==
+                     (int)JusticeInventoryCustodyState.RemovedVerified ||
+                 inactiveCustody.InventoryState ==
+                     (int)JusticeInventoryCustodyState.UnsupportedPreserved ||
+                 inactiveCustody.InventoryState ==
+                     (int)JusticeInventoryCustodyState.RestorePending ||
+                 inactiveCustody.InventoryState ==
+                     (int)JusticeInventoryCustodyState.RestoreAmbiguous))
+            {
+                return;
+            }
+            if (inactiveCustody == null ||
+                inactiveCustody.InventoryState !=
+                    (int)JusticeInventoryCustodyState.SnapshotPersisted)
+            {
+                throw new InvalidDataException(
+                    "Le profil inactif du WAL ne possède aucun précommit d'inventaire restaurable.");
+            }
+
+            JusticeCustodyPersistenceSnapshot recoveredCustody =
+                CloneJusticeCustodyPersistenceSnapshotForAmbiguousInventoryRecovery(
+                    inactiveCustody);
+            if (recoveredCustody == null)
+            {
+                throw new InvalidDataException(
+                    "Le profil inactif du WAL ne possède aucun snapshot d'inventaire validé.");
+            }
+
+            // Je modifie uniquement le DTO du propriétaire de la transaction.
+            // Le héros actuellement jouable garde ainsi son propre inventaire et
+            // activera plus tard la restitution différée du détenu concerné.
+            targetProfile.CustodySnapshot = recoveredCustody;
+            targetProfile.CustodyXml = string.Empty;
+            JusticeMarkStateDirty();
+            LogWarning(
+                "Justice.WAL.Recuperation",
+                "Confiscation interrompue sur un profil inactif : restitution différée enregistrée sans toucher au héros courant.");
+            return;
+        }
+
+        // Un snapshot plus récent ou un état terminal contient déjà le résultat
+        // durable de la native. Je ne dégrade pas une confiscation confirmée ni
+        // une restitution déjà planifiée.
+        if (_justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.RemovedVerified ||
+            _justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.UnsupportedPreserved ||
+            _justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.RestorePending ||
+            _justiceInventoryCustodyState ==
+                JusticeInventoryCustodyState.RestoreAmbiguous)
+        {
+            return;
+        }
+
+        bool inventoryAlreadyCleared =
+            _justiceInventoryCustodyState == JusticeInventoryCustodyState.None &&
+            !_justiceInventoryRemoved &&
+            !_justiceWeaponControlsLocked &&
+            !_justiceDeferredInventoryRestore &&
+            !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot) &&
+            !JusticeIsCustodyActive;
+        if (inventoryAlreadyCleared)
+        {
+            return;
+        }
+        if (!ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
+        {
+            throw new InvalidDataException(
+                "Le WAL de confiscation ambigu ne possède aucun snapshot restaurable.");
+        }
+
+        // Attempted signifie que RemoveAll a pu être exécuté avant le crash.
+        // Je conserve donc le snapshot et interdis tout replay destructif : la
+        // fusion sera tentée uniquement après la sortie réelle de détention.
+        _justiceInventoryCustodyState =
+            JusticeInventoryCustodyState.RestoreAmbiguous;
+        _justiceInventoryRemoved = false;
+        _justiceWeaponControlsLocked = false;
+        _justiceDeferredInventoryRestore = true;
+        _justiceNextInventoryPersistenceRetryAt = 0;
+        _justiceNextDeferredInventoryRestoreAt = 0;
+        JusticeMarkStateDirty();
+        LogWarning(
+            "Justice.WAL.Recuperation",
+            "Confiscation interrompue après tentative : snapshot conservé pour restitution différée, sans nouveau RemoveAll.");
     }
 
     private bool TryApplyJusticeVoluntaryPaymentWalRecord(JusticeWalRecord record)
@@ -2075,7 +2592,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         return record.PersistenceRevision > _justicePersistenceRevision
-            ? profileGeneration > loadedGeneration
+            ? profileGeneration >= loadedGeneration
             : profileGeneration <= loadedGeneration;
     }
 

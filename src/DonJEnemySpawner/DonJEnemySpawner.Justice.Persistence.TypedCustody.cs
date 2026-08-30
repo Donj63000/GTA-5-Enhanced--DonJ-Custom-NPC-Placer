@@ -571,6 +571,92 @@ public sealed partial class DonJEnemySpawner
             source.Cooldowns);
     }
 
+    private static JusticeCustodyPersistenceSnapshot
+        CloneJusticeCustodyPersistenceSnapshotForAmbiguousInventoryRecovery(
+            JusticeCustodyPersistenceSnapshot source)
+    {
+        if (source == null || source.InventorySnapshot == null ||
+            !source.InventorySnapshot.IsValidated)
+        {
+            return null;
+        }
+
+        return new JusticeCustodyPersistenceSnapshot(
+            source.Active,
+            source.Site,
+            source.PoliceSuppressionApplied,
+            source.PoliceDispatchDisabled,
+            source.InitialSentenceSeconds,
+            source.ActivityReductionSeconds,
+            false,
+            false,
+            (int)JusticeInventoryCustodyState.RestoreAmbiguous,
+            source.InventoryCaptureFailures,
+            source.InventoryRemovalFailures,
+            true,
+            source.WaitingForRespawn,
+            source.DeathRebindPending,
+            source.PlayerStateStored,
+            source.StoredInvincible,
+            source.StoredFrozen,
+            source.StoredCanRagdoll,
+            source.PlayerModelHash,
+            source.PlayerSlot,
+            source.ReleaseSelectedWeapon,
+            source.LegalReleaseWantedClearAttempted,
+            source.AmnestyWantedClearAttempted,
+            source.FineDebitIntent,
+            source.VoluntaryPaymentIntent,
+            source.DisciplineIntent,
+            source.InventorySnapshot,
+            source.HasActivityCooldownContainer,
+            source.Cooldowns);
+    }
+
+    private static JusticeCustodyPersistenceSnapshot
+        CloneJusticeCustodyPersistenceSnapshotForDeathRebind(
+            JusticeCustodyPersistenceSnapshot source,
+            int observedPlayerModelHash)
+    {
+        if (source == null || !source.Active)
+        {
+            return null;
+        }
+
+        return new JusticeCustodyPersistenceSnapshot(
+            source.Active,
+            source.Site,
+            source.PoliceSuppressionApplied,
+            source.PoliceDispatchDisabled,
+            source.InitialSentenceSeconds,
+            source.ActivityReductionSeconds,
+            source.InventoryRemoved,
+            source.WeaponControlsLocked,
+            source.InventoryState,
+            source.InventoryCaptureFailures,
+            source.InventoryRemovalFailures,
+            source.DeferredInventoryRestore,
+            true,
+            true,
+            source.PlayerStateStored,
+            source.StoredInvincible,
+            source.StoredFrozen,
+            source.StoredCanRagdoll,
+            observedPlayerModelHash != 0
+                ? observedPlayerModelHash
+                : source.PlayerModelHash,
+            source.PlayerSlot,
+            source.ReleaseSelectedWeapon,
+            source.LegalReleaseWantedClearAttempted,
+            source.AmnestyWantedClearAttempted,
+            source.FineDebitIntent,
+            source.VoluntaryPaymentIntent,
+            source.DisciplineIntent,
+            source.InventorySnapshot,
+            source.HasActivityCooldownContainer,
+            source.Cooldowns);
+    }
+
     private bool RestoreJusticeCustodyPersistenceSnapshot(
         JusticeCustodyPersistenceSnapshot snapshot)
     {

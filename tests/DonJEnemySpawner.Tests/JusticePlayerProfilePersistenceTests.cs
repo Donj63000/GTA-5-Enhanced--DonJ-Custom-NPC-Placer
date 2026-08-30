@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -511,6 +512,52 @@ public sealed class JusticePlayerProfilePersistenceTests
     }
 
     [TestMethod]
+    public void PlayerProfiles_InactiveResetRejectsAnOpenDeathFrontEvenBeforeItsLatchIsApplied()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeWalRecord prepared = CreateDeathFrontRecord(
+                "death-front:inactive-reset-guard",
+                "PoliceCapture",
+                1,
+                JusticeWalState.Prepared,
+                4L,
+                4L,
+                string.Empty,
+                0,
+                1,
+                2000,
+                1,
+                2000);
+            wal.Append(prepared);
+            wal.Append(CopyWalRecord(prepared, JusticeWalState.Attempted, 4L));
+
+            Assert.IsFalse(profiles[1].PendingDeathCapture);
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "HasOpenJusticeDeathFrontForProfileSlot",
+                1));
+            Assert.IsFalse((bool)Invoke(script, "ResetJusticePlayerProfile", 1));
+
+            wal.Append(CopyWalRecord(prepared, JusticeWalState.Ambiguous, 5L));
+            Assert.IsFalse((bool)Invoke(script, "ResetJusticePlayerProfile", 1));
+
+            wal.Append(CopyWalRecord(prepared, JusticeWalState.Confirmed, 5L));
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "HasOpenJusticeDeathFrontForProfileSlot",
+                1));
+            Assert.IsTrue((bool)Invoke(script, "ResetJusticePlayerProfile", 1));
+            Assert.AreEqual(0, profiles[0].CaseState.SentenceSeconds);
+        });
+    }
+
+    [TestMethod]
     public void PlayerProfiles_PoliceSuppressionRestoreBlocksSwitchAndProfileResetUntilRecovered()
     {
         JusticePlayerProfileState profile = new JusticePlayerProfileState(0)
@@ -685,7 +732,7 @@ public sealed class JusticePlayerProfilePersistenceTests
     }
 
     [TestMethod]
-    public void PlayerProfiles_ResetIsCancelledInMemoryAndOnDiskWhenItsCommitFails()
+    public void PlayerProfiles_ResetWalReplaysAfterTheFirstResultWriteFails()
     {
         WithTemporaryJusticeDirectory(directory =>
         {
@@ -705,16 +752,47 @@ public sealed class JusticePlayerProfilePersistenceTests
             Invoke(script, "ExecuteJusticeSelectedProfileReset");
 
             Assert.AreEqual(
-                2,
+                0,
                 GetField<JusticeRecordState>(script, "_justiceRecordState").RecidivismIndex);
             Assert.AreEqual(durableBeforeReset, File.ReadAllText(path));
+            Assert.IsNotNull(GetField<JusticeWalRecord>(
+                script,
+                "_justicePendingProfileResetWalRecord"));
+            Invoke(script, "ShutdownJusticePersistenceServices");
 
             object afterCrash = CreateHeadlessScript(null, -1);
+            InitializeProfileResetRuntimeCollections(afterCrash);
             SetField(afterCrash, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
             Assert.IsTrue((bool)Invoke(afterCrash, "TryReadJusticeStateFile", path));
             Assert.AreEqual(
                 2,
                 GetField<JusticeRecordState>(afterCrash, "_justiceRecordState").RecidivismIndex);
+            Invoke(afterCrash, "InitializeJusticePersistenceServices");
+            Assert.AreEqual(
+                0,
+                GetField<JusticeRecordState>(afterCrash, "_justiceRecordState").RecidivismIndex,
+                "Attempted doit réappliquer le reset même si aucun XML résultat n'existait au crash.");
+            Assert.IsFalse((bool)Invoke(
+                afterCrash,
+                "TryResumePendingJusticeProfileResetWal"));
+            AwaitQueuedPersistence(afterCrash);
+            Assert.IsFalse((bool)Invoke(
+                afterCrash,
+                "TryResumePendingJusticeProfileResetWal"));
+            AwaitQueuedPersistence(afterCrash);
+            Assert.IsTrue((bool)Invoke(
+                afterCrash,
+                "TryResumePendingJusticeProfileResetWal"));
+            foreach (string persistedPath in new[] { path, path + ".bak" })
+            {
+                Assert.AreEqual(
+                    "0",
+                    (string)GetPersistedActiveJusticeProfile(
+                            XDocument.Load(persistedPath))
+                        .Element("Record")
+                        .Attribute("recidivism"));
+            }
+            Invoke(afterCrash, "ShutdownJusticePersistenceServices");
         });
     }
 
@@ -732,6 +810,13 @@ public sealed class JusticePlayerProfilePersistenceTests
 
             Invoke(script, "ExecuteJusticeSelectedProfileReset");
             AwaitQueuedPersistence(script);
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "TryResumePendingJusticeProfileResetWal"));
+            AwaitQueuedPersistence(script);
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "TryResumePendingJusticeProfileResetWal"));
 
             string path = Path.Combine(directory, "_justice_state.xml");
             string backupPath = path + ".bak";
@@ -781,6 +866,11 @@ public sealed class JusticePlayerProfilePersistenceTests
             Invoke(script, "ExecuteJusticeSelectedProfileReset");
             AwaitQueuedPersistence(script);
 
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "TryResumePendingJusticeProfileResetWal"),
+                "La seconde rotation injectée en échec doit garder le WAL ouvert.");
+
             Assert.AreEqual(
                 0,
                 GetField<JusticeRecordState>(script, "_justiceRecordState").RecidivismIndex,
@@ -800,13 +890,488 @@ public sealed class JusticePlayerProfilePersistenceTests
                 script,
                 "_justiceMonotonicTimeMs",
                 GetField<long>(script, "_justiceNextStateFlushAttemptAtMs"));
-            FlushAndAwait(script);
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "TryResumePendingJusticeProfileResetWal"));
+            AwaitQueuedPersistence(script);
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "TryResumePendingJusticeProfileResetWal"));
             Assert.AreEqual(
                 "0",
                 (string)GetPersistedActiveJusticeProfile(XDocument.Load(path + ".bak"))
                     .Element("Record")
                     .Attribute("recidivism"));
         });
+    }
+
+    [TestMethod]
+    public void ProfileReset_LatestWinsSkippedEmptyCandidateRequiresTwoExactDiskCopies()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            InitializeProfileResetRuntimeCollections(script);
+            string statePath = Path.Combine(directory, "_justice_state.xml");
+            using (FirstWriteBlockingAtomicFileStore store =
+                new FirstWriteBlockingAtomicFileStore())
+            {
+                JusticeRepository repository = new JusticeRepository(
+                    statePath,
+                    statePath + ".bak",
+                    new JusticeXmlPersistenceCodec(),
+                    0L,
+                    store,
+                    JusticeNoOpPersistenceFaultInjector.Instance,
+                    10);
+                JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                    Path.Combine(directory, "_justice_state.wal"));
+                repository.Start();
+                SetField(script, "_justiceRepository", repository);
+                SetField(script, "_justiceWriteAheadLog", wal);
+                try
+                {
+                    Assert.IsTrue((bool)Invoke(script, "JusticeFlushStateNow"));
+                    Assert.IsTrue(
+                        store.FirstWriteStarted.WaitOne(TimeSpan.FromSeconds(5)),
+                        "Le snapshot ancien doit occuper le writer avant le reset.");
+
+                    Assert.IsTrue((bool)Invoke(
+                        script,
+                        "BeginJusticeProfileResetWalTransaction",
+                        0));
+                    JusticeWalRecord attempted = wal.GetOpenTransactions().Single();
+                    Assert.AreEqual(JusticeWalState.Attempted, attempted.State);
+                    long skippedEmptyCandidate = GetField<Dictionary<string, long>>(
+                        script,
+                        "_justiceProfileResetResultCandidates")[attempted.TransactionId];
+
+                    // Je remplace le candidat vide encore en attente par un état
+                    // non vide afin de reproduire exactement le latest-wins.
+                    profiles[0].CaseState.Enabled = true;
+                    profiles[0].CaseState.LastCrimeKind =
+                        JusticeCrimeKind.ReportedViolentAct;
+                    profiles[0].CaseState.LastCrimeLabel =
+                        "Mutation coalescée après le reset";
+                    SetField(script, "_justiceEnabled", true);
+                    Invoke(script, "JusticeMarkStateDirty");
+                    Assert.IsTrue((bool)Invoke(script, "JusticeFlushStateNow"));
+                    long nonEmptyRevision = repository.GetDiagnostics().PendingRevision;
+                    Assert.IsTrue(nonEmptyRevision > skippedEmptyCandidate);
+                    Assert.AreEqual(
+                        skippedEmptyCandidate,
+                        GetField<Dictionary<string, long>>(
+                            script,
+                            "_justiceProfileResetResultCandidates")[
+                                attempted.TransactionId],
+                        "Le snapshot non vide ne doit jamais devenir une preuve du reset.");
+
+                    store.ReleaseFirstWrite.Set();
+                    AwaitQueuedPersistence(script);
+                    Assert.AreEqual(
+                        JusticeWalState.Attempted,
+                        wal.GetLatest(attempted.TransactionId).State,
+                        "Une révision plus récente ne qualifie pas le candidat vide sauté.");
+                    Assert.IsFalse(PersistedJusticeProfileContainsExactReset(
+                        statePath,
+                        0));
+
+                    Assert.IsTrue((bool)Invoke(
+                        script,
+                        "ReplaceJusticePlayerProfileWithEmptyState",
+                        0));
+                    FlushAndAwait(script);
+                    Assert.AreEqual(
+                        JusticeWalState.Ambiguous,
+                        wal.GetLatest(attempted.TransactionId).State,
+                        "Le premier snapshot vide exact ne prouve encore que le primaire.");
+                    Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                        statePath,
+                        0));
+                    Assert.IsFalse(PersistedJusticeProfileContainsExactReset(
+                        statePath + ".bak",
+                        0));
+
+                    FlushAndAwait(script);
+                    Assert.AreEqual(
+                        JusticeWalState.Confirmed,
+                        wal.GetLatest(attempted.TransactionId).State,
+                        "Le WAL ne se ferme qu'après une seconde rotation vide exacte.");
+                    Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                        statePath,
+                        0));
+                    Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                        statePath + ".bak",
+                        0));
+                }
+                finally
+                {
+                    store.ReleaseFirstWrite.Set();
+                    repository.Stop(TimeSpan.FromSeconds(5));
+                    repository.Dispose();
+                }
+            }
+        });
+    }
+
+    [TestMethod]
+    public void ProfileReset_AmbiguousRecoveryFromOldProfileRequiresTwoFreshRotations()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            string statePath = Path.Combine(directory, "_justice_state.xml");
+            object writer = CreateHeadlessScript(CreateDistinctProfiles(), 0);
+            InitializeProfileResetRuntimeCollections(writer);
+            FlushAndAwait(writer);
+            FlushAndAwait(writer);
+            Invoke(writer, "ShutdownJusticePersistenceServices");
+
+            object recovered = CreateHeadlessScript(null, -1);
+            InitializeProfileResetRuntimeCollections(recovered);
+            SetField(
+                recovered,
+                "_justiceCanonicalPlayerSlotOverride",
+                new Func<int>(() => 0));
+            Assert.IsTrue((bool)Invoke(
+                recovered,
+                "TryReadJusticeStateFile",
+                statePath));
+            JusticePlayerProfileState[] loadedProfiles =
+                GetField<JusticePlayerProfileState[]>(
+                    recovered,
+                    "_justicePlayerProfiles");
+            Assert.IsFalse((bool)InvokeStatic(
+                "IsJusticeProfileResetResultPresent",
+                loadedProfiles[0]));
+            long loadedRevision = GetField<long>(
+                recovered,
+                "_justicePersistenceRevision");
+            long loadedGeneration = GetField<long[]>(
+                recovered,
+                "_justiceProfilePersistenceGenerations")[0];
+
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            JusticeWalRecord prepared = CreateProfileResetRecord(
+                "profile-reset-result:ambiguous-old",
+                0,
+                JusticeWalState.Prepared,
+                loadedRevision,
+                loadedGeneration,
+                loadedProfiles[0].LastCanonicalPlayerModel);
+            wal.Append(prepared);
+            wal.Append(CopyWalRecord(
+                prepared,
+                JusticeWalState.Attempted,
+                loadedRevision));
+            JusticeWalRecord ambiguous = wal.Append(CopyWalRecord(
+                prepared,
+                JusticeWalState.Ambiguous,
+                loadedRevision));
+            SetField(recovered, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(
+                recovered,
+                directory,
+                loadedRevision);
+            try
+            {
+                Invoke(
+                    recovered,
+                    "RecoverJusticeProfileResetFromWal",
+                    ambiguous);
+                Assert.IsTrue((bool)InvokeStatic(
+                    "IsJusticeProfileResetResultPresent",
+                    GetField<JusticePlayerProfileState[]>(
+                        recovered,
+                        "_justicePlayerProfiles")[0]));
+
+                FlushAndAwait(recovered);
+                Assert.AreEqual(
+                    JusticeWalState.Ambiguous,
+                    wal.GetLatest(prepared.TransactionId).State,
+                    "Une seule rotation fraîche ne doit pas qualifier l'ancien backup.");
+                Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                    statePath,
+                    0));
+                Assert.IsFalse(PersistedJusticeProfileContainsExactReset(
+                    statePath + ".bak",
+                    0));
+
+                FlushAndAwait(recovered);
+                Assert.AreEqual(
+                    JusticeWalState.Confirmed,
+                    wal.GetLatest(prepared.TransactionId).State);
+                Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                    statePath,
+                    0));
+                Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                    statePath + ".bak",
+                    0));
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+                repository.Dispose();
+            }
+        });
+    }
+
+    [TestMethod]
+    public void ProfileReset_AttemptedAlreadyInPrimaryUsesLoadedRevisionThenRepairsBackup()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            string statePath = Path.Combine(directory, "_justice_state.xml");
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object writer = CreateHeadlessScript(profiles, 0);
+            InitializeProfileResetRuntimeCollections(writer);
+            FlushAndAwait(writer);
+            long baseRevision = GetField<long>(writer, "_justicePersistenceRevision");
+            long baseGeneration = GetField<long[]>(
+                writer,
+                "_justiceProfilePersistenceGenerations")[0];
+            JusticeWalRecord prepared = CreateProfileResetRecord(
+                "profile-reset-result:attempted-primary",
+                0,
+                JusticeWalState.Prepared,
+                baseRevision,
+                baseGeneration,
+                profiles[0].LastCanonicalPlayerModel);
+
+            Invoke(writer, "ApplyJusticeProfileResetWalResult", prepared);
+            FlushAndAwait(writer);
+            long resetPrimaryRevision = GetField<long>(
+                writer,
+                "_justicePersistenceRevision");
+            Invoke(writer, "ShutdownJusticePersistenceServices");
+            Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                statePath,
+                0));
+            Assert.IsFalse(PersistedJusticeProfileContainsExactReset(
+                statePath + ".bak",
+                0));
+
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            wal.Append(prepared);
+            wal.Append(CopyWalRecord(
+                prepared,
+                JusticeWalState.Attempted,
+                baseRevision));
+
+            object afterCrash = CreateHeadlessScript(null, -1);
+            InitializeProfileResetRuntimeCollections(afterCrash);
+            SetField(
+                afterCrash,
+                "_justiceCanonicalPlayerSlotOverride",
+                new Func<int>(() => 0));
+            Assert.IsTrue((bool)Invoke(
+                afterCrash,
+                "TryReadJusticeStateFile",
+                statePath));
+            Assert.AreEqual(
+                resetPrimaryRevision,
+                GetField<long>(afterCrash, "_justicePersistenceRevision"));
+            Invoke(afterCrash, "InitializeJusticePersistenceServices");
+            try
+            {
+                JusticeWriteAheadLog recoveredWal =
+                    GetField<JusticeWriteAheadLog>(
+                        afterCrash,
+                        "_justiceWriteAheadLog");
+                Assert.AreEqual(
+                    JusticeWalState.Ambiguous,
+                    recoveredWal.GetLatest(prepared.TransactionId).State,
+                    "Le primaire vide relu doit devenir la preuve exacte du résultat.");
+                Assert.IsFalse((bool)Invoke(
+                    afterCrash,
+                    "TryResumePendingJusticeProfileResetWal"));
+                AwaitQueuedPersistence(afterCrash);
+                Assert.IsTrue((bool)Invoke(
+                    afterCrash,
+                    "TryResumePendingJusticeProfileResetWal"));
+                Assert.AreEqual(
+                    JusticeWalState.Confirmed,
+                    recoveredWal.GetLatest(prepared.TransactionId).State);
+                Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                    statePath,
+                    0));
+                Assert.IsTrue(PersistedJusticeProfileContainsExactReset(
+                    statePath + ".bak",
+                    0));
+            }
+            finally
+            {
+                Invoke(afterCrash, "ShutdownJusticePersistenceServices");
+            }
+        });
+    }
+
+    [TestMethod]
+    public void ProfileReset_PreparedSurvivesAttemptAndRejectFailuresUntilInMemoryRetry()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            InitializeProfileResetRuntimeCollections(script);
+            WalOccurrenceFaultInjector injector = new WalOccurrenceFaultInjector(
+                JusticePersistenceFaultPoint.BeforeWalFrameWrite,
+                2,
+                3);
+            SetField(script, "_justiceWalFaultInjectorOverride", injector);
+            try
+            {
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "BeginJusticeProfileResetWalTransaction",
+                    0));
+                JusticeWalRecord pending = GetField<JusticeWalRecord>(
+                    script,
+                    "_justicePendingProfileResetWalRecord");
+                Assert.IsNotNull(
+                    pending,
+                    "Prepared doit rester repris en mémoire si son rejet échoue aussi.");
+                Assert.AreEqual(JusticeWalState.Prepared, pending.State);
+                JusticeWriteAheadLog wal = GetField<JusticeWriteAheadLog>(
+                    script,
+                    "_justiceWriteAheadLog");
+                Assert.AreEqual(
+                    JusticeWalState.Prepared,
+                    wal.GetLatest(pending.TransactionId).State);
+                Assert.AreEqual(
+                    2,
+                    profiles[0].RecordState.RecidivismIndex,
+                    "Prepared n'autorise jamais l'effet destructif.");
+
+                injector.AllowWrites();
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "TryResumePendingJusticeProfileResetWal"));
+                Assert.IsNull(GetField<JusticeWalRecord>(
+                    script,
+                    "_justicePendingProfileResetWalRecord"));
+                Assert.AreEqual(
+                    JusticeWalState.Rejected,
+                    wal.GetLatest(pending.TransactionId).State,
+                    "Le même runtime doit rejeter Prepared dès la levée de panne.");
+                Assert.AreEqual(0, wal.GetOpenTransactions().Count);
+            }
+            finally
+            {
+                Invoke(script, "ShutdownJusticePersistenceServices");
+            }
+        });
+    }
+
+    [TestMethod]
+    public void ProfileReset_ResultPredicateRejectsEveryNonCanonicalResidual()
+    {
+        JusticePlayerProfileState canonical = CreateCanonicalProfileResetResult(0);
+        Assert.IsTrue((bool)InvokeStatic(
+            "IsJusticeProfileResetResultPresent",
+            canonical));
+
+        JusticePlayerProfileState metadata = CreateCanonicalProfileResetResult(0);
+        metadata.CaseState.ProcessedIncidentIds.Add("incident:résiduel");
+        Assert.IsFalse((bool)InvokeStatic(
+            "IsJusticeProfileResetResultPresent",
+            metadata));
+
+        JusticePlayerProfileState identity = CreateCanonicalProfileResetResult(0);
+        identity.LastCanonicalPlayerModel = 123456;
+        Assert.IsFalse((bool)InvokeStatic(
+            "IsJusticeProfileResetResultPresent",
+            identity));
+
+        JusticePlayerProfileState pending = CreateCanonicalProfileResetResult(0);
+        pending.PendingAmnestyWantedClear = true;
+        Assert.IsFalse((bool)InvokeStatic(
+            "IsJusticeProfileResetResultPresent",
+            pending));
+
+        JusticePlayerProfileState custody = CreateCanonicalProfileResetResult(0);
+        custody.CustodyXml = "<Custody />";
+        Assert.IsFalse((bool)InvokeStatic(
+            "IsJusticeProfileResetResultPresent",
+            custody));
+    }
+
+    [TestMethod]
+    public void ProfileReset_OpenWalFreezesToggleAndLateJusticeRuntime()
+    {
+        JusticePlayerProfileState[] profiles =
+        {
+            CreateCanonicalProfileResetResult(0),
+            CreateCanonicalProfileResetResult(1),
+            CreateCanonicalProfileResetResult(2)
+        };
+        object script = CreateHeadlessScript(profiles, 0);
+        SetField(script, "_justiceInitialized", true);
+        SetField(
+            script,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => 0));
+        JusticeWalRecord pending = CreateProfileResetRecord(
+            "profile-reset-result:runtime-freeze",
+            0,
+            JusticeWalState.Attempted,
+            0L,
+            0L,
+            0);
+        SetField(script, "_justicePendingProfileResetWalRecord", pending);
+        SetField(script, "_justiceNextIncidentProcessingAtMs", 987654L);
+
+        Assert.IsTrue((bool)Invoke(script, "HasOpenJusticeProfileResetWal"));
+        Invoke(script, "RequestJusticeToggle");
+        Assert.IsFalse(GetField<bool>(script, "_justiceEnabled"));
+        Assert.IsFalse(profiles[0].CaseState.Enabled);
+        StringAssert.Contains(
+            GetField<string>(script, "_statusText"),
+            "backup");
+
+        Invoke(script, "UpdateJusticeSystem");
+        Assert.AreEqual(
+            987654L,
+            GetField<long>(script, "_justiceNextIncidentProcessingAtMs"),
+            "Le runtime tardif ne doit progresser aucun front pendant le WAL.");
+
+        string source = File.ReadAllText(Path.Combine(
+            GetRepositoryRoot(),
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.Justice.cs"));
+        int updateStart = source.IndexOf(
+            "private void UpdateJusticeSystem()",
+            StringComparison.Ordinal);
+        int updateEnd = source.IndexOf(
+            "private void UpdateJusticeFailSafeMaintenance()",
+            updateStart,
+            StringComparison.Ordinal);
+        Assert.IsTrue(updateStart >= 0 && updateEnd > updateStart);
+        AssertOrdered(
+            source.Substring(updateStart, updateEnd - updateStart),
+            "if (!_justiceInitialized)",
+            "Ped player = Game.Player.Character",
+            "UpdateJusticeCustodyRespawnTransferMask(player)",
+            "UpdateJusticePoliceDeathPreJudgmentHolding(player, nowRaw)",
+            "if (HasOpenJusticeProfileResetWal())");
+
+        int toggleStart = source.IndexOf(
+            "private void RequestJusticeToggle()",
+            StringComparison.Ordinal);
+        int toggleEnd = source.IndexOf(
+            "private void DisableJusticeWithoutAmnesty()",
+            toggleStart,
+            StringComparison.Ordinal);
+        Assert.IsTrue(toggleStart >= 0 && toggleEnd > toggleStart);
+        AssertOrdered(
+            source.Substring(toggleStart, toggleEnd - toggleStart),
+            "if (!IsJusticePlayedProfileContextReady())",
+            "if (HasOpenJusticeProfileResetWal())",
+            "if (_justiceAmnestyPending)",
+            "if (!_justiceEnabled)");
     }
 
     [TestMethod]
@@ -1023,8 +1588,10 @@ public sealed class JusticePlayerProfilePersistenceTests
         Assert.IsTrue((bool)Invoke(script, "ActivateJusticePlayerProfile", 1));
         Invoke(script, "ReconcileLoadedJusticePursuitState", 0);
 
-        Assert.IsTrue(franklin.HasWarrant);
-        Assert.AreEqual(JusticePhase.AtLarge, franklin.Phase);
+        Assert.IsFalse(franklin.HasWarrant);
+        Assert.AreEqual(JusticePhase.Surrendering, franklin.Phase);
+        Assert.IsTrue(GetField<bool>(script, "_justiceArrestCompletionProbePending"));
+        Assert.IsTrue(GetField<bool>(script, "_justiceWantedLossPending"));
         Assert.AreEqual(2, profiles[0].RecordState.RecidivismIndex);
 
         JusticeCaseState ordinary = profiles[2].CaseState;
@@ -1300,11 +1867,19 @@ public sealed class JusticePlayerProfilePersistenceTests
             JusticeWriteAheadLog wal =
                 GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog");
             JusticeWalRecord policeRecord = wal.GetLatest(transactionId);
+            // Je garde Attempted ouvert jusqu'à ce que le snapshot du profil
+            // entrant rende le résultat Ambiguous, puis la rotation suivante
+            // Confirmed. Rejected annulerait à tort une restauration déjà faite.
+            Assert.IsFalse(
+                policeRecord != null &&
+                policeRecord.State == JusticeWalState.Rejected,
+                "La restauration police déjà exécutée ne doit jamais être annulée lors du basculement de profil.");
             Assert.IsTrue(
                 policeRecord == null ||
+                policeRecord.State == JusticeWalState.Attempted ||
                 policeRecord.State == JusticeWalState.Ambiguous ||
                 policeRecord.State == JusticeWalState.Confirmed,
-                "La restauration police doit être en attente, acquittée ou déjà compactée, jamais rejetée.");
+                "La restauration police doit être tentée, acquittée ou déjà compactée après le basculement.");
 
             AwaitQueuedPersistence(script);
             Assert.IsTrue((bool)Invoke(
@@ -1354,15 +1929,1480 @@ public sealed class JusticePlayerProfilePersistenceTests
                 script,
                 "_justiceMonotonicTimeMs",
                 GetField<long>(script, "_justiceNextStateFlushAttemptAtMs"));
-            Assert.IsTrue((bool)Invoke(script, "PersistJusticeCustodyDeathStateBeforeRespawn", 2000));
-            AwaitQueuedPersistence(script);
-            Assert.IsFalse(GetField<bool>(script, "_justiceCustodyDeathStatePersistencePending"));
+            Assert.IsFalse((bool)Invoke(script, "PersistJusticeCustodyDeathStateBeforeRespawn", 2000));
+            Assert.IsTrue(GetField<bool>(script, "_justiceCustodyDeathStatePersistencePending"));
+            Assert.IsTrue(GetField<long>(script, "_justiceCustodyDeathPersistenceRevision") > 0L);
             Assert.AreEqual(2, attempts);
+            AwaitQueuedPersistence(script);
+            Assert.IsTrue((bool)Invoke(script, "PersistJusticeCustodyDeathStateBeforeRespawn", 2001));
+            Assert.IsFalse(GetField<bool>(script, "_justiceCustodyDeathStatePersistencePending"));
+            Assert.AreEqual(0L, GetField<long>(script, "_justiceCustodyDeathPersistenceRevision"));
 
             XDocument durable = XDocument.Load(Path.Combine(directory, "_justice_state.xml"));
             XElement custody = GetPersistedActiveJusticeProfile(durable).Element("Custody");
             Assert.AreEqual("true", (string)custody.Attribute("waitingForRespawn"));
             Assert.AreEqual("true", (string)custody.Attribute("deathRebindPending"));
+        });
+    }
+
+    [TestMethod]
+    public void CustodyDeath_AsyncWriterFailureKeepsTheRebindBlockedUntilARetryIsDurable()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            ConfigureIncarceratedRuntime(script, profiles[0]);
+            Invoke(script, "InitializeJusticePersistenceServices");
+            Invoke(script, "ShutdownJusticePersistenceServices");
+
+            SwitchFailureAtomicFileStore store =
+                new SwitchFailureAtomicFileStore();
+            JusticeRepository repository = new JusticeRepository(
+                Path.Combine(directory, "_justice_state.xml"),
+                Path.Combine(directory, "_justice_state.xml.bak"),
+                new JusticeXmlPersistenceCodec(),
+                0L,
+                store,
+                JusticeNoOpPersistenceFaultInjector.Instance,
+                10);
+            repository.Start();
+            SetField(script, "_justiceRepository", repository);
+            SetField(script, "_justiceCustodyWaitingForRespawn", true);
+            SetField(script, "_justiceCustodyDeathRebindPending", true);
+            SetField(script, "_justiceCustodyDeathStatePersistencePending", true);
+
+            try
+            {
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "PersistJusticeCustodyDeathStateBeforeRespawn",
+                    1000));
+                long rejectedRevision = GetField<long>(
+                    script,
+                    "_justiceCustodyDeathPersistenceRevision");
+                Assert.IsTrue(rejectedRevision > 0L);
+                Assert.IsTrue(
+                    store.Attempted.WaitOne(TimeSpan.FromSeconds(5)),
+                    "Le writer fautif doit recevoir le checkpoint de décès.");
+                Assert.IsTrue(
+                    SpinWait.SpinUntil(
+                        delegate()
+                        {
+                            return repository.GetDiagnostics().WriteFailures > 0L;
+                        },
+                        TimeSpan.FromSeconds(5)),
+                    "L'échec asynchrone doit être visible avant le retry.");
+
+                int retryAt = GetField<int>(
+                    script,
+                    "_justiceNextCustodyDeathPersistenceRetryAt");
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "PersistJusticeCustodyDeathStateBeforeRespawn",
+                    retryAt - 1));
+                Assert.AreEqual(
+                    rejectedRevision,
+                    GetField<long>(script, "_justiceCustodyDeathPersistenceRevision"),
+                    "Le rebind doit rester lié à la révision rejetée avant l'échéance.");
+
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "PersistJusticeCustodyDeathStateBeforeRespawn",
+                    retryAt));
+                long retryRevision = GetField<long>(
+                    script,
+                    "_justiceCustodyDeathPersistenceRevision");
+                Assert.IsTrue(
+                    retryRevision > rejectedRevision,
+                    "Le retry doit produire une nouvelle révision traçable.");
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justiceCustodyDeathStatePersistencePending"));
+
+                store.AllowWrites();
+                AwaitQueuedPersistence(script);
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "PersistJusticeCustodyDeathStateBeforeRespawn",
+                    retryAt + 1));
+                Assert.IsFalse(GetField<bool>(
+                    script,
+                    "_justiceCustodyDeathStatePersistencePending"));
+
+                XDocument durable = XDocument.Load(
+                    Path.Combine(directory, "_justice_state.xml"));
+                XElement custody = GetPersistedActiveJusticeProfile(durable)
+                    .Element("Custody");
+                Assert.AreEqual("true", (string)custody.Attribute("waitingForRespawn"));
+                Assert.AreEqual("true", (string)custody.Attribute("deathRebindPending"));
+            }
+            finally
+            {
+                store.AllowWrites();
+                Invoke(script, "ShutdownJusticePersistenceServices");
+                store.Dispose();
+            }
+        });
+    }
+
+    [TestMethod]
+    public void CustodyDeath_RejectsAPreparedBarrierBeforePersistingTheRespawnRight()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            ConfigureIncarceratedRuntime(script, profiles[0]);
+            AssertCurrentCustodyFragmentIsValid(script, profiles[0]);
+            Invoke(script, "InitializeJusticePersistenceServices");
+
+            JusticeWriteAheadLog wal =
+                GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog");
+            const string transactionId = "custody-death:prepared-barrier";
+            long createdAt = DateTime.UtcNow.Ticks;
+            JusticePersistenceField[] fields =
+            {
+                new JusticePersistenceField("snapshotRevision", "1"),
+                new JusticePersistenceField("profileGeneration", "1"),
+                new JusticePersistenceField("identityKey", "slot:0:model:1000"),
+                new JusticePersistenceField("boundary", "InventoryConfiscation"),
+                new JusticePersistenceField(
+                    "schemaMajor",
+                    JusticeXmlPersistenceCodec.SchemaMajor.ToString(
+                        CultureInfo.InvariantCulture))
+            };
+            wal.Append(new JusticeWalRecord(
+                transactionId,
+                "Inventory",
+                0,
+                JusticeWalState.Prepared,
+                1L,
+                createdAt,
+                fields));
+            SetField(script, "_justiceCriticalBarrierCaller", "InventoryConfiscation");
+            SetField(script, "_justiceCriticalBarrierOperationKind", "Inventory");
+            SetField(script, "_justiceCriticalBarrierTransactionId", transactionId);
+            SetField(script, "_justiceCriticalBarrierIdentityKey", "slot:0:model:1000");
+            SetField(script, "_justiceCriticalBarrierRevision", 1L);
+            SetField(script, "_justiceCriticalBarrierProfileGeneration", 1L);
+            SetField(script, "_justiceCriticalBarrierCreatedAtUtcTicks", createdAt);
+            SetField(script, "_justiceCriticalBarrierProfileSlot", 0);
+            SetField(script, "_justiceCustodyWaitingForRespawn", true);
+            SetField(script, "_justiceCustodyDeathRebindPending", true);
+            SetField(script, "_justiceCustodyDeathStatePersistencePending", true);
+
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "PersistJusticeCustodyDeathStateBeforeRespawn",
+                1000));
+            Assert.AreEqual(0L, GetField<long>(script, "_justiceCriticalBarrierRevision"));
+            Assert.IsTrue(GetField<bool>(
+                script,
+                "_justiceCustodyDeathStatePersistencePending"));
+            Assert.IsTrue(GetField<long>(
+                script,
+                "_justiceCustodyDeathPersistenceRevision") > 0L);
+            Assert.AreEqual(
+                JusticeWalState.Rejected,
+                wal.GetLatest(transactionId).State,
+                "La frame sans effet doit être terminale avant le checkpoint de mort.");
+
+            AwaitQueuedPersistence(script);
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "PersistJusticeCustodyDeathStateBeforeRespawn",
+                1001));
+            Assert.IsFalse(GetField<bool>(
+                script,
+                "_justiceCustodyDeathStatePersistencePending"));
+            XDocument durable = XDocument.Load(
+                Path.Combine(directory, "_justice_state.xml"));
+            XElement custody = GetPersistedActiveJusticeProfile(durable)
+                .Element("Custody");
+            Assert.AreEqual("true", (string)custody.Attribute("waitingForRespawn"));
+            Assert.AreEqual("true", (string)custody.Attribute("deathRebindPending"));
+        });
+    }
+
+    [TestMethod]
+    public void CustodyDeath_ClearsAnUnmaterializedBarrierWithoutResettingTransferLatches()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            Invoke(script, "InitializeJusticePersistenceServices");
+            SetField(script, "_justiceCriticalBarrierCaller", "CompleteJusticeCustodyTransfer");
+            SetField(script, "_justiceCriticalBarrierOperationKind", "Transfer");
+            SetField(script, "_justiceCriticalBarrierTransactionId", "custody-death:not-yet-prepared");
+            SetField(script, "_justiceCriticalBarrierIdentityKey", "slot:0:model:1000");
+            SetField(script, "_justiceCriticalBarrierRevision", 1L);
+            SetField(script, "_justiceCriticalBarrierProfileGeneration", 1L);
+            SetField(script, "_justiceCriticalBarrierCreatedAtUtcTicks", DateTime.UtcNow.Ticks);
+            SetField(script, "_justiceCriticalBarrierProfileSlot", 0);
+            SetField(script, "_justiceCustodyTransferPrecommitConfirmed", true);
+            SetField(script, "_justiceCustodyFallbackPrecommitPending", true);
+
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "TryRejectJusticeCriticalBarrierBeforeCustodyDeath"));
+            Assert.AreEqual(0L, GetField<long>(script, "_justiceCriticalBarrierRevision"));
+            Assert.IsTrue(GetField<bool>(
+                script,
+                "_justiceCustodyTransferPrecommitConfirmed"));
+            Assert.IsTrue(GetField<bool>(
+                script,
+                "_justiceCustodyFallbackPrecommitPending"));
+            Assert.AreEqual(
+                0,
+                GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog")
+                    .GetOpenTransactions()
+                    .Count);
+        });
+    }
+
+    [TestMethod]
+    public void CustodyDeath_RejectsAnAttemptedBarrierWhoseAcknowledgementWasLost()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            Invoke(script, "InitializeJusticePersistenceServices");
+            JusticeWriteAheadLog wal =
+                GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog");
+            const string transactionId = "custody-death:attempted-barrier";
+            long createdAt = DateTime.UtcNow.Ticks;
+            JusticePersistenceField[] fields =
+            {
+                new JusticePersistenceField("snapshotRevision", "1"),
+                new JusticePersistenceField("profileGeneration", "1"),
+                new JusticePersistenceField("identityKey", "slot:0:model:1000"),
+                new JusticePersistenceField("boundary", "InventoryConfiscation"),
+                new JusticePersistenceField(
+                    "schemaMajor",
+                    JusticeXmlPersistenceCodec.SchemaMajor.ToString(
+                        CultureInfo.InvariantCulture))
+            };
+            wal.Append(new JusticeWalRecord(
+                transactionId,
+                "Inventory",
+                0,
+                JusticeWalState.Prepared,
+                1L,
+                createdAt,
+                fields));
+            wal.Append(new JusticeWalRecord(
+                transactionId,
+                "Inventory",
+                0,
+                JusticeWalState.Attempted,
+                1L,
+                createdAt,
+                fields));
+            SetField(script, "_justiceCriticalBarrierCaller", "InventoryConfiscation");
+            SetField(script, "_justiceCriticalBarrierOperationKind", "Inventory");
+            SetField(script, "_justiceCriticalBarrierTransactionId", transactionId);
+            SetField(script, "_justiceCriticalBarrierIdentityKey", "slot:0:model:1000");
+            SetField(script, "_justiceCriticalBarrierRevision", 1L);
+            SetField(script, "_justiceCriticalBarrierProfileGeneration", 1L);
+            SetField(script, "_justiceCriticalBarrierCreatedAtUtcTicks", createdAt);
+            SetField(script, "_justiceCriticalBarrierProfileSlot", 0);
+
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "TryRejectJusticeCriticalBarrierBeforeCustodyDeath"));
+            Assert.AreEqual(0L, GetField<long>(script, "_justiceCriticalBarrierRevision"));
+            Assert.AreEqual(
+                JusticeWalState.Rejected,
+                wal.GetLatest(transactionId).State);
+        });
+    }
+
+    [TestMethod]
+    public void CustodyDeath_DoesNotDiscardAnAmbiguousBarrierWhoseEffectMayHaveStarted()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            Invoke(script, "InitializeJusticePersistenceServices");
+            JusticeWriteAheadLog wal =
+                GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog");
+            const string transactionId = "custody-death:ambiguous-barrier";
+            long createdAt = DateTime.UtcNow.Ticks;
+            JusticePersistenceField[] fields =
+            {
+                new JusticePersistenceField("snapshotRevision", "1"),
+                new JusticePersistenceField("profileGeneration", "1"),
+                new JusticePersistenceField("identityKey", "slot:0:model:1000"),
+                new JusticePersistenceField("boundary", "InventoryConfiscation"),
+                new JusticePersistenceField(
+                    "schemaMajor",
+                    JusticeXmlPersistenceCodec.SchemaMajor.ToString(
+                        CultureInfo.InvariantCulture))
+            };
+            wal.Append(new JusticeWalRecord(
+                transactionId,
+                "Inventory",
+                0,
+                JusticeWalState.Prepared,
+                1L,
+                createdAt,
+                fields));
+            wal.Append(new JusticeWalRecord(
+                transactionId,
+                "Inventory",
+                0,
+                JusticeWalState.Attempted,
+                1L,
+                createdAt,
+                fields));
+            wal.Append(new JusticeWalRecord(
+                transactionId,
+                "Inventory",
+                0,
+                JusticeWalState.Ambiguous,
+                2L,
+                createdAt,
+                fields));
+            SetField(script, "_justiceCriticalBarrierCaller", "InventoryConfiscation");
+            SetField(script, "_justiceCriticalBarrierOperationKind", "Inventory");
+            SetField(script, "_justiceCriticalBarrierTransactionId", transactionId);
+            SetField(script, "_justiceCriticalBarrierIdentityKey", "slot:0:model:1000");
+            SetField(script, "_justiceCriticalBarrierRevision", 1L);
+            SetField(script, "_justiceCriticalBarrierProfileGeneration", 1L);
+            SetField(script, "_justiceCriticalBarrierCreatedAtUtcTicks", createdAt);
+            SetField(script, "_justiceCriticalBarrierProfileSlot", 0);
+
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "TryRejectJusticeCriticalBarrierBeforeCustodyDeath"));
+            Assert.AreEqual(1L, GetField<long>(script, "_justiceCriticalBarrierRevision"));
+            Assert.AreEqual(
+                JusticeWalState.Ambiguous,
+                wal.GetLatest(transactionId).State);
+        });
+    }
+
+    [TestMethod]
+    public void CriticalBarrier_LostAttemptedAcknowledgementResumesWithoutRewritingPrepared()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            SetField(
+                script,
+                "_justiceWalFaultInjectorOverride",
+                new NthWalFaultInjector(
+                    JusticePersistenceFaultPoint.AfterWalFlush,
+                    2));
+            FlushAndAwait(script);
+
+            JusticeRepository repository =
+                GetField<JusticeRepository>(script, "_justiceRepository");
+            long revision = repository.GetDiagnostics().DiskRevision;
+            Assert.IsTrue(revision > 0L);
+            long createdAt = DateTime.UtcNow.Ticks;
+            const string transactionId = "critical:lost-attempted-ack";
+            SetField(script, "_justiceCriticalBarrierCaller", "CompleteJusticeCustodyTransfer");
+            SetField(script, "_justiceCriticalBarrierOperationKind", "Transfer");
+            SetField(script, "_justiceCriticalBarrierTransactionId", transactionId);
+            SetField(script, "_justiceCriticalBarrierIdentityKey", "slot:0:model:1000");
+            SetField(script, "_justiceCriticalBarrierRevision", revision);
+            SetField(script, "_justiceCriticalBarrierProfileGeneration", 1L);
+            SetField(script, "_justiceCriticalBarrierCreatedAtUtcTicks", createdAt);
+            SetField(script, "_justiceCriticalBarrierProfileSlot", 0);
+
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "TryCommitJusticeCriticalBarrierToWal"));
+            JusticeWriteAheadLog wal =
+                GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog");
+            Assert.AreEqual(JusticeWalState.Attempted, wal.GetLatest(transactionId).State);
+            Assert.AreEqual(revision, GetField<long>(script, "_justiceCriticalBarrierRevision"));
+
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "TryCommitJusticeCriticalBarrierToWal"));
+            Assert.AreEqual(0L, GetField<long>(script, "_justiceCriticalBarrierRevision"));
+            JusticeWalRecoveryResult recovered = JusticeWriteAheadLog.Recover(
+                Path.Combine(directory, "_justice_state.wal"));
+            Assert.AreEqual(JusticeWalRecoveryStatus.Clean, recovered.Status);
+            Assert.AreEqual(
+                2,
+                recovered.Records.Count(record =>
+                    string.Equals(
+                        record.TransactionId,
+                        transactionId,
+                        StringComparison.Ordinal)),
+                "Le retry ne doit jamais réécrire Prepared après un ACK Attempted perdu.");
+            Assert.AreEqual(
+                JusticeWalState.Attempted,
+                recovered.Records.Last(record =>
+                    string.Equals(
+                        record.TransactionId,
+                        transactionId,
+                        StringComparison.Ordinal)).State);
+        });
+    }
+
+    [TestMethod]
+    public void DeathFront_RawPoliceCaseWithoutWantedEpisodeSurvivesAttemptedRecovery()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            profiles[0].CaseState.ClearActiveCase(false);
+            profiles[0].CaseState.Enabled = false;
+            profiles[0].CaseState.Phase = JusticePhase.AtLarge;
+            object script = CreateHeadlessScript(profiles, 0);
+            SetField(script, "_justiceProfilePersistenceGenerations", new[] { 5L, 0L, 0L });
+            SetField(script, "_justicePersistenceRevision", 5L);
+
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(
+                script,
+                directory,
+                5L);
+            try
+            {
+                JusticeWalRecord prepared = CreateDeathFrontRecord(
+                    "death-front:raw-police",
+                    "PoliceCapture",
+                    0,
+                    JusticeWalState.Prepared,
+                    5L,
+                    5L,
+                    string.Empty,
+                    0,
+                    0,
+                    1000,
+                    0,
+                    1000);
+                wal.Append(prepared);
+                JusticeWalRecord attempted = wal.Append(CopyWalRecord(
+                    prepared,
+                    JusticeWalState.Attempted,
+                    5L));
+
+                Invoke(script, "RecoverJusticeDeathFrontFromWal", attempted);
+                Assert.IsTrue(profiles[0].PendingDeathCapture);
+                Assert.AreEqual(0, profiles[0].PendingDeathCapturePlayerSlot);
+                Assert.AreEqual(1000, profiles[0].PendingDeathCapturePlayerModel);
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justicePursuitDeathObservedDuringSuspension"));
+                Assert.AreEqual(JusticePhase.AtLarge, profiles[0].CaseState.Phase);
+                Assert.IsTrue(
+                    profiles[0].CaseState.Enabled,
+                    "La preuve WAL brute doit réactiver le dossier qui avait déjà accepté la mort.");
+
+                FlushAndAwait(script);
+                Assert.AreEqual(
+                    JusticeWalState.Ambiguous,
+                    wal.GetLatest(prepared.TransactionId).State,
+                    "Le snapshot portant le front brut doit acquitter Attempted.");
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "IsJusticePoliceDeathFrontResultDurable"),
+                    "Le primaire seul ne doit pas autoriser la capture.");
+
+                FlushAndAwait(script);
+                Assert.AreEqual(
+                    JusticeWalState.Confirmed,
+                    wal.GetLatest(prepared.TransactionId).State);
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "IsJusticePoliceDeathFrontResultDurable"));
+
+                XElement active = GetPersistedActiveJusticeProfile(XDocument.Load(
+                    Path.Combine(directory, "_justice_state.xml")));
+                Assert.AreEqual("true", (string)active.Attribute("pendingDeathCapture"));
+                Assert.IsTrue(string.IsNullOrWhiteSpace(
+                    (string)active.Element("Case").Attribute("wantedEpisodeId")));
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeathFront_InactivePoliceOwnerIsNormalizedAndConfirmedOnBothCopies()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            profiles[0].CaseState.ClearActiveCase(false);
+            profiles[0].CaseState.Enabled = false;
+            profiles[0].CaseState.Phase = JusticePhase.AtLarge;
+            string activeLabel = profiles[1].CaseState.LastCrimeLabel;
+            object script = CreateHeadlessScript(profiles, 1);
+            SetField(script, "_justiceProfilePersistenceGenerations", new[] { 2L, 9L, 0L });
+            SetField(script, "_justicePersistenceRevision", 9L);
+
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(
+                script,
+                directory,
+                9L);
+            try
+            {
+                JusticeWalRecord prepared = CreateDeathFrontRecord(
+                    "death-front:inactive-police",
+                    "PoliceCapture",
+                    0,
+                    JusticeWalState.Prepared,
+                    2L,
+                    2L,
+                    "episode:inactive-police",
+                    0,
+                    0,
+                    1000,
+                    0,
+                    1000);
+                wal.Append(prepared);
+                JusticeWalRecord attempted = wal.Append(CopyWalRecord(
+                    prepared,
+                    JusticeWalState.Attempted,
+                    2L));
+
+                Invoke(script, "RecoverJusticeDeathFrontFromWal", attempted);
+                Assert.IsTrue(profiles[0].CaseState.Enabled);
+                Assert.AreEqual(JusticePhase.Wanted, profiles[0].CaseState.Phase);
+                Assert.AreEqual(
+                    "episode:inactive-police",
+                    profiles[0].CaseState.WantedEpisodeId);
+                Assert.AreEqual(1, profiles[0].CaseState.Charges.Count);
+                Assert.IsTrue(profiles[0].CaseState.SentenceSeconds > 0);
+                Assert.AreEqual(
+                    JusticeCrimeKind.EvadingPolice,
+                    profiles[0].CaseState.Charges[0].Kind);
+                Assert.IsTrue(profiles[0].PendingDeathCapture);
+                Assert.AreEqual(activeLabel, profiles[1].CaseState.LastCrimeLabel);
+                Assert.IsFalse(profiles[1].PendingDeathCapture);
+                Assert.AreSame(profiles[1].CaseState, GetField<JusticeCaseState>(
+                    script,
+                    "_justiceCaseState"));
+
+                FlushAndAwait(script);
+                Assert.AreEqual(
+                    JusticeWalState.Ambiguous,
+                    wal.GetLatest(prepared.TransactionId).State);
+                FlushAndAwait(script);
+                Assert.AreEqual(
+                    JusticeWalState.Confirmed,
+                    wal.GetLatest(prepared.TransactionId).State);
+
+                string primaryPath = Path.Combine(directory, "_justice_state.xml");
+                foreach (string path in new[] { primaryPath, primaryPath + ".bak" })
+                {
+                    XDocument document = XDocument.Load(path);
+                    XElement owner = document.Root.Element("Profiles")
+                        .Elements("Profile")
+                        .Single(profile => string.Equals(
+                            (string)profile.Attribute("slot"),
+                            "0",
+                            StringComparison.Ordinal));
+                    Assert.AreEqual("true", (string)owner.Attribute("pendingDeathCapture"));
+                    Assert.AreEqual(
+                        "Wanted",
+                        (string)owner.Element("Case").Attribute("phase"));
+                    Assert.AreEqual(
+                        "episode:inactive-police",
+                        (string)owner.Element("Case").Attribute("wantedEpisodeId"));
+                    Assert.IsTrue(int.Parse(
+                        (string)owner.Element("Case").Attribute("sentenceSeconds"),
+                        CultureInfo.InvariantCulture) > 0);
+                    Assert.AreEqual(
+                        1,
+                        owner.Element("Case").Element("Charges").Elements("Charge").Count());
+                }
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeathFront_LostAttemptedAcknowledgementAtSameGenerationReplaysBeforeConfirmation()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            profiles[0].CaseState.ClearActiveCase(false);
+            profiles[0].CaseState.Enabled = true;
+            object writer = CreateHeadlessScript(profiles, 0);
+            SetField(
+                writer,
+                "_justiceWalFaultInjectorOverride",
+                new NthWalFaultInjector(
+                    JusticePersistenceFaultPoint.AfterWalFlush,
+                    2));
+            FlushAndAwait(writer);
+
+            string primaryPath = Path.Combine(directory, "_justice_state.xml");
+            XElement baseProfile = GetPersistedActiveJusticeProfile(
+                XDocument.Load(primaryPath));
+            long baseGeneration = long.Parse(
+                (string)baseProfile.Attribute("generation"),
+                CultureInfo.InvariantCulture);
+            Assert.IsFalse(bool.Parse(
+                (string)baseProfile.Attribute("pendingDeathCapture")));
+
+            Assert.IsFalse((bool)Invoke(
+                writer,
+                "TryPersistJusticeDeathFrontToWal",
+                "PoliceCapture",
+                0,
+                string.Empty,
+                0,
+                0,
+                1000));
+            JusticeWriteAheadLog writerWal = GetField<JusticeWriteAheadLog>(
+                writer,
+                "_justiceWriteAheadLog");
+            JusticeWalRecord attempted = writerWal.GetOpenTransactions().Single();
+            Assert.AreEqual(JusticeWalState.Attempted, attempted.State);
+            Assert.AreEqual(
+                baseGeneration.ToString(CultureInfo.InvariantCulture),
+                JusticeXmlPersistenceCodec.GetFieldValue(
+                    attempted.Fields,
+                    "profileGeneration",
+                    string.Empty),
+                "Le snapshot pré-front et le WAL perdu doivent partager la même génération.");
+            Assert.IsFalse(profiles[0].PendingDeathCapture);
+            Assert.IsNotNull(GetField<JusticeWalRecord>(
+                writer,
+                "_justicePendingDeathFrontWalRecord"));
+            Invoke(writer, "ShutdownJusticePersistenceServices");
+
+            object reader = CreateHeadlessScript(null, -1);
+            SetField(reader, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
+            Assert.IsTrue((bool)Invoke(reader, "TryReadJusticeStateFile", primaryPath));
+            Assert.IsFalse(GetField<bool>(
+                reader,
+                "_justicePursuitDeathObservedDuringSuspension"));
+            Invoke(reader, "InitializeJusticePersistenceServices");
+
+            JusticePlayerProfileState[] recoveredProfiles =
+                GetField<JusticePlayerProfileState[]>(reader, "_justicePlayerProfiles");
+            Assert.IsTrue(recoveredProfiles[0].PendingDeathCapture);
+            Assert.IsTrue(GetField<bool>(
+                reader,
+                "_justicePursuitDeathObservedDuringSuspension"));
+            JusticeWriteAheadLog recoveredWal = GetField<JusticeWriteAheadLog>(
+                reader,
+                "_justiceWriteAheadLog");
+            Assert.AreEqual(
+                JusticeWalState.Attempted,
+                recoveredWal.GetLatest(attempted.TransactionId).State);
+
+            SetField(reader, "_justiceMonotonicTimeMs", 100000L);
+            SetField(reader, "_justiceNextStateSaveAtMs", 0L);
+            SetField(reader, "_justiceNextCheckpointAtMs", 0L);
+            Invoke(reader, "PersistJusticeStateIfDue");
+            AwaitQueuedPersistence(reader);
+            Assert.AreEqual(
+                JusticeWalState.Ambiguous,
+                recoveredWal.GetLatest(attempted.TransactionId).State,
+                "Le primaire seul ne doit jamais rendre le front consommable.");
+
+            SetField(reader, "_justiceMonotonicTimeMs", 101000L);
+            SetField(reader, "_justiceNextStateSaveAtMs", 0L);
+            SetField(reader, "_justiceNextCheckpointAtMs", 0L);
+            Invoke(reader, "PersistJusticeStateIfDue");
+            AwaitQueuedPersistence(reader);
+            Assert.AreEqual(
+                JusticeWalState.Confirmed,
+                recoveredWal.GetLatest(attempted.TransactionId).State);
+
+            foreach (string path in new[] { primaryPath, primaryPath + ".bak" })
+            {
+                XElement active = GetPersistedActiveJusticeProfile(XDocument.Load(path));
+                Assert.AreEqual("true", (string)active.Attribute("pendingDeathCapture"));
+            }
+            Invoke(reader, "ShutdownJusticePersistenceServices");
+        });
+    }
+
+    [TestMethod]
+    public void DeathFront_DurabilityRequiresEveryOpenFrontOfTheActiveProfile()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            SetField(script, "_justiceProfilePersistenceGenerations", new[] { 10L, 0L, 0L });
+            SetField(script, "_justicePersistenceRevision", 10L);
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(
+                script,
+                directory,
+                10L);
+            try
+            {
+                JusticeWalRecord oldPrepared = CreateDeathFrontRecord(
+                    "death-front:old-police",
+                    "PoliceCapture",
+                    0,
+                    JusticeWalState.Prepared,
+                    9L,
+                    9L,
+                    string.Empty,
+                    0,
+                    0,
+                    1000,
+                    0,
+                    1000);
+                wal.Append(oldPrepared);
+                wal.Append(CopyWalRecord(oldPrepared, JusticeWalState.Attempted, 9L));
+                wal.Append(CopyWalRecord(oldPrepared, JusticeWalState.Ambiguous, 10L));
+
+                JusticeWalRecord newPrepared = CreateDeathFrontRecord(
+                    "death-front:new-police",
+                    "PoliceCapture",
+                    0,
+                    JusticeWalState.Prepared,
+                    10L,
+                    10L,
+                    string.Empty,
+                    0,
+                    0,
+                    1000,
+                    0,
+                    1000);
+                wal.Append(newPrepared);
+                wal.Append(CopyWalRecord(newPrepared, JusticeWalState.Attempted, 10L));
+
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "IsJusticePoliceDeathFrontResultDurable"),
+                    "Un ancien Ambiguous ne doit jamais masquer le nouvel Attempted.");
+                Assert.AreEqual(
+                    JusticeWalState.Attempted,
+                    wal.GetLatest(newPrepared.TransactionId).State);
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeathFront_DestructiveGuardWaitsForPoliceAndCustodyConfirmation()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(
+                script,
+                directory,
+                10L);
+            try
+            {
+                JusticeWalRecord police = CreateDeathFrontRecord(
+                    "death-front:destructive-police",
+                    "PoliceCapture",
+                    0,
+                    JusticeWalState.Prepared,
+                    10L,
+                    10L,
+                    string.Empty,
+                    0,
+                    0,
+                    1000,
+                    0,
+                    1000);
+                JusticeWalRecord custody = CreateDeathFrontRecord(
+                    "death-front:destructive-custody",
+                    "CustodyRebind",
+                    0,
+                    JusticeWalState.Prepared,
+                    10L,
+                    10L,
+                    "custody:destructive-guard",
+                    2,
+                    0,
+                    1000,
+                    0,
+                    1000);
+                wal.Append(police);
+                wal.Append(CopyWalRecord(police, JusticeWalState.Attempted, 10L));
+                wal.Append(custody);
+                wal.Append(CopyWalRecord(custody, JusticeWalState.Attempted, 10L));
+                wal.Append(CopyWalRecord(custody, JusticeWalState.Ambiguous, 11L));
+                wal.Append(CopyWalRecord(custody, JusticeWalState.Confirmed, 11L));
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeDeathFrontsDurableBeforeDestructiveTransaction"));
+
+                wal.Append(CopyWalRecord(police, JusticeWalState.Ambiguous, 11L));
+                wal.Append(CopyWalRecord(police, JusticeWalState.Confirmed, 11L));
+                JusticeWalRecord secondCustody = CreateDeathFrontRecord(
+                    "death-front:destructive-custody-2",
+                    "CustodyRebind",
+                    0,
+                    JusticeWalState.Prepared,
+                    10L,
+                    10L,
+                    "custody:destructive-guard-2",
+                    2,
+                    0,
+                    1000,
+                    0,
+                    1000);
+                wal.Append(secondCustody);
+                wal.Append(CopyWalRecord(
+                    secondCustody,
+                    JusticeWalState.Attempted,
+                    10L));
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeDeathFrontsDurableBeforeDestructiveTransaction"));
+
+                wal.Append(CopyWalRecord(
+                    secondCustody,
+                    JusticeWalState.Ambiguous,
+                    11L));
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeDeathFrontsDurableBeforeDestructiveTransaction"));
+
+                wal.Append(CopyWalRecord(
+                    secondCustody,
+                    JusticeWalState.Confirmed,
+                    11L));
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "EnsureJusticeDeathFrontsDurableBeforeDestructiveTransaction"));
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeathFront_PartialServiceInitializationNeverConfirmsOrConsumesTheFront()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            profiles[0].CaseState.ClearActiveCase(false);
+            profiles[0].CaseState.Enabled = true;
+            object script = CreateHeadlessScript(profiles, 0);
+            SetField(script, "_justiceProfilePersistenceGenerations", new[] { 3L, 0L, 0L });
+            SetField(script, "_justicePersistenceRevision", 3L);
+
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            JusticeWalRecord prepared = CreateDeathFrontRecord(
+                "death-front:partial-init",
+                "PoliceCapture",
+                0,
+                JusticeWalState.Prepared,
+                3L,
+                3L,
+                string.Empty,
+                0,
+                0,
+                1000,
+                0,
+                1000);
+            SetField(script, "_justiceWriteAheadLog", wal);
+            SetField(script, "_justicePendingDeathFrontWalRecord", prepared);
+            SetField(script, "_justicePersistenceServicesUnavailable", true);
+            SetField(script, "_justicePersistenceInitializationFailureCount", 1);
+            SetField(script, "_justiceNextPersistenceInitializationRetryAtMs", 1000L);
+
+            Assert.IsFalse((bool)Invoke(script, "TryResumePendingJusticeDeathFrontWal"));
+            Assert.AreSame(
+                prepared,
+                GetField<JusticeWalRecord>(script, "_justicePendingDeathFrontWalRecord"));
+            Assert.AreEqual(0, wal.GetOpenTransactions().Count);
+            Assert.IsFalse(profiles[0].PendingDeathCapture);
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "IsJusticePoliceDeathFrontResultDurable"));
+
+            try
+            {
+                SetField(script, "_justiceMonotonicTimeMs", 1000L);
+                Assert.IsTrue((bool)Invoke(script, "TryResumePendingJusticeDeathFrontWal"));
+                JusticeWriteAheadLog resumedWal = GetField<JusticeWriteAheadLog>(
+                    script,
+                    "_justiceWriteAheadLog");
+                Assert.AreNotSame(wal, resumedWal);
+                Assert.IsFalse(GetField<bool>(
+                    script,
+                    "_justicePersistenceServicesUnavailable"));
+                Assert.IsNull(GetField<JusticeWalRecord>(
+                    script,
+                    "_justicePendingDeathFrontWalRecord"));
+                Assert.IsTrue(profiles[0].PendingDeathCapture);
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "IsJusticePoliceDeathFrontResultDurable"));
+
+                FlushAndAwait(script);
+                FlushAndAwait(script);
+                Assert.AreEqual(
+                    JusticeWalState.Confirmed,
+                    resumedWal.GetLatest(prepared.TransactionId).State);
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "IsJusticePoliceDeathFrontResultDurable"));
+            }
+            finally
+            {
+                Invoke(script, "ShutdownJusticePersistenceServices");
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeathFront_LatestWinsCoalescingOnlyQualifiesTheExactDiskRevision()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            profiles[0].CaseState.Enabled = true;
+            object script = CreateHeadlessScript(profiles, 0);
+            string statePath = Path.Combine(directory, "_justice_state.xml");
+            using (FirstWriteBlockingAtomicFileStore store =
+                new FirstWriteBlockingAtomicFileStore())
+            {
+                JusticeRepository repository = new JusticeRepository(
+                    statePath,
+                    statePath + ".bak",
+                    new JusticeXmlPersistenceCodec(),
+                    0L,
+                    store,
+                    JusticeNoOpPersistenceFaultInjector.Instance,
+                    10);
+                JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                    Path.Combine(directory, "_justice_state.wal"));
+                repository.Start();
+                SetField(script, "_justiceRepository", repository);
+                SetField(script, "_justiceWriteAheadLog", wal);
+                try
+                {
+                    Assert.IsTrue((bool)Invoke(script, "JusticeFlushStateNow"));
+                    Assert.IsTrue(
+                        store.FirstWriteStarted.WaitOne(TimeSpan.FromSeconds(5)),
+                        "Le snapshot de base doit occuper le writer avant le front.");
+                    Assert.AreEqual(
+                        1L,
+                        repository.GetDiagnostics().WritingRevision);
+
+                    Assert.IsTrue((bool)Invoke(
+                        script,
+                        "TryPersistJusticeDeathFrontToWal",
+                        "PoliceCapture",
+                        0,
+                        string.Empty,
+                        0,
+                        0,
+                        1000));
+                    JusticeWalRecord attempted = wal.GetOpenTransactions().Single();
+                    Assert.AreEqual(JusticeWalState.Attempted, attempted.State);
+                    long firstCandidate = GetField<Dictionary<string, long>>(
+                        script,
+                        "_justiceDeathFrontResultCandidates")[attempted.TransactionId];
+
+                    profiles[0].CaseState.LastCrimeLabel =
+                        "Mutation coalescée après le front";
+                    Invoke(script, "JusticeMarkStateDirty");
+                    Assert.IsTrue((bool)Invoke(script, "JusticeFlushStateNow"));
+                    long exactCandidate = GetField<Dictionary<string, long>>(
+                        script,
+                        "_justiceDeathFrontResultCandidates")[attempted.TransactionId];
+                    Assert.IsTrue(exactCandidate > firstCandidate);
+                    Assert.AreEqual(
+                        exactCandidate,
+                        repository.GetDiagnostics().PendingRevision,
+                        "Le writer latest-wins doit remplacer le premier candidat en attente.");
+
+                    store.ReleaseFirstWrite.Set();
+                    AwaitQueuedPersistence(script);
+                    JusticeRepositoryDiagnostics afterCoalescing =
+                        repository.GetDiagnostics();
+                    Assert.AreEqual(exactCandidate, afterCoalescing.DiskRevision);
+                    Assert.AreEqual(
+                        JusticeWalState.Ambiguous,
+                        wal.GetLatest(attempted.TransactionId).State);
+                    Assert.AreEqual(
+                        exactCandidate,
+                        wal.GetLatest(attempted.TransactionId).PersistenceRevision,
+                        "La révision sautée ne doit jamais être utilisée comme preuve résultat.");
+
+                    FlushAndAwait(script);
+                    Assert.AreEqual(
+                        JusticeWalState.Confirmed,
+                        wal.GetLatest(attempted.TransactionId).State);
+                    foreach (string path in new[] { statePath, statePath + ".bak" })
+                    {
+                        XElement active = GetPersistedActiveJusticeProfile(
+                            XDocument.Load(path));
+                        Assert.AreEqual(
+                            "true",
+                            (string)active.Attribute("pendingDeathCapture"));
+                    }
+                }
+                finally
+                {
+                    store.ReleaseFirstWrite.Set();
+                    repository.Stop(TimeSpan.FromSeconds(5));
+                    repository.Dispose();
+                }
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeathFront_AmbiguousRecoveredFromOlderBackupForcesBothRotations()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            profiles[0].CaseState.ClearActiveCase(false);
+            profiles[0].CaseState.Enabled = true;
+            object script = CreateHeadlessScript(profiles, 0);
+            SetField(script, "_justiceProfilePersistenceGenerations", new[] { 2L, 0L, 0L });
+            SetField(script, "_justicePersistenceRevision", 2L);
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(
+                script,
+                directory,
+                2L);
+            try
+            {
+                JusticeWalRecord prepared = CreateDeathFrontRecord(
+                    "death-front:backup-replay",
+                    "PoliceCapture",
+                    0,
+                    JusticeWalState.Prepared,
+                    2L,
+                    5L,
+                    string.Empty,
+                    0,
+                    0,
+                    1000,
+                    0,
+                    1000);
+                wal.Append(prepared);
+                wal.Append(CopyWalRecord(prepared, JusticeWalState.Attempted, 2L));
+                JusticeWalRecord ambiguous = wal.Append(CopyWalRecord(
+                    prepared,
+                    JusticeWalState.Ambiguous,
+                    5L));
+
+                Invoke(script, "RecoverJusticeDeathFrontFromWal", ambiguous);
+                Assert.IsTrue(profiles[0].PendingDeathCapture);
+                Assert.AreEqual(
+                    5L,
+                    GetField<long[]>(script, "_justiceProfilePersistenceGenerations")[0],
+                    "La génération portée par le WAL doit relever le plancher du backup ancien.");
+                Assert.AreEqual(5L, GetField<long>(script, "_justicePersistenceRevision"));
+
+                SetField(script, "_justiceMonotonicTimeMs", 100000L);
+                SetField(script, "_justiceNextStateSaveAtMs", 0L);
+                SetField(script, "_justiceNextCheckpointAtMs", 0L);
+                Invoke(script, "PersistJusticeStateIfDue");
+                AwaitQueuedPersistence(script);
+                Assert.AreEqual(
+                    JusticeWalState.Ambiguous,
+                    wal.GetLatest(prepared.TransactionId).State,
+                    "La première rotation ne prouve encore que le primaire.");
+
+                SetField(script, "_justiceMonotonicTimeMs", 101000L);
+                SetField(script, "_justiceNextStateSaveAtMs", 0L);
+                SetField(script, "_justiceNextCheckpointAtMs", 0L);
+                Invoke(script, "PersistJusticeStateIfDue");
+                AwaitQueuedPersistence(script);
+
+                Assert.AreEqual(
+                    JusticeWalState.Confirmed,
+                    wal.GetLatest(prepared.TransactionId).State,
+                    "La reprise doit dépasser la révision historique sans mutation externe.");
+                Assert.IsTrue(repository.GetDiagnostics().DiskRevision > 5L);
+                string primaryPath = Path.Combine(directory, "_justice_state.xml");
+                foreach (string path in new[] { primaryPath, primaryPath + ".bak" })
+                {
+                    XElement active = GetPersistedActiveJusticeProfile(XDocument.Load(path));
+                    Assert.AreEqual("true", (string)active.Attribute("pendingDeathCapture"));
+                    Assert.AreEqual("0", (string)active.Attribute("pendingDeathCapturePlayerSlot"));
+                    Assert.AreEqual("1000", (string)active.Attribute("pendingDeathCapturePlayerModel"));
+                }
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void CustodyDeath_SecondRespawnModelRecoversOnlyFromAnOlderProvenGeneration()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            ConfigureIncarceratedRuntime(script, profiles[0]);
+            Invoke(script, "SnapshotActiveJusticePlayerProfile");
+            JusticeCustodyPersistenceSnapshot before =
+                RequireTypedCustodySnapshot(profiles[0]);
+            Assert.AreEqual(123456, before.PlayerModelHash);
+            SetField(script, "_justiceProfilePersistenceGenerations", new[] { 4L, 0L, 0L });
+            SetField(script, "_justicePersistenceRevision", 4L);
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(
+                script,
+                directory,
+                4L);
+            try
+            {
+                JusticeWalRecord prepared = CreateDeathFrontRecord(
+                    "death-front:second-custody-model",
+                    "CustodyRebind",
+                    0,
+                    JusticeWalState.Prepared,
+                    4L,
+                    5L,
+                    profiles[0].CaseState.CustodyEpisodeId,
+                    before.Site,
+                    0,
+                    654321,
+                    0,
+                    1000);
+                wal.Append(prepared);
+                JusticeWalRecord attempted = wal.Append(CopyWalRecord(
+                    prepared,
+                    JusticeWalState.Attempted,
+                    4L));
+
+                Invoke(script, "RecoverJusticeDeathFrontFromWal", attempted);
+                JusticeCustodyPersistenceSnapshot recovered =
+                    RequireTypedCustodySnapshot(profiles[0]);
+                Assert.AreEqual(654321, recovered.PlayerModelHash);
+                Assert.IsTrue(recovered.WaitingForRespawn);
+                Assert.IsTrue(recovered.DeathRebindPending);
+                Assert.AreEqual(654321, GetField<int>(script, "_justiceCustodyPlayerModelHash"));
+                Assert.IsTrue(GetField<bool>(script, "_justiceCustodyWaitingForRespawn"));
+                Assert.IsTrue(GetField<bool>(script, "_justiceCustodyDeathRebindPending"));
+                Assert.AreEqual(
+                    5L,
+                    GetField<long[]>(script, "_justiceProfilePersistenceGenerations")[0]);
+
+                SetField(script, "_justiceMonotonicTimeMs", 100000L);
+                SetField(script, "_justiceNextStateSaveAtMs", 0L);
+                SetField(script, "_justiceNextCheckpointAtMs", 0L);
+                Invoke(script, "PersistJusticeStateIfDue");
+                AwaitQueuedPersistence(script);
+                Assert.AreEqual(
+                    JusticeWalState.Ambiguous,
+                    wal.GetLatest(prepared.TransactionId).State);
+
+                SetField(script, "_justiceMonotonicTimeMs", 101000L);
+                SetField(script, "_justiceNextStateSaveAtMs", 0L);
+                SetField(script, "_justiceNextCheckpointAtMs", 0L);
+                Invoke(script, "PersistJusticeStateIfDue");
+                AwaitQueuedPersistence(script);
+                Assert.AreEqual(
+                    JusticeWalState.Confirmed,
+                    wal.GetLatest(prepared.TransactionId).State);
+
+                string primaryPath = Path.Combine(directory, "_justice_state.xml");
+                foreach (string path in new[] { primaryPath, primaryPath + ".bak" })
+                {
+                    object persisted = CreateHeadlessScript(null, -1);
+                    SetField(
+                        persisted,
+                        "_justiceCanonicalPlayerSlotOverride",
+                        new Func<int>(() => 0));
+                    Assert.IsTrue((bool)Invoke(persisted, "TryReadJusticeStateFile", path));
+                    JusticePlayerProfileState[] persistedProfiles =
+                        GetField<JusticePlayerProfileState[]>(
+                            persisted,
+                            "_justicePlayerProfiles");
+                    JusticeCustodyPersistenceSnapshot persistedCustody =
+                        RequireTypedCustodySnapshot(persistedProfiles[0]);
+                    Assert.AreEqual(654321, persistedCustody.PlayerModelHash);
+                    Assert.IsTrue(persistedCustody.WaitingForRespawn);
+                    Assert.IsTrue(persistedCustody.DeathRebindPending);
+                }
+
+                JusticePlayerProfileState[] invalidProfiles = CreateDistinctProfiles();
+                object invalid = CreateHeadlessScript(invalidProfiles, 0);
+                ConfigureIncarceratedRuntime(invalid, invalidProfiles[0]);
+                Invoke(invalid, "SnapshotActiveJusticePlayerProfile");
+                SetField(invalid, "_justiceProfilePersistenceGenerations", new[] { 6L, 0L, 0L });
+                SetField(invalid, "_justicePersistenceRevision", 6L);
+                SetField(invalid, "_justiceWriteAheadLog", wal);
+                TargetInvocationException rejected =
+                    Assert.ThrowsException<TargetInvocationException>(
+                        () => Invoke(
+                            invalid,
+                            "RecoverJusticeDeathFrontFromWal",
+                            attempted));
+                Assert.IsInstanceOfType(
+                    rejected.InnerException,
+                    typeof(InvalidDataException));
+                Assert.AreEqual(
+                    123456,
+                    RequireTypedCustodySnapshot(invalidProfiles[0]).PlayerModelHash,
+                    "Une génération plus récente interdit de remplacer le modèle déjà prouvé.");
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void LegacyTransferRollback_PreservesSentenceRecordAndInventoryAcrossCrash()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            ConfigureIncarceratedRuntime(script, profiles[0]);
+            JusticeCaseState state = profiles[0].CaseState;
+            state.Phase = JusticePhase.Transporting;
+            JusticeOperation rollback = new JusticeOperation(
+                JusticePolicy.CreateOperationId(
+                    JusticeOperationKind.TransferRollback,
+                    state.CustodyEpisodeId),
+                JusticeOperationKind.TransferRollback,
+                state.CustodyEpisodeId);
+            Assert.IsTrue(JusticePolicy.TryRegisterOperation(state, rollback));
+            SetField(script, "_justiceWeaponSnapshot", CreateValidWeaponSnapshot());
+            SetField(script, "_justiceInventoryRemoved", true);
+            SetPrivateEnumField(script, "_justiceInventoryCustodyState", "RemovedVerified");
+            SetField(script, "_justiceWeaponControlsLocked", true);
+            state.HasWarrant = false;
+
+            // Je publie d'abord le snapshot legacy exact. Il devient le backup
+            // de crash que la migration doit remplacer sans toucher au dossier,
+            // à la peine ni au moindre détail de l'inventaire confisqué.
+            FlushAndAwait(script);
+            string primaryPath = Path.Combine(directory, "_justice_state.xml");
+            XDocument legacyDocument = XDocument.Load(primaryPath);
+            XElement legacyProfile = GetPersistedActiveJusticeProfile(legacyDocument);
+            XElement expectedCase = new XElement(legacyProfile.Element("Case"));
+            XElement expectedRecord = new XElement(legacyProfile.Element("Record"));
+            XElement expectedCustody = new XElement(legacyProfile.Element("Custody"));
+            expectedCase
+                .Element("CompletedOperations")
+                .Elements("Operation")
+                .Where(operation => operation.Value == rollback.OperationId)
+                .Remove();
+
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "ResumeJusticeCustodyTransferRollback",
+                null,
+                1000));
+            Assert.AreEqual(JusticePhase.Transporting, state.Phase);
+            Assert.IsTrue(GetField<bool>(script, "_justiceCustodyRuntimeActive"));
+            Assert.IsTrue(GetField<bool>(script, "_justiceCustodyTransferPending"));
+            Assert.IsTrue(GetField<bool>(script, "_justiceCustodyResumePending"));
+            Assert.IsTrue(GetField<bool>(
+                script,
+                "_justiceCustodyTransferRollbackFinalizationPending"));
+            Assert.IsTrue(GetField<bool>(script, "_justiceInventoryRemoved"));
+            Assert.AreEqual(
+                "RemovedVerified",
+                GetField<object>(script, "_justiceInventoryCustodyState").ToString());
+            Assert.IsTrue(GetField<bool>(script, "_justiceWeaponControlsLocked"));
+            CollectionAssert.DoesNotContain(state.CompletedOperationIds, rollback.OperationId);
+
+            AwaitQueuedPersistence(script);
+            XDocument migratedPrimary = XDocument.Load(primaryPath);
+            XElement migratedProfile = GetPersistedActiveJusticeProfile(migratedPrimary);
+            Assert.IsTrue(
+                XNode.DeepEquals(expectedCase, migratedProfile.Element("Case")),
+                "La première écriture de migration doit préserver exactement la peine et les charges.");
+            Assert.IsTrue(
+                XNode.DeepEquals(expectedRecord, migratedProfile.Element("Record")),
+                "La première écriture de migration doit préserver exactement le casier.");
+            Assert.IsTrue(
+                XNode.DeepEquals(expectedCustody, migratedProfile.Element("Custody")),
+                "La première écriture de migration doit préserver exactement le snapshot d'armes.");
+
+            object midCrash = CreateHeadlessScript(null, -1);
+            SetField(midCrash, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
+            Assert.IsTrue((bool)Invoke(
+                midCrash,
+                "TryReadJusticeStateFile",
+                primaryPath));
+            Assert.AreEqual(
+                JusticePhase.Incarcerated,
+                GetField<JusticeCaseState>(midCrash, "_justiceCaseState").Phase,
+                "Le disque reste en Transporting, puis la normalisation de reprise doit replacer le détenu en détention, jamais AtLarge.");
+            Assert.IsTrue(GetField<bool>(midCrash, "_justiceCustodyRuntimeActive"));
+            Assert.IsTrue(GetField<bool>(midCrash, "_justiceCustodyResumePending"));
+            Assert.IsFalse((bool)Invoke(
+                midCrash,
+                "ResumeJusticeCustodyTransferRollback",
+                null,
+                1500),
+                "Le primaire déjà migré ne doit pas rejouer l'ancien rollback.");
+
+            // Le passage suivant acquitte le précommit puis enfile une rotation
+            // dédiée. J'injecte d'abord un refus de cette rotation : le latch
+            // doit rester actif et reprendre à cadence bornée, sans libération.
+            SetField(script, "_justiceMonotonicTimeMs", 2000L);
+            SetField(
+                script,
+                "_justiceStateFlushFailureOverride",
+                new Func<int, bool>(attempt => true));
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "ResumeJusticeCustodyTransferRollback",
+                null,
+                2000));
+            Assert.IsTrue(GetField<bool>(
+                script,
+                "_justiceCustodyTransferRollbackFinalizationPending"));
+            Assert.IsTrue(GetField<bool>(
+                script,
+                "_justiceCustodyTransferRollbackPrecommitRedundant"));
+            Assert.AreEqual(
+                0L,
+                GetField<long>(
+                    script,
+                    "_justiceCustodyTransferRollbackFinalizationRevision"));
+
+            SetField(
+                script,
+                "_justiceStateFlushFailureOverride",
+                new Func<int, bool>(attempt => false));
+            SetField(script, "_justiceMonotonicTimeMs", 2500L);
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "ResumeJusticeCustodyTransferRollback",
+                null,
+                2500));
+            Assert.AreEqual(
+                0L,
+                GetField<long>(
+                    script,
+                    "_justiceCustodyTransferRollbackFinalizationRevision"),
+                "Le retry de finalisation doit respecter sa cadence bornée.");
+
+            SetField(script, "_justiceMonotonicTimeMs", 3000L);
+            Assert.IsFalse((bool)Invoke(
+                script,
+                "ResumeJusticeCustodyTransferRollback",
+                null,
+                3000));
+            Assert.IsTrue(GetField<long>(
+                script,
+                "_justiceCustodyTransferRollbackFinalizationRevision") > 0L);
+            AwaitQueuedPersistence(script);
+            SetField(script, "_justiceMonotonicTimeMs", 4000L);
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "ResumeJusticeCustodyTransferRollback",
+                null,
+                4000));
+            Assert.IsFalse(GetField<bool>(
+                script,
+                "_justiceCustodyTransferRollbackFinalizationPending"));
+            Assert.IsFalse(GetField<bool>(
+                script,
+                "_justiceCustodyTransferRollbackPrecommitRedundant"));
+            Assert.AreEqual(
+                0L,
+                GetField<long>(
+                    script,
+                    "_justiceCustodyTransferRollbackFinalizationRevision"));
+
+            // Je termine aussi le WAL générique afin de prouver que le résultat
+            // reste identique dans le primaire et son backup après rotation.
+            FlushAndAwait(script);
+            foreach (string path in new[] { primaryPath, primaryPath + ".bak" })
+            {
+                Assert.IsTrue(File.Exists(path), path);
+                XDocument durableDocument = XDocument.Load(path);
+                XElement durableProfile = GetPersistedActiveJusticeProfile(durableDocument);
+                Assert.IsTrue(
+                    XNode.DeepEquals(expectedCase, durableProfile.Element("Case")),
+                    "Le dossier exact a changé dans " + path);
+                Assert.IsTrue(
+                    XNode.DeepEquals(expectedRecord, durableProfile.Element("Record")),
+                    "Le casier exact a changé dans " + path);
+                Assert.IsTrue(
+                    XNode.DeepEquals(expectedCustody, durableProfile.Element("Custody")),
+                    "Le snapshot d'armes exact a changé dans " + path);
+
+                object afterCrash = CreateHeadlessScript(null, -1);
+                SetField(
+                    afterCrash,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 0));
+                Assert.IsTrue((bool)Invoke(afterCrash, "TryReadJusticeStateFile", path));
+                JusticeCaseState loadedCase = GetField<JusticeCaseState>(
+                    afterCrash,
+                    "_justiceCaseState");
+                Assert.AreEqual(
+                    JusticePhase.Incarcerated,
+                    loadedCase.Phase,
+                    "La reprise normalisée doit rester en détention, jamais AtLarge.");
+                Assert.IsTrue(GetField<bool>(afterCrash, "_justiceCustodyRuntimeActive"));
+                Assert.IsTrue(GetField<bool>(afterCrash, "_justiceCustodyResumePending"));
+                Assert.IsFalse(GetField<bool>(
+                    afterCrash,
+                    "_justiceCustodyTransferRollbackFinalizationPending"));
+                Assert.IsTrue(GetField<bool>(afterCrash, "_justiceInventoryRemoved"));
+                Assert.IsTrue(GetField<bool>(afterCrash, "_justiceWeaponControlsLocked"));
+                Assert.AreEqual(
+                    "RemovedVerified",
+                    GetField<object>(afterCrash, "_justiceInventoryCustodyState").ToString());
+                CollectionAssert.DoesNotContain(
+                    loadedCase.CompletedOperationIds,
+                    rollback.OperationId);
+
+                XElement custodyBeforeIdempotentRetry = XElement.Parse(
+                    (string)Invoke(afterCrash, "CaptureCurrentJusticeCustodyXml"));
+                Assert.IsFalse((bool)Invoke(
+                    afterCrash,
+                    "ResumeJusticeCustodyTransferRollback",
+                    null,
+                    5000));
+                Assert.AreEqual(JusticePhase.Incarcerated, loadedCase.Phase);
+                Assert.IsTrue(XNode.DeepEquals(
+                    custodyBeforeIdempotentRetry,
+                    XElement.Parse((string)Invoke(
+                        afterCrash,
+                        "CaptureCurrentJusticeCustodyXml"))));
+            }
         });
     }
 
@@ -1497,6 +3537,13 @@ public sealed class JusticePlayerProfilePersistenceTests
             Assert.IsTrue(
                 resumePrecommitAt >= 0 && resumeAmnestyAt > resumePrecommitAt,
                 "Le WAL redondant doit être confirmé avant toute restitution.");
+            AssertOrdered(
+                resumeBody,
+                "EnsureJusticeActiveProfileResetPrecommitRedundant()",
+                "EnsureJusticeDeathFrontsDurableBeforeDestructiveTransaction()",
+                "ClearPendingJusticeDeathCapture()",
+                "JusticeAmnestyCustody()",
+                "ReplaceJusticePlayerProfileWithEmptyState(slot)");
             Assert.IsFalse(
                 resumeBody.Contains("ResetJusticePlayerProfile(slot)"),
                 "Après restitution, le reset WAL doit contourner le garde recovery devenu obsolète.");
@@ -1810,6 +3857,434 @@ public sealed class JusticePlayerProfilePersistenceTests
         });
     }
 
+    [TestMethod]
+    public void DeferredPoliceDeath_IsInWalAndSwitchSnapshotBeforePostRepairReconcile()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 0);
+            InitializeProfileResetRuntimeCollections(script);
+            SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 1));
+            SetPrivateEnumField(
+                script,
+                "_justiceDeferredRuntimeFronts",
+                "DeathStarted");
+            SetField(script, "_justiceDeferredRuntimeFrontPlayerSlot", 1);
+            SetField(script, "_justiceDeferredRuntimeFrontPlayerModelHash", 1001);
+            SetField(script, "_justiceDeferredRuntimeFrontHadPursuit", true);
+
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(script, directory, 0L);
+            try
+            {
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "TryHardenJusticeDeferredCriticalFronts"));
+                Assert.IsTrue(profiles[1].PendingDeathCapture);
+                Assert.AreEqual(1, profiles[1].PendingDeathCapturePlayerSlot);
+                Assert.AreEqual(1001, profiles[1].PendingDeathCapturePlayerModel);
+                JusticeWalRecord attempted = wal.GetOpenTransactions().Single();
+                Assert.AreEqual(JusticeWalState.Attempted, attempted.State);
+                Assert.AreEqual(1, attempted.ProfileSlot);
+                Assert.AreEqual(
+                    "PoliceCapture",
+                    JusticeXmlPersistenceCodec.GetFieldValue(
+                        attempted.Fields,
+                        "mode",
+                        string.Empty));
+
+                JusticePlayerProfileState[] replayProfiles = CreateDistinctProfiles();
+                object replay = CreateHeadlessScript(replayProfiles, 1);
+                SetField(replay, "_justiceProfilePersistenceGenerations", new long[3]);
+                Invoke(replay, "RecoverJusticeDeathFrontFromWal", attempted);
+                Assert.IsTrue(replayProfiles[1].PendingDeathCapture);
+                Assert.IsTrue(GetField<bool>(
+                    replay,
+                    "_justicePoliceDeathRespawnMaskIntentPending"));
+
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }));
+                Assert.AreEqual(
+                    1,
+                    GetField<int>(script, "_justiceActivePlayerProfileSlot"),
+                    "Le premier passage doit avoir activé Q avant d'attendre DiskRevision.");
+                Assert.IsTrue(GetField<bool>(
+                    script,
+                    "_justicePoliceDeathRespawnMaskIntentPending"),
+                    "L'activation du profil Q doit réarmer son intent de masque durable.");
+                AwaitQueuedPersistence(script);
+
+                string path = Path.Combine(directory, "_justice_state.xml");
+                object afterCrash = CreateHeadlessScript(null, -1);
+                SetField(
+                    afterCrash,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 1));
+                Assert.IsTrue((bool)Invoke(afterCrash, "TryReadJusticeStateFile", path));
+                JusticePlayerProfileState[] loaded =
+                    GetField<JusticePlayerProfileState[]>(
+                        afterCrash,
+                        "_justicePlayerProfiles");
+                Assert.AreEqual(1, GetField<int>(
+                    afterCrash,
+                    "_justiceActivePlayerProfileSlot"));
+                Assert.IsTrue(
+                    loaded[1].PendingDeathCapture,
+                    "Le crash avant Reconcile ne doit pas perdre la mort de Q.");
+                Assert.AreEqual(1, loaded[1].PendingDeathCapturePlayerSlot);
+                Assert.AreEqual(1001, loaded[1].PendingDeathCapturePlayerModel);
+                Assert.IsTrue(GetField<bool>(
+                    afterCrash,
+                    "_justicePoliceDeathRespawnMaskIntentPending"));
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeferredPoliceArrest_SurvivesCrashBetweenSwitchSnapshotAndReconcile()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            ConfigureConsistentActiveCase(
+                profiles[1].CaseState,
+                "fine-only-arrest",
+                12,
+                750L,
+                0);
+            profiles[1].CaseState.Phase = JusticePhase.Wanted;
+            object script = CreateHeadlessScript(profiles, 0);
+            InitializeProfileResetRuntimeCollections(script);
+            SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 1));
+            SetPrivateEnumField(
+                script,
+                "_justiceDeferredRuntimeFronts",
+                "ArrestStarted");
+            SetField(script, "_justiceDeferredRuntimeFrontPlayerSlot", 1);
+            SetField(script, "_justiceDeferredRuntimeFrontPlayerModelHash", 1001);
+            SetField(script, "_justiceDeferredRuntimeFrontHadPursuit", true);
+
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(script, directory, 0L);
+            try
+            {
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "TryHardenJusticeDeferredCriticalFronts"));
+                Assert.AreEqual(JusticePhase.Surrendering, profiles[1].CaseState.Phase);
+                Assert.IsFalse(GetField<bool>(
+                    script,
+                    "_justicePoliceDeathRespawnMaskIntentPending"));
+                Assert.IsTrue(profiles[1].CaseState.Charges.Count >= 2);
+                Assert.IsTrue(
+                    profiles[1].CaseState.SentenceSeconds > 0,
+                    "Une charge pécuniaire existante ne doit pas neutraliser la peine minimale de capture.");
+                JusticeWalRecord attempted = wal.GetOpenTransactions().Single();
+                Assert.AreEqual(JusticeWalState.Attempted, attempted.State);
+                Assert.AreEqual(1, attempted.ProfileSlot);
+                Assert.AreEqual(
+                    "PoliceArrest",
+                    JusticeXmlPersistenceCodec.GetFieldValue(
+                        attempted.Fields,
+                        "mode",
+                        string.Empty));
+
+                JusticePlayerProfileState[] replayProfiles = CreateDistinctProfiles();
+                ConfigureConsistentActiveCase(
+                    replayProfiles[1].CaseState,
+                    "fine-only-arrest",
+                    12,
+                    750L,
+                    0);
+                replayProfiles[1].CaseState.Phase = JusticePhase.Wanted;
+                object replayBeforeSnapshot = CreateHeadlessScript(replayProfiles, 0);
+                SetField(
+                    replayBeforeSnapshot,
+                    "_justiceProfilePersistenceGenerations",
+                    new long[3]);
+                Invoke(
+                    replayBeforeSnapshot,
+                    "RecoverJusticeDeathFrontFromWal",
+                    attempted);
+                Assert.AreEqual(
+                    JusticePhase.Surrendering,
+                    replayProfiles[1].CaseState.Phase,
+                    "Le WAL seul doit restaurer l'arrestation si le crash précède le snapshot du switch.");
+                Assert.IsTrue(replayProfiles[1].CaseState.Charges.Count > 0);
+                Assert.IsTrue(replayProfiles[1].CaseState.SentenceSeconds > 0);
+
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "EnsureJusticeProfileMatchesCanonicalPlayer",
+                    new object[] { null }));
+                AwaitQueuedPersistence(script);
+                FlushAndAwait(script);
+                Assert.AreEqual(
+                    JusticeWalState.Confirmed,
+                    wal.GetLatest(attempted.TransactionId).State);
+
+                string path = Path.Combine(directory, "_justice_state.xml");
+                foreach (string durablePath in new[] { path, path + ".bak" })
+                {
+                    object durableReader = CreateHeadlessScript(null, -1);
+                    SetField(
+                        durableReader,
+                        "_justiceCanonicalPlayerSlotOverride",
+                        new Func<int>(() => 1));
+                    Assert.IsTrue((bool)Invoke(
+                        durableReader,
+                        "TryReadJusticeStateFile",
+                        durablePath));
+                    JusticePlayerProfileState durableProfile =
+                        GetField<JusticePlayerProfileState[]>(
+                            durableReader,
+                            "_justicePlayerProfiles")[1];
+                    Assert.AreEqual(
+                        JusticePhase.Surrendering,
+                        durableProfile.CaseState.Phase);
+                    Assert.IsTrue(durableProfile.CaseState.SentenceSeconds > 0);
+                }
+
+                object afterCrash = CreateHeadlessScript(null, -1);
+                SetField(
+                    afterCrash,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 1));
+                Assert.IsTrue((bool)Invoke(afterCrash, "TryReadJusticeStateFile", path));
+                JusticePlayerProfileState[] loaded =
+                    GetField<JusticePlayerProfileState[]>(
+                        afterCrash,
+                        "_justicePlayerProfiles");
+                Assert.AreEqual(JusticePhase.Surrendering, loaded[1].CaseState.Phase);
+                Assert.IsTrue(loaded[1].CaseState.Charges.Count > 0);
+
+                Invoke(afterCrash, "ReconcileLoadedJusticePursuitState", 0);
+                Assert.AreEqual(
+                    JusticePhase.Surrendering,
+                    loaded[1].CaseState.Phase,
+                    "Le reload ne doit pas dégrader immédiatement l'arrestation en mandat.");
+                Assert.IsTrue(GetField<bool>(
+                    afterCrash,
+                    "_justiceArrestCompletionProbePending"));
+                Assert.IsTrue(GetField<bool>(afterCrash, "_justiceWantedLossPending"));
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeferredFrontLots_PDeathAndQArrestBothSurviveRepairCrashAndReload()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            object script = CreateHeadlessScript(profiles, 1);
+            InitializeProfileResetRuntimeCollections(script);
+            int pModel = GTA.Game.GenerateHash("player_one");
+            int qModel = GTA.Game.GenerateHash("player_two");
+            Type frontsType = ScriptType.GetNestedType(
+                "JusticeDeferredRuntimeFront",
+                BindingFlags.NonPublic);
+            Assert.IsNotNull(frontsType);
+
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "TryStoreJusticeDeferredRuntimeFront",
+                1,
+                pModel,
+                Enum.Parse(frontsType, "DeathStarted"),
+                true));
+            Assert.IsTrue((bool)Invoke(
+                script,
+                "TryStoreJusticeDeferredRuntimeFront",
+                2,
+                qModel,
+                Enum.Parse(frontsType, "ArrestStarted"),
+                true));
+
+            Array additionalLots = (Array)GetField<object>(
+                script,
+                "_justiceAdditionalDeferredRuntimeFronts");
+            Assert.IsTrue(HasEnumFlag(
+                GetField<object>(script, "_justiceDeferredRuntimeFronts"),
+                "DeathStarted"));
+            Assert.IsFalse(HasEnumFlag(
+                GetField<object>(script, "_justiceDeferredRuntimeFronts"),
+                "ArrestStarted"));
+            Assert.IsTrue(HasEnumFlag(additionalLots.GetValue(2), "ArrestStarted"));
+            Assert.IsFalse(HasEnumFlag(additionalLots.GetValue(2), "DeathStarted"));
+
+            JusticeWriteAheadLog wal = new JusticeWriteAheadLog(
+                Path.Combine(directory, "_justice_state.wal"));
+            SetField(script, "_justiceWriteAheadLog", wal);
+            JusticeRepository repository = AttachJusticeRepository(script, directory, 0L);
+            try
+            {
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "TryHardenJusticeDeferredCriticalFronts"));
+                Assert.IsTrue(profiles[1].PendingDeathCapture);
+                Assert.AreEqual(1, profiles[1].PendingDeathCapturePlayerSlot);
+                Assert.AreEqual(pModel, profiles[1].PendingDeathCapturePlayerModel);
+                Assert.AreEqual(JusticePhase.Surrendering, profiles[2].CaseState.Phase);
+                Assert.IsTrue(profiles[2].CaseState.SentenceSeconds > 0);
+
+                JusticeWalRecord[] attempted = wal.GetOpenTransactions()
+                    .Where(record => string.Equals(
+                        record.OperationKind,
+                        "DeathFront",
+                        StringComparison.Ordinal))
+                    .OrderBy(record => record.ProfileSlot)
+                    .ToArray();
+                Assert.AreEqual(2, attempted.Length);
+                Assert.AreEqual(1, attempted[0].ProfileSlot);
+                Assert.AreEqual(
+                    "PoliceCapture",
+                    JusticeXmlPersistenceCodec.GetFieldValue(
+                        attempted[0].Fields,
+                        "mode",
+                        string.Empty));
+                Assert.AreEqual(2, attempted[1].ProfileSlot);
+                Assert.AreEqual(
+                    "PoliceArrest",
+                    JusticeXmlPersistenceCodec.GetFieldValue(
+                        attempted[1].Fields,
+                        "mode",
+                        string.Empty));
+
+                // Je reproduis la fin de réparation sur Q : son lot est
+                // réconcilié puis tous les latches mémoire sont nettoyés. La
+                // preuve de P doit rester dans son DTO, déjà appliqué par le WAL.
+                Assert.IsTrue((bool)Invoke(
+                    script,
+                    "ActivateJusticePlayerProfile",
+                    2));
+                Invoke(
+                    script,
+                    "ReconcileJusticeDeferredRuntimeFrontLotAfterPersistenceRepair",
+                    2,
+                    qModel,
+                    0);
+                Assert.IsFalse((bool)Invoke(
+                    script,
+                    "HasJusticeDeferredRuntimeFronts"));
+                Assert.IsTrue(
+                    profiles[1].PendingDeathCapture,
+                    "Le nettoyage après la réconciliation de Q ne doit pas effacer le DTO de P.");
+                Assert.AreEqual(JusticePhase.Surrendering, profiles[2].CaseState.Phase);
+
+                // Je rejoue ici le crash avant le snapshot du switch : les deux
+                // propriétaires doivent être restaurés depuis leurs WAL séparés.
+                JusticePlayerProfileState[] replayProfiles = CreateDistinctProfiles();
+                object replayBeforeSnapshot = CreateHeadlessScript(replayProfiles, 1);
+                SetField(
+                    replayBeforeSnapshot,
+                    "_justiceProfilePersistenceGenerations",
+                    new long[3]);
+                foreach (JusticeWalRecord record in attempted)
+                {
+                    Invoke(
+                        replayBeforeSnapshot,
+                        "RecoverJusticeDeathFrontFromWal",
+                        record);
+                }
+                Assert.IsTrue(replayProfiles[1].PendingDeathCapture);
+                Assert.AreEqual(JusticePhase.Surrendering, replayProfiles[2].CaseState.Phase);
+                Assert.IsTrue(replayProfiles[2].CaseState.SentenceSeconds > 0);
+
+                AwaitQueuedPersistence(script);
+                FlushAndAwait(script);
+                foreach (JusticeWalRecord record in attempted)
+                {
+                    Assert.AreEqual(
+                        JusticeWalState.Confirmed,
+                        wal.GetLatest(record.TransactionId).State);
+                }
+
+                string primaryPath = Path.Combine(directory, "_justice_state.xml");
+                foreach (string durablePath in
+                    new[] { primaryPath, primaryPath + ".bak" })
+                {
+                    object afterCrash = CreateHeadlessScript(null, -1);
+                    SetField(
+                        afterCrash,
+                        "_justiceCanonicalPlayerSlotOverride",
+                        new Func<int>(() => 1));
+                    Assert.IsTrue((bool)Invoke(
+                        afterCrash,
+                        "TryReadJusticeStateFile",
+                        durablePath));
+                    JusticePlayerProfileState[] loaded =
+                        GetField<JusticePlayerProfileState[]>(
+                            afterCrash,
+                            "_justicePlayerProfiles");
+                    Assert.IsTrue(
+                        loaded[1].PendingDeathCapture,
+                        "La mort de P doit rester durable dans chaque rotation.");
+                    Assert.AreEqual(1, loaded[1].PendingDeathCapturePlayerSlot);
+                    Assert.AreEqual(pModel, loaded[1].PendingDeathCapturePlayerModel);
+                    Assert.AreEqual(
+                        JusticePhase.Surrendering,
+                        loaded[2].CaseState.Phase,
+                        "L'arrestation de Q ne doit pas être perdue derrière le lot de P.");
+                    Assert.IsTrue(loaded[2].CaseState.SentenceSeconds > 0);
+                }
+            }
+            finally
+            {
+                repository.Stop(TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    [TestMethod]
+    public void DeferredWantedLostOnly_IsReconstructedWhenItsInactiveOwnerReturns()
+    {
+        JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+        ConfigureConsistentActiveCase(
+            profiles[1].CaseState,
+            "inactive-wanted-lost",
+            20,
+            1500L,
+            90);
+        profiles[1].CaseState.Phase = JusticePhase.Wanted;
+        object script = CreateHeadlessScript(profiles, 2);
+        Type frontsType = ScriptType.GetNestedType(
+            "JusticeDeferredRuntimeFront",
+            BindingFlags.NonPublic);
+        Assert.IsNotNull(frontsType);
+        Assert.IsTrue((bool)Invoke(
+            script,
+            "TryStoreJusticeDeferredRuntimeFront",
+            1,
+            GTA.Game.GenerateHash("player_one"),
+            Enum.Parse(frontsType, "WantedLost"),
+            true));
+
+        // Je peux nettoyer ce front scalaire sans WAL : au retour de P, son
+        // dossier Wanted et le wanted GTA à zéro reconstruisent le mandat exact.
+        Invoke(script, "ClearJusticeDeferredRuntimeFronts");
+        Assert.IsTrue((bool)Invoke(script, "ActivateJusticePlayerProfile", 1));
+        Invoke(script, "ReconcileLoadedJusticePursuitState", 0);
+
+        Assert.IsTrue(profiles[1].CaseState.HasWarrant);
+        Assert.AreEqual(JusticePhase.AtLarge, profiles[1].CaseState.Phase);
+    }
+
     private static JusticePlayerProfileState[] CreateDistinctProfiles()
     {
         JusticePlayerProfileState[] profiles = new JusticePlayerProfileState[3];
@@ -1881,6 +4356,9 @@ public sealed class JusticePlayerProfilePersistenceTests
         state.Charges[0].IsAdjudicated = true;
         state.CompletedOperationIds.Add(JusticePolicy.CreateOperationId(
             JusticeOperationKind.ApplyConviction,
+            state.CustodyEpisodeId));
+        state.CompletedOperationIds.Add(JusticePolicy.CreateOperationId(
+            JusticeOperationKind.ApplyFine,
             state.CustodyEpisodeId));
 
         string convictionId = "conviction:" + state.CustodyEpisodeId;
@@ -2067,11 +4545,151 @@ public sealed class JusticePlayerProfilePersistenceTests
         }
     }
 
+    private static bool HasEnumFlag(object value, string flagName)
+    {
+        Assert.IsNotNull(value);
+        Type enumType = value.GetType();
+        long current = Convert.ToInt64(value, CultureInfo.InvariantCulture);
+        long flag = Convert.ToInt64(
+            Enum.Parse(enumType, flagName),
+            CultureInfo.InvariantCulture);
+        return (current & flag) == flag;
+    }
+
     private static void SetPrivateEnumField(object script, string fieldName, string value)
     {
         FieldInfo field = ScriptType.GetField(fieldName, PrivateInstance);
         Assert.IsNotNull(field, fieldName);
         field.SetValue(script, Enum.Parse(field.FieldType, value));
+    }
+
+    private static JusticeRepository AttachJusticeRepository(
+        object script,
+        string directory,
+        long initialRevision)
+    {
+        string statePath = Path.Combine(directory, "_justice_state.xml");
+        JusticeRepository repository = new JusticeRepository(
+            statePath,
+            statePath + ".bak",
+            new JusticeXmlPersistenceCodec(),
+            initialRevision);
+        repository.Start();
+        SetField(script, "_justiceRepository", repository);
+        return repository;
+    }
+
+    private static JusticeWalRecord CreateProfileResetRecord(
+        string transactionId,
+        int profileSlot,
+        JusticeWalState state,
+        long persistenceRevision,
+        long profileGeneration,
+        int playerModel)
+    {
+        string identityKey = "slot:" +
+            profileSlot.ToString(CultureInfo.InvariantCulture) +
+            ":model:" + playerModel.ToString(CultureInfo.InvariantCulture);
+        IEnumerable<JusticePersistenceField> fields =
+            (IEnumerable<JusticePersistenceField>)InvokeStatic(
+                "CreateJusticeProfileResetWalFields",
+                profileGeneration,
+                identityKey);
+        return new JusticeWalRecord(
+            transactionId,
+            "ProfileResetResult",
+            profileSlot,
+            state,
+            persistenceRevision,
+            DateTime.UtcNow.Ticks,
+            fields);
+    }
+
+    private static JusticePlayerProfileState CreateCanonicalProfileResetResult(
+        int profileSlot)
+    {
+        return new JusticePlayerProfileState(profileSlot)
+        {
+            CustodyXml = (string)InvokeStatic(
+                "CreateCanonicalEmptyJusticeCustodyXml"),
+            LastCanonicalPlayerModel = 0
+        };
+    }
+
+    private static bool PersistedJusticeProfileContainsExactReset(
+        string path,
+        int profileSlot)
+    {
+        Assert.IsTrue(File.Exists(path), "Copie Justice absente : " + path);
+        object reader = CreateHeadlessScript(null, -1);
+        SetField(
+            reader,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => profileSlot));
+        Assert.IsTrue((bool)Invoke(reader, "TryReadJusticeStateFile", path));
+        JusticePlayerProfileState[] profiles =
+            GetField<JusticePlayerProfileState[]>(
+                reader,
+                "_justicePlayerProfiles");
+        return (bool)InvokeStatic(
+            "IsJusticeProfileResetResultPresent",
+            profiles[profileSlot]);
+    }
+
+    private static JusticeWalRecord CreateDeathFrontRecord(
+        string transactionId,
+        string mode,
+        int profileSlot,
+        JusticeWalState state,
+        long persistenceRevision,
+        long profileGeneration,
+        string episodeId,
+        int custodySite,
+        int playerSlot,
+        int playerModel,
+        int lastCanonicalSlot,
+        int lastCanonicalModel)
+    {
+        string identityKey = "slot:" +
+            profileSlot.ToString(CultureInfo.InvariantCulture) +
+            ":model:" + lastCanonicalModel.ToString(CultureInfo.InvariantCulture);
+        IEnumerable<JusticePersistenceField> fields =
+            (IEnumerable<JusticePersistenceField>)InvokeStatic(
+                "CreateJusticeDeathFrontWalFields",
+                mode,
+                persistenceRevision,
+                profileGeneration,
+                identityKey,
+                episodeId,
+                custodySite,
+                playerSlot,
+                playerModel,
+                lastCanonicalSlot,
+                lastCanonicalModel);
+        return new JusticeWalRecord(
+            transactionId,
+            "DeathFront",
+            profileSlot,
+            state,
+            persistenceRevision,
+            DateTime.UtcNow.Ticks,
+            fields);
+    }
+
+    private static JusticeWalRecord CopyWalRecord(
+        JusticeWalRecord source,
+        JusticeWalState state,
+        long persistenceRevision)
+    {
+        Assert.IsNotNull(source);
+        return new JusticeWalRecord(
+            source.TransactionId,
+            source.OperationKind,
+            source.ProfileSlot,
+            state,
+            persistenceRevision,
+            source.CreatedAtUtcTicks,
+            source.Fields);
     }
 
     private static object CreateHeadlessScript(
@@ -2234,6 +4852,22 @@ public sealed class JusticePlayerProfilePersistenceTests
         return method.Invoke(target, arguments);
     }
 
+    private static void AssertOrdered(string source, params string[] tokens)
+    {
+        int cursor = -1;
+        for (int index = 0; index < tokens.Length; index++)
+        {
+            int found = source.IndexOf(
+                tokens[index],
+                cursor + 1,
+                StringComparison.Ordinal);
+            Assert.IsTrue(
+                found > cursor,
+                "Jeton absent ou désordonné : " + tokens[index]);
+            cursor = found;
+        }
+    }
+
     private static void SwitchProfileAndAwait(object script)
     {
         Assert.IsFalse(
@@ -2261,9 +4895,29 @@ public sealed class JusticePlayerProfilePersistenceTests
 
     private static void AwaitQueuedPersistence(object script)
     {
+        bool persisted =
+            (bool)Invoke(script, "JusticeAwaitQueuedPersistenceForTests");
+        JusticeRepository repository = GetField<JusticeRepository>(
+            script,
+            "_justiceRepository");
+        JusticeRepositoryDiagnostics diagnostics = repository == null
+            ? null
+            : repository.GetDiagnostics();
+        string runtimeError = GetField<string>(
+            script,
+            "_justicePersistenceLastError");
         Assert.IsTrue(
-            (bool)Invoke(script, "JusticeAwaitQueuedPersistenceForTests"),
-            "La barrière réservée aux tests doit confirmer la révision sur disque.");
+            persisted,
+            "La barrière réservée aux tests doit confirmer la révision sur disque." +
+            (diagnostics == null
+                ? " Repository absent, erreur runtime=" + runtimeError + "."
+                : " Etat=" + diagnostics.State +
+                  ", mémoire=" + diagnostics.MemoryRevision.ToString(
+                      CultureInfo.InvariantCulture) +
+                  ", disque=" + diagnostics.DiskRevision.ToString(
+                      CultureInfo.InvariantCulture) +
+                  ", erreur repository=" + diagnostics.LastError +
+                  ", erreur runtime=" + runtimeError));
     }
 
     private static JusticeCustodyPersistenceSnapshot RequireTypedCustodySnapshot(
@@ -2315,6 +4969,118 @@ public sealed class JusticePlayerProfilePersistenceTests
         public void Dispose()
         {
             Attempted.Dispose();
+        }
+    }
+
+    private sealed class FirstWriteBlockingAtomicFileStore :
+        IJusticeAtomicFileStore,
+        IDisposable
+    {
+        private readonly JusticeAtomicFileStore _inner =
+            new JusticeAtomicFileStore();
+        private int _writeCount;
+
+        internal ManualResetEvent FirstWriteStarted { get; } =
+            new ManualResetEvent(false);
+        internal ManualResetEvent ReleaseFirstWrite { get; } =
+            new ManualResetEvent(false);
+
+        public void WriteAtomically(
+            string targetPath,
+            string backupPath,
+            byte[] document,
+            IJusticePersistenceFaultInjector faultInjector)
+        {
+            if (Interlocked.Increment(ref _writeCount) == 1)
+            {
+                FirstWriteStarted.Set();
+                if (!ReleaseFirstWrite.WaitOne(TimeSpan.FromSeconds(15)))
+                {
+                    throw new TimeoutException(
+                        "Le test n'a pas libéré la première écriture Justice.");
+                }
+            }
+            _inner.WriteAtomically(
+                targetPath,
+                backupPath,
+                document,
+                faultInjector);
+        }
+
+        public byte[] ReadAllBytes(string path)
+        {
+            return _inner.ReadAllBytes(path);
+        }
+
+        public void Dispose()
+        {
+            FirstWriteStarted.Dispose();
+            ReleaseFirstWrite.Dispose();
+        }
+    }
+
+    private sealed class NthWalFaultInjector : IJusticePersistenceFaultInjector
+    {
+        private readonly JusticePersistenceFaultPoint _point;
+        private readonly int _targetOccurrence;
+        private int _occurrence;
+
+        internal NthWalFaultInjector(
+            JusticePersistenceFaultPoint point,
+            int targetOccurrence)
+        {
+            _point = point;
+            _targetOccurrence = targetOccurrence;
+        }
+
+        public void Probe(JusticePersistenceFaultPoint point)
+        {
+            if (point == _point && ++_occurrence == _targetOccurrence)
+            {
+                throw new IOException(
+                    "Panne WAL critique déterministe injectée.");
+            }
+        }
+    }
+
+    private sealed class WalOccurrenceFaultInjector :
+        IJusticePersistenceFaultInjector
+    {
+        private readonly JusticePersistenceFaultPoint _point;
+        private readonly HashSet<int> _failingOccurrences;
+        private int _occurrence;
+        private volatile bool _writesAllowed;
+
+        internal WalOccurrenceFaultInjector(
+            JusticePersistenceFaultPoint point,
+            params int[] failingOccurrences)
+        {
+            _point = point;
+            _failingOccurrences = new HashSet<int>(
+                failingOccurrences ?? new int[0]);
+        }
+
+        internal void AllowWrites()
+        {
+            _writesAllowed = true;
+        }
+
+        public void Probe(JusticePersistenceFaultPoint point)
+        {
+            if (point != _point)
+            {
+                return;
+            }
+
+            int occurrence = Interlocked.Increment(ref _occurrence);
+            if (!_writesAllowed && _failingOccurrences.Contains(occurrence))
+            {
+                // Je simule successivement la perte de Attempted puis celle de
+                // Rejected, sans forcer un redémarrage entre les deux retries.
+                throw new IOException(
+                    "Panne WAL déterministe sur l'occurrence " +
+                    occurrence.ToString(CultureInfo.InvariantCulture) + ".");
+            }
         }
     }
 

@@ -106,46 +106,147 @@ public sealed class JusticeAuditRemediationTests
     }
 
     [TestMethod]
-    public void DeferredRuntimeFronts_RecordIdentityMismatchInsteadOfReplayingAcrossHeroes()
+    public void DeferredRuntimeFronts_RejectSameSlotModelMismatchWithoutMerging()
     {
         object script = NewHeadlessScript();
-        SetField(script, "_justiceWasDead", false);
-        SetField(script, "_justiceWasBeingArrested", false);
-        SetField(script, "_justiceLastWantedLevel", 0);
-        SetField(script, "_justiceLastCanonicalPlayerSlot", 0);
-
-        Invoke(
+        Type frontsType = GetNestedType("JusticeDeferredRuntimeFront");
+        object death = Enum.Parse(frontsType, "DeathStarted");
+        object wanted = Enum.Parse(frontsType, "WantedRaised");
+        Assert.IsTrue((bool)Invoke(
             script,
-            "ObserveJusticeFrontsWhilePersistenceBlocked",
-            null,
+            "TryStoreJusticeDeferredRuntimeFront",
             0,
-            true,
-            false,
-            false);
+            111,
+            death,
+            true));
 
         object firstFronts = GetField(script, "_justiceDeferredRuntimeFronts");
         Assert.IsTrue(HasEnumFlag(firstFronts, "DeathStarted"));
         Assert.AreEqual(0, GetField<int>(script, "_justiceDeferredRuntimeFrontPlayerSlot"));
 
-        // Je simule ici une identité mémorisée devenue différente avant qu'un
-        // second front soit observé pendant la même réparation du primaire.
-        SetField(script, "_justiceDeferredRuntimeFrontPlayerModelHash", 123456);
+        // Je refuse ici qu'un modèle contradictoire du même slot adopte le lot.
+        // L'appelant gardera ses latches intacts et pourra rééchantillonner.
+        Assert.IsFalse((bool)Invoke(
+            script,
+            "TryStoreJusticeDeferredRuntimeFront",
+            0,
+            222,
+            wanted,
+            true));
+
+        object combinedFronts = GetField(script, "_justiceDeferredRuntimeFronts");
+        Assert.IsTrue(HasEnumFlag(combinedFronts, "DeathStarted"));
+        Assert.IsFalse(
+            HasEnumFlag(combinedFronts, "WantedRaised"),
+            "Le front du second propriétaire ne doit pas être mélangé au lot initial.");
+        Assert.IsTrue(
+            HasEnumFlag(combinedFronts, "IdentityChanged"),
+            "Une identité ambiguë doit être signalée sans rattacher le front au mauvais profil.");
+    }
+
+    [TestMethod]
+    public void DeferredRuntimeFronts_DoNotAdvanceLatchesWhenOwnerLotCannotBeStored()
+    {
+        object script = NewHeadlessScript();
+        JusticePlayerProfileState[] profiles =
+        {
+            new JusticePlayerProfileState(0),
+            new JusticePlayerProfileState(1),
+            new JusticePlayerProfileState(2)
+        };
+        profiles[0].CaseState.Enabled = true;
+        SetField(script, "_justicePlayerProfiles", profiles);
+        SetField(script, "_justiceActivePlayerProfileSlot", 0);
+        SetField(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetField(script, "_justiceLastCanonicalPlayerModelHash", 111);
+        SetField(script, "_justicePursuitActive", true);
+        SetField(script, "_justiceWasDead", false);
+        SetField(script, "_justiceWasBeingArrested", false);
         SetField(script, "_justiceLastWantedLevel", 0);
+
+        // Je fournis une preuve policière directe mais aucun modèle propriétaire.
+        // Le front ne peut pas être stocké et doit donc rester rééchantillonnable.
         Invoke(
             script,
             "ObserveJusticeFrontsWhilePersistenceBlocked",
             null,
-            1,
+            5,
             true,
-            false,
-            false);
+            true,
+            true);
 
-        object combinedFronts = GetField(script, "_justiceDeferredRuntimeFronts");
-        Assert.IsTrue(HasEnumFlag(combinedFronts, "DeathStarted"));
-        Assert.IsTrue(HasEnumFlag(combinedFronts, "WantedRaised"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceWasDead"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceWasBeingArrested"));
+        Assert.AreEqual(0, GetField<int>(script, "_justiceLastWantedLevel"));
+        Assert.IsFalse(GetField<bool>(
+            script,
+            "_justiceDeferredRuntimeLatchOwnerInitialized"));
+        Assert.IsFalse((bool)Invoke(script, "HasJusticeDeferredRuntimeFronts"));
+    }
+
+    [TestMethod]
+    public void DeferredRuntimeFronts_DoNotReusePursuitOrArrestLatchesAcrossPToQ()
+    {
         Assert.IsTrue(
-            HasEnumFlag(combinedFronts, "IdentityChanged"),
-            "Une identité ambiguë doit fermer la reprise plutôt que rattacher le front au mauvais profil.");
+            JusticePolicy.IsDeferredRuntimeFrontLatchOwnerCompatible(
+                0,
+                111,
+                0,
+                111));
+        Assert.IsFalse(
+            JusticePolicy.IsDeferredRuntimeFrontLatchOwnerCompatible(
+                0,
+                111,
+                1,
+                222),
+            "Le couple propriétaire de P ne doit jamais qualifier un front de Q.");
+        Assert.IsFalse(
+            JusticePolicy.IsDeferredArrestFrontAdmissionAllowed(
+                true,
+                false,
+                false,
+                true,
+                true),
+            "Le latch arrested=true de P ne doit pas fabriquer ArrestEnded chez Q.");
+        Assert.IsTrue(
+            JusticePolicy.IsDeferredArrestFrontAdmissionAllowed(
+                true,
+                false,
+                true,
+                true,
+                false),
+            "L'état natif arrested=true de Q reste une preuve directe propre à Q.");
+        Assert.IsFalse(
+            JusticePolicy.IsPoliceDeathFrontAdmissionAllowed(
+                true,
+                false,
+                0,
+                5,
+                true,
+                false),
+            "Wanted et pursuit de P ne doivent pas admettre la mort de Q.");
+    }
+
+    [TestMethod]
+    public void DeferredWantedOnlyFront_NeverFreezesHardeningWithoutAnOwnerSlot()
+    {
+        object script = NewHeadlessScript();
+        Type frontsType = GetNestedType("JusticeDeferredRuntimeFront");
+        SetField(
+            script,
+            "_justiceDeferredRuntimeFronts",
+            Enum.Parse(frontsType, "WantedRaised"));
+        SetField(script, "_justiceDeferredRuntimeFrontPlayerSlot", -1);
+        SetField(script, "_justiceDeferredRuntimeFrontHadPursuit", true);
+
+        Assert.IsTrue((bool)Invoke(
+            script,
+            "TryHardenJusticeDeferredCriticalFronts"));
+
+        SetField(script, "_justiceDeferredRuntimeFrontPlayerSlot", 1);
+        Assert.IsTrue(
+            (bool)Invoke(script, "TryHardenJusticeDeferredCriticalFronts"),
+            "L'arrivée ultérieure d'un slot valide ne doit pas créer un gel rétroactif.");
     }
 
     [TestMethod]

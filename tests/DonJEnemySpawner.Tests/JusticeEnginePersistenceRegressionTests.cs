@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.Serialization;
 using System.Xml;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -55,6 +57,151 @@ public sealed class JusticeEnginePersistenceRegressionTests
         Assert.AreEqual(2, JusticePolicy.ResolveTrustedCanonicalPlayerSlot(2, 1));
         Assert.AreEqual(1, JusticePolicy.ResolveTrustedCanonicalPlayerSlot(-1, 1));
         Assert.AreEqual(-1, JusticePolicy.ResolveTrustedCanonicalPlayerSlot(-1, -1));
+
+        Assert.AreEqual(
+            1,
+            JusticePolicy.ResolvePoliceDeathFrontOwnerSlot(1, 0, 0),
+            "Le ped canonique mort doit gagner sur le profil encore actif pendant le switch.");
+        Assert.AreEqual(
+            0,
+            JusticePolicy.ResolvePoliceDeathFrontOwnerSlot(-1, 0, 2),
+            "Sans slot courant, le profil actif reste la dernière autorité sûre.");
+        Assert.AreEqual(
+            2,
+            JusticePolicy.ResolvePoliceDeathFrontOwnerSlot(-1, -1, 2));
+        Assert.AreEqual(
+            -1,
+            JusticePolicy.ResolvePoliceDeathFrontOwnerSlot(-1, -1, -1));
+
+        Assert.IsFalse(
+            JusticePolicy.IsPoliceDeathFrontAdmissionAllowed(
+                false,
+                false,
+                5,
+                5,
+                true,
+                true),
+            "Un profil Q désactivé ne doit jamais être réactivé par la poursuite de P.");
+        Assert.IsTrue(
+            JusticePolicy.IsPoliceDeathFrontAdmissionAllowed(
+                true,
+                false,
+                2,
+                0,
+                false,
+                false),
+            "Q actif doit conserver sa mort lorsque le ped courant porte ses étoiles.");
+        Assert.IsTrue(
+            JusticePolicy.IsPoliceDeathFrontAdmissionAllowed(
+                true,
+                false,
+                0,
+                0,
+                false,
+                true),
+            "Le tueur policier courant doit suffire pendant le changement P vers Q.");
+        Assert.IsFalse(
+            JusticePolicy.IsPoliceDeathFrontAdmissionAllowed(
+                true,
+                false,
+                0,
+                5,
+                true,
+                false),
+            "Les anciens latches de P ne doivent jamais fabriquer un front pour Q.");
+        Assert.IsTrue(
+            JusticePolicy.IsPoliceDeathFrontAdmissionAllowed(
+                true,
+                true,
+                0,
+                5,
+                false,
+                false),
+            "Le profil déjà actif conserve la tolérance à l'effacement précoce des étoiles.");
+    }
+
+    [TestMethod]
+    public void DeathFrontResultCandidate_WaitsForItsExactDiskRevisionAndRetriesAfterCoalescing()
+    {
+        object script = FormatterServices.GetUninitializedObject(typeof(DonJEnemySpawner));
+        object wal = FormatterServices.GetUninitializedObject(typeof(JusticeWriteAheadLog));
+        const string transactionId = "death-front-candidate";
+        Dictionary<string, long> candidates = new Dictionary<string, long>
+        {
+            { transactionId, 42L }
+        };
+
+        SetPrivateField(script, "_justiceWriteAheadLog", wal);
+        SetPrivateField(script, "_justiceDeathFrontResultCandidates", candidates);
+        SetPrivateField(script, "_justiceInitialized", true);
+        SetPrivateField(script, "_justiceStateDirty", false);
+
+        MethodInfo advance = typeof(DonJEnemySpawner).GetMethod(
+            "AdvanceJusticeDeathFrontWalResults",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(advance);
+
+        advance.Invoke(script, new object[] { 41L });
+
+        Assert.IsFalse(
+            GetPrivateField<bool>(script, "_justiceStateDirty"),
+            "Une écriture encore en vol ne doit pas créer une nouvelle révision qui la coalescerait.");
+        Assert.AreSame(
+            candidates,
+            GetPrivateField<Dictionary<string, long>>(
+                script,
+                "_justiceDeathFrontResultCandidates"));
+        Assert.AreEqual(42L, candidates[transactionId]);
+
+        SetPrivateField(script, "_justiceStateDirty", false);
+        advance.Invoke(script, new object[] { 43L });
+
+        Assert.IsTrue(
+            GetPrivateField<bool>(script, "_justiceStateDirty"),
+            "Une révision candidate coalescée doit demander un nouveau snapshot du résultat.");
+        Assert.AreSame(
+            candidates,
+            GetPrivateField<Dictionary<string, long>>(
+                script,
+                "_justiceDeathFrontResultCandidates"));
+        Assert.AreEqual(42L, candidates[transactionId]);
+    }
+
+    [TestMethod]
+    public void BackupRepair_ReconcilesDeferredFrontsOnlyAfterCanonicalProfileSwitchCompletes()
+    {
+        string early = ExtractMethodBody(ReadJusticeSource(), "UpdateJusticeEarly");
+        const string profileGate =
+            "if (!EnsureJusticeProfileMatchesCanonicalPlayer(player))";
+        const string durabilityGate =
+            "!TryHardenJusticeDeferredCriticalFronts()";
+        const string reconcile =
+            "ReconcileJusticeFrontsAfterPersistenceRepair(player, wantedLevel)";
+
+        int durabilityGateIndex = early.IndexOf(
+            durabilityGate,
+            StringComparison.Ordinal);
+        int profileGateIndex = early.IndexOf(profileGate, StringComparison.Ordinal);
+        int reconcileIndex = early.IndexOf(reconcile, StringComparison.Ordinal);
+        Assert.IsTrue(
+            durabilityGateIndex >= 0,
+            "La preuve WAL des fronts critiques différés est absente.");
+        Assert.IsTrue(profileGateIndex >= 0, "Le gate du profil canonique est absent.");
+        Assert.IsTrue(reconcileIndex >= 0, "La réconciliation post-réparation est absente.");
+        Assert.IsTrue(
+            durabilityGateIndex < profileGateIndex && profileGateIndex < reconcileIndex,
+            "Le WAL doit précéder le snapshot du switch, puis la réconciliation métier.");
+
+        string switchGate = ExtractBlockFromMarker(early, profileGate);
+        AssertOrdered(
+            switchGate,
+            profileGate,
+            "_justiceProfileContextBlocked = true",
+            "preserveUnattributedDeathEdge =",
+            "return;");
+        Assert.IsFalse(
+            switchGate.Contains(reconcile),
+            "Un switch inachevé ne doit jamais consommer les fronts de réparation.");
     }
 
     [TestMethod]
@@ -522,6 +669,27 @@ public sealed class JusticeEnginePersistenceRegressionTests
         return string.Empty;
     }
 
+    private static string ExtractBlockFromMarker(string source, string marker)
+    {
+        int markerIndex = source.IndexOf(marker, StringComparison.Ordinal);
+        Assert.IsTrue(markerIndex >= 0, "Marqueur de bloc introuvable : " + marker);
+        int openingBrace = source.IndexOf('{', markerIndex);
+        Assert.IsTrue(openingBrace >= 0, "Bloc sans accolade : " + marker);
+        int depth = 0;
+        for (int index = openingBrace; index < source.Length; index++)
+        {
+            if (source[index] == '{') depth++;
+            if (source[index] != '}') continue;
+            depth--;
+            if (depth == 0)
+            {
+                return source.Substring(markerIndex, index - markerIndex + 1);
+            }
+        }
+        Assert.Fail("Bloc non fermé : " + marker);
+        return string.Empty;
+    }
+
     private static void AssertOrdered(string source, params string[] markers)
     {
         int previous = -1;
@@ -543,6 +711,24 @@ public sealed class JusticeEnginePersistenceRegressionTests
             position += marker.Length;
         }
         return count;
+    }
+
+    private static T GetPrivateField<T>(object target, string fieldName)
+    {
+        FieldInfo field = target.GetType().GetField(
+            fieldName,
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(field, "Champ privé introuvable : " + fieldName);
+        return (T)field.GetValue(target);
+    }
+
+    private static void SetPrivateField(object target, string fieldName, object value)
+    {
+        FieldInfo field = target.GetType().GetField(
+            fieldName,
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(field, "Champ privé introuvable : " + fieldName);
+        field.SetValue(target, value);
     }
 
     private static string GetRepositoryRoot()

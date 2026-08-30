@@ -1,0 +1,1046 @@
+diff --git a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs
+index 403cbc6fec8f0af7f06b5d281066de42e6164d64..e6a35dfc55ab0ce49440adea808cb65bca5f34d3 100644
+--- a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs
++++ b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs
+@@ -54,7 +54,7 @@ public sealed partial class DonJEnemySpawner
+     private const int JusticeCustodyReleaseTeleportTimeoutMs = 30000;
+     private const int JusticeCustodyDeferredRestoreDelayMs = 15000;
+     private const int JusticeCustodyDeferredRestoreRetryMs = 5000;
+-    private const int JusticeCustodyEscapeGraceMs = 3000;
++    private const int JusticeCustodyEscapeGraceMs = 6000;
+     private const int JusticeCustodyActivityScenarioGraceMs = 1500;
+     private const int JusticeCustodyActivityScenarioCheckMs = 120;
+     private const int JusticeCustodyMaxFrameElapsedMs = 2000;
+@@ -270,6 +270,7 @@ public sealed partial class DonJEnemySpawner
+         internal Vector3 ReleasePosition;
+         internal float ReleaseHeading;
+         internal JusticeCustodyVolume[] AllowedVolumes;
++        internal JusticeCustodyVolume[] ContainmentVolumes;
+         internal Vector3[] GuardPositions;
+         internal float[] GuardHeadings;
+         internal Vector3[] InmatePositions;
+@@ -366,6 +367,7 @@ public sealed partial class DonJEnemySpawner
+     private bool _justiceCustodyTransferRollbackPrecommitRedundant;
+     private bool _justiceCustodyResumePending;
+     private bool _justiceCustodyWaitingForRespawn;
++    private bool _justiceCustodyRespawnTransferPending;
+     private bool _justiceCustodyDeathRebindPending;
+     private bool _justiceCustodyDeathStatePersistencePending;
+     private int _justiceNextCustodyDeathPersistenceRetryAt;
+@@ -384,6 +386,7 @@ public sealed partial class DonJEnemySpawner
+     private int _justiceNextCustodyModelRetryAt;
+     private int _justiceNextDisciplineScanAt;
+     private int _justiceOutsideCustodySinceAt;
++    private bool _justiceCustodyContainmentEstablished;
+     private int _justiceNextPoliceSuppressionAt;
+     private bool _justicePoliceSuppressionActive;
+     private bool _justicePoliceIgnoreApplied;
+@@ -481,6 +484,15 @@ public sealed partial class DonJEnemySpawner
+                     new Vector3(438.0f, -1005.0f, 20.0f),
+                     new Vector3(482.0f, -974.0f, 34.5f))
+             },
++            ContainmentVolumes = new[]
++            {
++                // Le volume de jeu reste précis, mais l'évasion utilise une
++                // enveloppe extérieure tolérante aux portes, escaliers et petits
++                // décalages de streaming du commissariat.
++                new JusticeCustodyVolume(
++                    new Vector3(432.0f, -1012.0f, 15.0f),
++                    new Vector3(490.0f, -966.0f, 45.0f))
++            },
+             GuardPositions = new[]
+             {
+                 new Vector3(457.10f, -991.08f, 24.91f),
+@@ -543,6 +555,26 @@ public sealed partial class DonJEnemySpawner
+                         1500.0f, 2500.0f
+                     })
+             },
++            ContainmentVolumes = new[]
++            {
++                // L'évasion ne s'arme qu'après franchissement clair de l'enceinte.
++                // Cette seconde enveloppe couvre les murs, tours, cours, bâtiments
++                // et les imprécisions de coordonnées sans englober la sortie légale.
++                new JusticeCustodyVolume(
++                    new Vector3(1465.0f, 2345.0f, 0.0f),
++                    new Vector3(1840.0f, 2760.0f, 120.0f),
++                    new[]
++                    {
++                        1580.0f, 2350.0f,
++                        1760.0f, 2385.0f,
++                        1840.0f, 2480.0f,
++                        1840.0f, 2660.0f,
++                        1760.0f, 2755.0f,
++                        1555.0f, 2755.0f,
++                        1470.0f, 2660.0f,
++                        1470.0f, 2480.0f
++                    })
++            },
+             GuardPositions = new[]
+             {
+                 new Vector3(1678.80f, 2561.70f, 45.56f),
+@@ -697,9 +729,11 @@ public sealed partial class DonJEnemySpawner
+         _justiceCustodyRuntimeActive = true;
+         _justiceCustodyTransferPending = true;
+         _justiceCustodyResumePending = false;
++        _justiceCustodyRespawnTransferPending = false;
+         ResetJusticeCustodyTransferRetryState();
+         _justiceCustodyWaitingForRespawn = waitForRespawn;
+         _justiceOutsideCustodySinceAt = 0;
++        _justiceCustodyContainmentEstablished = false;
+         _justiceCaseState.Phase = JusticePhase.Transporting;
+         JusticeMarkStateDirty();
+ 
+@@ -886,6 +920,10 @@ public sealed partial class DonJEnemySpawner
+                 ResetJusticeCustodyClock(now);
+                 return;
+             }
++
++            // Ce flag est purement runtime : il masque la frame de respawn GTA
++            // seulement quand le transfert durable est réellement prêt à partir.
++            _justiceCustodyRespawnTransferPending = true;
+         }
+ 
+         if (_justiceCustodyTransferPending || _justiceCustodyResumePending)
+@@ -934,7 +972,7 @@ public sealed partial class DonJEnemySpawner
+         MaintainJusticeCustodyPoliceSuppression(player, now);
+         RetryJusticeInventoryConfiscationIfDue(player, now);
+ 
+-        // Je qualifie une faute avant de confirmer l'évasion. Les trois secondes
++        // Je qualifie une faute avant de confirmer l'évasion. Les six secondes
+         // hors volume restent donc surveillées : tuer un garde à la dernière
+         // frame ne peut pas faire disparaître la victime avec la scène.
+         UpdateJusticeCustodyDiscipline(player, now);
+@@ -946,7 +984,7 @@ public sealed partial class DonJEnemySpawner
+         }
+ 
+         // Je traite la sortie avant le gate Incarcerated : la phase Escaping
+-        // doit continuer à accumuler ses trois secondes de grâce.
++        // doit continuer à accumuler ses six secondes de grâce.
+         UpdateJusticeCustodyEscape(player, now);
+         if (!JusticeIsCustodyActive ||
+             _justiceCaseState.Phase != JusticePhase.Incarcerated)
+@@ -970,6 +1008,8 @@ public sealed partial class DonJEnemySpawner
+ 
+     private void ObserveJusticeCustodyDeath(Ped player, int now)
+     {
++        _justiceCustodyContainmentEstablished = false;
++        _justiceCustodyRespawnTransferPending = false;
+         bool stateChanged = false;
+         if (IsJusticeCustodyDeathIdentityCompatible(player) &&
+             !_justiceCustodyDeathRebindPending)
+@@ -1000,6 +1040,8 @@ public sealed partial class DonJEnemySpawner
+ 
+     private void ObserveJusticeCustodyDeathDuringSuspension(Ped player)
+     {
++        _justiceCustodyContainmentEstablished = false;
++        _justiceCustodyRespawnTransferPending = false;
+         if (!IsJusticeCustodyDeathIdentityCompatible(player))
+         {
+             return;
+@@ -1132,8 +1174,13 @@ public sealed partial class DonJEnemySpawner
+         }
+ 
+         bool transferred = false;
++        bool maskRespawnOrigin = _justiceCustodyRespawnTransferPending;
+         try
+         {
++            if (maskRespawnOrigin)
++            {
++                BeginJusticeCustodyRespawnTransferMask();
++            }
+             _activeInteriorSession = null;
+             ClearInteriorRenderingFocusSafe(player);
+             TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading);
+@@ -1141,6 +1188,10 @@ public sealed partial class DonJEnemySpawner
+         }
+         catch (Exception ex)
+         {
++            if (maskRespawnOrigin)
++            {
++                RestoreJusticeCustodyRespawnTransferMask();
++            }
+             LogException("Justice.Transfert", ex);
+         }
+ 
+@@ -1153,6 +1204,12 @@ public sealed partial class DonJEnemySpawner
+                 transferPosition,
+                 transferHeading);
+         }
++        if (transferred && !IsInsideJusticeCustodyLayout(layout, player.Position))
++        {
++            // Une native peut annoncer le déplacement alors qu'un autre script a
++            // replacé le ped dans la même frame. Je refuse alors d'armer l'évasion.
++            transferred = false;
++        }
+         if (transferred && !EnsureJusticeCustodyPlayerMobility(player))
+         {
+             // Je ne valide jamais une détention dont le ped reste gelé par la
+@@ -1169,6 +1226,10 @@ public sealed partial class DonJEnemySpawner
+             return;
+         }
+ 
++        // Le masque de respawn reste armé à travers les retries et n'est consommé
++        // qu'après un transfert physiquement vérifié. Un premier téléport refusé
++        // par le moteur ne peut donc pas révéler l'hôpital au passage suivant.
++        _justiceCustodyRespawnTransferPending = false;
+         _justiceCustodyPlayerHandle = player.Handle;
+         _justiceCustodyPlayerModelHash = GetJusticePedModelHashSafe(player);
+         RememberJusticeCustodyPlayerSlot();
+@@ -1185,6 +1246,7 @@ public sealed partial class DonJEnemySpawner
+         _justiceCustodyLastTickAt = now;
+         _justiceCustodyElapsedRemainderMs = 0;
+         _justiceOutsideCustodySinceAt = 0;
++        _justiceCustodyContainmentEstablished = true;
+         ApplyJusticeTransition(
+             transferTimedOut ? JusticeSignal.TransferTimedOut : JusticeSignal.TransferCompleted,
+             _justiceCaseState.CustodyEpisodeId);
+@@ -1216,11 +1278,37 @@ public sealed partial class DonJEnemySpawner
+         LogInfo("Justice.Detention", "Entrée dans " + layout.DisplayName + ".");
+     }
+ 
++    private static void BeginJusticeCustodyRespawnTransferMask()
++    {
++        try
++        {
++            // Le fade immédiat empêche l'hôpital GTA d'apparaître pendant les
++            // 250 ms de fondu normal du téléport sécurisé.
++            Function.Call(Hash.DO_SCREEN_FADE_OUT, 0);
++        }
++        catch
++        {
++        }
++    }
++
++    private static void RestoreJusticeCustodyRespawnTransferMask()
++    {
++        try
++        {
++            Function.Call(Hash.DO_SCREEN_FADE_IN, 350);
++        }
++        catch
++        {
++        }
++    }
++
+     private void RestoreJusticeCustodyRuntimeFromCase()
+     {
+         _justiceCustodyRuntimeActive = true;
+         _justiceCustodyResumePending = true;
+         _justiceCustodyTransferPending = false;
++        _justiceCustodyRespawnTransferPending = false;
++        _justiceCustodyContainmentEstablished = false;
+         ResetJusticeCustodyTransferRetryState();
+ 
+         if (_justiceCustodySite == JusticeCustodySite.None)
+@@ -1265,7 +1353,9 @@ public sealed partial class DonJEnemySpawner
+         _justiceCustodySite = JusticeCustodySite.Bolingbroke;
+         _justiceCustodyTransferPending = true;
+         _justiceCustodyResumePending = false;
++        _justiceCustodyRespawnTransferPending = false;
+         _justiceOutsideCustodySinceAt = 0;
++        _justiceCustodyContainmentEstablished = false;
+         _justiceCaseState.Phase = JusticePhase.Transporting;
+         ResetJusticeCustodyTransferRetryState();
+         JusticeMarkStateDirty();
+@@ -2996,14 +3086,21 @@ public sealed partial class DonJEnemySpawner
+         JusticeCustodyLayout layout,
+         Vector3 position)
+     {
+-        if (layout == null || layout.AllowedVolumes == null)
++        if (layout == null)
+         {
+             return false;
+         }
+ 
+-        for (int index = 0; index < layout.AllowedVolumes.Length; index++)
++        JusticeCustodyVolume[] containmentVolumes =
++            layout.ContainmentVolumes ?? layout.AllowedVolumes;
++        if (containmentVolumes == null)
+         {
+-            JusticeCustodyVolume volume = layout.AllowedVolumes[index];
++            return false;
++        }
++
++        for (int index = 0; index < containmentVolumes.Length; index++)
++        {
++            JusticeCustodyVolume volume = containmentVolumes[index];
+             if (volume != null && volume.Contains(position))
+             {
+                 return true;
+@@ -3020,7 +3117,21 @@ public sealed partial class DonJEnemySpawner
+             return;
+         }
+ 
+-        if (IsInsideJusticeCustody(player.Position))
++        bool insideContainment = IsInsideJusticeCustody(player.Position);
++        if (!_justiceCustodyContainmentEstablished)
++        {
++            // Aucune évasion ne peut être créée avant qu'un transfert vérifié ait
++            // placé ce protagoniste dans l'enceinte. Cela neutralise les spawns,
++            // changements de héros et reprises de sauvegarde encore hors site.
++            _justiceOutsideCustodySinceAt = 0;
++            if (!insideContainment)
++            {
++                return;
++            }
++            _justiceCustodyContainmentEstablished = true;
++        }
++
++        if (insideContainment)
+         {
+             _justiceOutsideCustodySinceAt = 0;
+             if (_justiceCaseState.Phase == JusticePhase.Escaping)
+@@ -3156,7 +3267,7 @@ public sealed partial class DonJEnemySpawner
+             // le commit du dossier fugitif et possède son propre WAL at-most-once.
+             RetryJusticeEscapeWantedMinimum(GetJusticeWantedLevelSafe());
+         }
+-        LogInfo("Justice.Evasion", "Évasion confirmée après sortie continue de la zone autorisée.");
++        LogInfo("Justice.Evasion", "Évasion confirmée après sortie continue de l'enceinte extérieure.");
+     }
+ 
+     private bool RegisterJusticeEscapeInventoryRemovalFailure(int now)
+@@ -8479,6 +8590,8 @@ public sealed partial class DonJEnemySpawner
+         _justiceCustodyTransferPending = false;
+         _justiceCustodyResumePending = false;
+         _justiceCustodyWaitingForRespawn = false;
++        _justiceCustodyRespawnTransferPending = false;
++        _justiceCustodyContainmentEstablished = false;
+         _justiceCustodyDeathRebindPending = false;
+         _justiceCustodyDeathStatePersistencePending = false;
+         _justiceNextCustodyDeathPersistenceRetryAt = 0;
+@@ -8598,6 +8711,8 @@ public sealed partial class DonJEnemySpawner
+             _justiceCustodyRuntimeActive = false;
+             _justiceCustodyTransferPending = false;
+             _justiceCustodyResumePending = false;
++            _justiceCustodyRespawnTransferPending = false;
++            _justiceCustodyContainmentEstablished = false;
+             ResetJusticeCustodyTransferRetryState();
+         }
+     }
+diff --git a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs
+index 8c6845621f8e0bb923086016048ff1f56c900b67..4a87a2a412d7fbb86f36330c233d0d3e78502ae0 100644
+--- a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs
++++ b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs
+@@ -1636,12 +1636,20 @@ public sealed partial class DonJEnemySpawner
+             return pendingSlot == -1 && pendingModel == 0;
+         }
+ 
+-        return caseState != null && caseState.Enabled &&
+-               IsLoadedJusticeCaseActive(caseState) &&
+-               (IsJusticeCustodyPhase(caseState.Phase) ||
+-                caseState.Phase == JusticePhase.Wanted ||
+-                caseState.Phase == JusticePhase.Surrendering ||
+-                caseState.Phase == JusticePhase.Fugitive);
++        if (caseState == null || !caseState.Enabled)
++        {
++            return false;
++        }
++
++        bool materializedCase = IsLoadedJusticeCaseActive(caseState) &&
++            (IsJusticeCustodyPhase(caseState.Phase) ||
++             caseState.Phase == JusticePhase.Wanted ||
++             caseState.Phase == JusticePhase.Surrendering ||
++             caseState.Phase == JusticePhase.Fugitive);
++        bool rawPoliceDeathAwaitingMaterialization =
++            !IsLoadedJusticeCaseActive(caseState) &&
++            caseState.Phase == JusticePhase.AtLarge;
++        return materializedCase || rawPoliceDeathAwaitingMaterialization;
+     }
+ 
+     private static bool IsJusticePendingLegalReleaseValid(
+diff --git a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs
+index fd19ad7bd9eae10b066334b7d759a0dc55a86231..831361301bb4890c6b4c07f0b1cd94593646af3e 100644
+--- a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs
++++ b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs
+@@ -437,7 +437,12 @@ public sealed partial class DonJEnemySpawner
+             // Je synchronise seulement les fronts bruts pendant une mission, un
+             // chargement, une cinématique ou un changement de personnage. Ainsi
+             // la reprise ne fabrique ni mandat, ni arrestation, ni hausse wanted.
+-            if (dead && !_justiceWasDead && _justiceEnabled && HasActiveJusticeCase())
++            bool suspendedPoliceCustodyEvidence =
++                HasJusticePoliceCustodyEvidence(wantedLevel, player, dead);
++            bool suspendedPoliceDeath = dead && !_justiceWasDead && _justiceEnabled &&
++                (HasActiveJusticeCase() ||
++                 (!JusticeIsCustodyActive && suspendedPoliceCustodyEvidence));
++            if (suspendedPoliceDeath)
+             {
+                 if (JusticeIsCustodyActive && IsJusticeCustodyDeathIdentityCompatible(player))
+                 {
+@@ -447,9 +452,14 @@ public sealed partial class DonJEnemySpawner
+                     ObserveJusticeCustodyDeathDuringSuspension(player);
+                 }
+                 else if (!JusticeIsCustodyActive &&
+-                         (_justicePursuitActive || _justiceLastWantedLevel > 0))
++                         suspendedPoliceCustodyEvidence)
+                 {
+-                    if (_justiceCaseState.Phase == JusticePhase.AtLarge)
++                    // Pendant une suspension je n'invente encore aucune charge :
++                    // je durcis seulement le front brut. Au retour en gameplay,
++                    // l'identité canonique sera revalidée avant sa matérialisation.
++                    _justiceCaseState.Enabled = true;
++                    if (HasActiveJusticeCase() &&
++                        _justiceCaseState.Phase == JusticePhase.AtLarge)
+                     {
+                         _justiceCaseState.Phase = JusticePhase.Wanted;
+                     }
+@@ -568,6 +578,21 @@ public sealed partial class DonJEnemySpawner
+         {
+             if (IsPendingJusticeDeathCaptureIdentityCompatible(player))
+             {
++                if (!EnsureJusticeCaseForPoliceCustody(
++                        true,
++                        "mort policière différée pendant une suspension"))
++                {
++                    // Le latch reste durable et sera retenté. Je ne le transforme
++                    // jamais en capture sans dossier ni sur une identité ambiguë.
++                    if (arrestStateValid)
++                    {
++                        _justiceWasBeingArrested = arrested;
++                    }
++                    _justiceWasDead = dead;
++                    _justiceLastWantedLevel = wantedLevel;
++                    return;
++                }
++
+                 if (_justiceCaseState.Phase == JusticePhase.AtLarge)
+                 {
+                     _justiceCaseState.Phase = JusticePhase.Wanted;
+@@ -624,9 +649,24 @@ public sealed partial class DonJEnemySpawner
+             return;
+         }
+ 
++        bool liveArrestEvidence = arrestStateValid && arrested;
++        bool policeCustodyEvidence =
++            HasJusticePoliceCustodyEvidence(wantedLevel, player, dead) ||
++            liveArrestEvidence;
++        bool livePoliceCustodyFront =
++            (dead && !_justiceWasDead) || liveArrestEvidence;
++        if (_justiceEnabled && !JusticeIsCustodyActive &&
++            livePoliceCustodyFront && policeCustodyEvidence)
++        {
++            EnsureJusticeCaseForPoliceCustody(
++                true,
++                dead && !_justiceWasDead
++                    ? "mort pendant une recherche policière"
++                    : "interpellation policière confirmée");
++        }
++
+         bool policePursuitDeath = _justiceEnabled && HasActiveJusticeCase() && !JusticeIsCustodyActive &&
+-                                  dead && !_justiceWasDead &&
+-                                  (_justicePursuitActive || _justiceLastWantedLevel > 0);
++                                  dead && !_justiceWasDead && policeCustodyEvidence;
+ 
+         if (!policePursuitDeath &&
+             TryResolveJusticeMaskedArrestOnWantedLoss(
+@@ -780,7 +820,9 @@ public sealed partial class DonJEnemySpawner
+             }
+             _justiceDeferredRuntimeFronts |= observed;
+             _justiceDeferredRuntimeFrontHadPursuit |=
+-                _justicePursuitActive || _justiceLastWantedLevel > 0;
++                _justicePursuitActive || _justiceLastWantedLevel > 0 ||
++                (dead && WasJusticePlayerKilledByPoliceSafe(player)) ||
++                (arrestStateValid && arrested);
+         }
+ 
+         if (arrestStateValid)
+@@ -815,43 +857,62 @@ public sealed partial class DonJEnemySpawner
+             currentModel != 0 &&
+             currentModel == _justiceDeferredRuntimeFrontPlayerModelHash;
+ 
+-        if (identityCompatible && _justiceEnabled && HasActiveJusticeCase() &&
+-            !JusticeIsCustodyActive)
++        if (identityCompatible && _justiceEnabled && !JusticeIsCustodyActive)
+         {
+-            if ((fronts & JusticeDeferredRuntimeFront.DeathStarted) != 0 &&
+-                _justiceDeferredRuntimeFrontHadPursuit)
+-            {
+-                if (_justiceCaseState.Phase == JusticePhase.AtLarge)
+-                {
+-                    _justiceCaseState.Phase = JusticePhase.Wanted;
+-                }
+-                _justicePursuitDeathObservedDuringSuspension = true;
+-                _justiceSuspendedPursuitDeathPlayerSlot = currentSlot;
+-                _justiceSuspendedPursuitDeathPlayerModelHash = currentModel;
+-                JusticeMarkStateDirty();
+-            }
+-
++            bool deathWasObserved =
++                (fronts & JusticeDeferredRuntimeFront.DeathStarted) != 0;
+             bool arrestWasObserved =
+                 (fronts & (JusticeDeferredRuntimeFront.ArrestStarted |
+                            JusticeDeferredRuntimeFront.ArrestEnded)) != 0;
+-            if (arrestWasObserved)
++            if (_justiceDeferredRuntimeFrontHadPursuit &&
++                (deathWasObserved || arrestWasObserved))
+             {
+-                // Je demande une preuve BUSTED avant toute capture. Si elle reste
+-                // illisible, le chemin borné existant conservera seulement le mandat.
+-                _justiceArrestCompletionProbePending = true;
+-                _justiceArrestCompletionProbeStartedAtMs = _justiceMonotonicTimeMs;
++                EnsureJusticeCaseForPoliceCustody(
++                    true,
++                    deathWasObserved
++                        ? "mort policière conservée pendant une réparation de sauvegarde"
++                        : "arrestation conservée pendant une réparation de sauvegarde");
+             }
+-            if ((fronts & JusticeDeferredRuntimeFront.WantedLost) != 0 ||
+-                (fronts & JusticeDeferredRuntimeFront.ArrestEnded) != 0)
++
++            if (HasActiveJusticeCase())
+             {
+-                _justiceWantedLossPending = true;
++                if (deathWasObserved && _justiceDeferredRuntimeFrontHadPursuit)
++                {
++                    if (_justiceCaseState.Phase == JusticePhase.AtLarge)
++                    {
++                        _justiceCaseState.Phase = JusticePhase.Wanted;
++                    }
++                    _justicePursuitDeathObservedDuringSuspension = true;
++                    _justiceSuspendedPursuitDeathPlayerSlot = currentSlot;
++                    _justiceSuspendedPursuitDeathPlayerModelHash = currentModel;
++                    JusticeMarkStateDirty();
++                }
++
++                if (arrestWasObserved)
++                {
++                    // Je demande une preuve BUSTED avant toute capture. Si elle reste
++                    // illisible, le chemin borné existant conservera seulement le mandat.
++                    _justiceArrestCompletionProbePending = true;
++                    _justiceArrestCompletionProbeStartedAtMs = _justiceMonotonicTimeMs;
++                }
++                if ((fronts & JusticeDeferredRuntimeFront.WantedLost) != 0 ||
++                    (fronts & JusticeDeferredRuntimeFront.ArrestEnded) != 0)
++                {
++                    _justiceWantedLossPending = true;
++                }
++            }
++            else
++            {
++                LogWarning(
++                    "Justice.Reparation",
++                    "Fronts différés sans preuve de capture policière exploitable; aucune charge créée.");
+             }
+         }
+         else
+         {
+             LogWarning(
+                 "Justice.Reparation",
+-                "Fronts différés ignorés : identité du protagoniste ambiguë ou dossier inactif.");
++                "Fronts différés ignorés : identité du protagoniste ambiguë ou détention déjà active.");
+         }
+ 
+         _justiceDeferredRuntimeFronts = JusticeDeferredRuntimeFront.None;
+@@ -1718,6 +1779,129 @@ public sealed partial class DonJEnemySpawner
+                 _justiceCaseState.HasWarrant);
+     }
+ 
++    private bool HasJusticePoliceCustodyEvidence(
++        int wantedLevel,
++        Ped player,
++        bool playerDead)
++    {
++        // GTA peut retirer les étoiles dans la même frame que WASTED/BUSTED.
++        // Le niveau courant, le niveau du scan précédent et notre latch de
++        // poursuite sont donc trois preuves équivalentes du même front policier.
++        if (wantedLevel > 0 || _justiceLastWantedLevel > 0 || _justicePursuitActive)
++        {
++            return true;
++        }
++
++        // Dernier filet : la source de mort peut encore identifier un agent alors
++        // que GTA a déjà remis le wanted à zéro avant notre scan de cette frame.
++        return playerDead && WasJusticePlayerKilledByPoliceSafe(player);
++    }
++
++    private bool WasJusticePlayerKilledByPoliceSafe(Ped player)
++    {
++        if (!Entity.Exists(player) || !IsJusticePlayerDeadSafe(player))
++        {
++            return false;
++        }
++
++        try
++        {
++            Entity killer = player.GetKiller();
++            Ped killerPed = killer as Ped;
++            return Entity.Exists(killerPed) && IsJusticePolicePed(killerPed);
++        }
++        catch
++        {
++            return false;
++        }
++    }
++
++    private bool EnsureJusticeCaseForPoliceCustody(
++        bool policeCustodyEvidence,
++        string source)
++    {
++        if (!_justiceEnabled || JusticeIsCustodyActive || _justiceCaseState == null ||
++            _justiceRecordState == null)
++        {
++            return false;
++        }
++        // Un dossier peut être actif sans contenir la moindre seconde de
++        // détention (tir dangereux, menace armée, dégâts matériels, etc.).
++        // Dans ce cas, laisser BeginJusticeCapture poursuivre provoquerait une
++        // remise en liberté immédiate au lieu d'un réveil au poste. Je ne
++        // considère donc le dossier suffisant que s'il porte déjà une peine
++        // privative de liberté.
++        if (HasActiveJusticeCase() && _justiceCaseState.SentenceSeconds > 0)
++        {
++            return true;
++        }
++        if (!policeCustodyEvidence)
++        {
++            return false;
++        }
++
++        // Une étoile seule ne crée toujours aucun dossier. Cette matérialisation
++        // n'arrive qu'après un vrai front de mort/arrestation, afin que le respawn
++        // GTA à l'hôpital ne puisse pas court-circuiter la justice avancée.
++        _justiceCaseState.Enabled = true;
++        string episode = GetJusticeDetectionEpisodeId();
++        JusticeIncident incident = new JusticeIncident
++        {
++            IncidentId = BuildJusticeIncidentId(
++                JusticeCrimeKind.EvadingPolice,
++                episode,
++                0,
++                0,
++                0),
++            EpisodeId = episode,
++            DetectionBatchId = BuildJusticeDetectionBatchId(),
++            Kind = JusticeCrimeKind.EvadingPolice,
++            CreatedAtMs = _justiceMonotonicTimeMs,
++            ExpiresAtMs = _justiceMonotonicTimeMs + JusticePolicy.PendingIncidentLifetimeMs,
++            Circumstances = GetJusticeBaseCircumstances(),
++            Evidence = new JusticeEvidence
++            {
++                Kind = JusticeEvidenceKind.DirectGameReport,
++                HasPlausibleObserver = true,
++                ObservedAtMs = _justiceMonotonicTimeMs,
++                ReportDueAtMs = _justiceMonotonicTimeMs,
++                ReportCompleted = true
++            },
++            IsConfirmed = true
++        };
++
++        JusticeCharge charge = JusticePolicy.ApplyConfirmedIncident(
++            _justiceCaseState,
++            incident,
++            _justiceRecordState);
++        if (charge != null)
++        {
++            OnJusticeChargeConfirmed(charge);
++            StartJusticePursuitEpisodeIfNeeded(episode);
++            if (_justiceCaseState.Phase == JusticePhase.AtLarge)
++            {
++                _justiceCaseState.Phase = JusticePhase.Wanted;
++            }
++            JusticeMarkStateDirty();
++            LogInfo(
++                "Justice.Capture",
++                "Dossier minimal matérialisé avant " +
++                ((source ?? string.Empty).Trim().Length == 0
++                    ? "une capture policière"
++                    : source.Trim()) + ".");
++        }
++
++        if (HasActiveJusticeCase() && _justiceCaseState.SentenceSeconds > 0)
++        {
++            return true;
++        }
++
++        LogWarning(
++            "Justice.Capture",
++            "Capture policière différée : impossible de matérialiser un dossier minimal idempotent.");
++        return false;
++    }
++
+     private void DetectJusticeEventFronts(Ped player)
+     {
+         if (_justiceMonotonicTimeMs < _justiceNextFrontScanAtMs)
+@@ -6390,22 +6574,14 @@ public sealed partial class DonJEnemySpawner
+                 return false;
+             }
+ 
+-            bool custodyPhase = IsJusticeCustodyPhase(caseState.Phase);
+-            if (pendingDeathCapture)
+-            {
+-                // Je rends durable le front de mort même pendant les quelques frames où GTA
+-                // ne fournit encore ni slot canonique ni modèle. Les mutations restent bloquées
+-                // ensuite tant que l'identité du protagoniste n'est pas prouvée.
+-                if (!rootEnabled || !IsLoadedJusticeCaseActive(caseState) ||
+-                    (!custodyPhase && caseState.Phase != JusticePhase.Wanted &&
+-                     caseState.Phase != JusticePhase.Surrendering &&
+-                     caseState.Phase != JusticePhase.Fugitive))
+-                {
+-                    return false;
+-                }
+-            }
+-            else if (pendingDeathCaptureSlot != -1 || pendingDeathCaptureModel != 0)
++            if (!IsJusticeProfilePendingDeathValid(
++                    caseState,
++                    pendingDeathCapture,
++                    pendingDeathCaptureSlot,
++                    pendingDeathCaptureModel))
+             {
++                // Le front brut peut précéder sa charge minimale, mais il reste
++                // obligatoirement lié à un profil Justice activé et cohérent.
+                 return false;
+             }
+             if (lastCanonicalPlayerSlot < 0 && lastCanonicalPlayerModel != 0)
+@@ -7230,25 +7406,14 @@ public sealed partial class DonJEnemySpawner
+             {
+                 return false;
+             }
+-            bool loadedCustodyPhase = loadedCase.Phase == JusticePhase.Captured ||
+-                loadedCase.Phase == JusticePhase.Transporting ||
+-                loadedCase.Phase == JusticePhase.Incarcerated ||
+-                loadedCase.Phase == JusticePhase.Escaping;
+-            if (loadedPendingDeathCapture)
+-            {
+-                // Je recharge aussi ce latch sans identité : le prochain héros canonique ne sera
+-                // jamais adopté implicitement et convertira l'affaire inconnue en mandat.
+-                if (!loadedEnabled || !IsLoadedJusticeCaseActive(loadedCase) ||
+-                    (!loadedCustodyPhase &&
+-                     loadedCase.Phase != JusticePhase.Wanted &&
+-                     loadedCase.Phase != JusticePhase.Surrendering &&
+-                     loadedCase.Phase != JusticePhase.Fugitive))
+-                {
+-                    return false;
+-                }
+-            }
+-            else if (loadedPendingDeathCaptureSlot != -1 || loadedPendingDeathCaptureModel != 0)
++            if (!IsJusticeProfilePendingDeathValid(
++                    loadedCase,
++                    loadedPendingDeathCapture,
++                    loadedPendingDeathCaptureSlot,
++                    loadedPendingDeathCaptureModel))
+             {
++                // Un front de mort sous recherche peut être rechargé avant sa
++                // charge de secours; l'identité canonique reste toutefois requise.
+                 return false;
+             }
+             if (!IsJusticePendingLegalReleaseValid(
+diff --git a/tests/DonJEnemySpawner.Tests/JusticeRuntimeContractTests.cs b/tests/DonJEnemySpawner.Tests/JusticeRuntimeContractTests.cs
+index c07e418e2ea68fa60455729d332cce5f05c2abb1..93ad11b2dbbcbaa3f4aeae8e12339402faa1b554 100644
+--- a/tests/DonJEnemySpawner.Tests/JusticeRuntimeContractTests.cs
++++ b/tests/DonJEnemySpawner.Tests/JusticeRuntimeContractTests.cs
+@@ -872,6 +872,145 @@ public sealed class JusticeRuntimeContractTests
+             "ResolveDeferredJusticeWantedLoss(wantedLevel)");
+     }
+ 
++    [TestMethod]
++    public void RuntimeJustice_PoliceCustodyMaterializesExactlyOneMinimalCaseBeforeCapture()
++    {
++        object script = CreateJusticeHeadlessScript();
++        JusticeCaseState state = GetFieldValue<JusticeCaseState>(script, "_justiceCaseState");
++        state.Enabled = true;
++        SetFieldValue(script, "_justiceEnabled", true);
++        SetFieldValue(script, "_justiceSessionId", "custody-test");
++        SetFieldValue(script, "_justiceMonotonicTimeMs", 5000L);
++
++        Assert.IsTrue((bool)InvokeInstance(
++            script,
++            "EnsureJusticeCaseForPoliceCustody",
++            true,
++            "test de capture"));
++        Assert.AreEqual(1, state.Charges.Count);
++        Assert.AreEqual(JusticeCrimeKind.EvadingPolice, state.Charges[0].Kind);
++        Assert.AreEqual(120, state.SentenceSeconds);
++        Assert.AreEqual(JusticePhase.Wanted, state.Phase);
++        Assert.IsTrue(GetFieldValue<bool>(script, "_justicePursuitActive"));
++
++        Assert.IsTrue((bool)InvokeInstance(
++            script,
++            "EnsureJusticeCaseForPoliceCustody",
++            true,
++            "second passage idempotent"));
++        Assert.AreEqual(1, state.Charges.Count,
++            "Un retry de la même capture ne doit jamais doubler la peine.");
++
++        object fineOnlyScript = CreateJusticeHeadlessScript();
++        JusticeCaseState fineOnlyState = GetFieldValue<JusticeCaseState>(
++            fineOnlyScript,
++            "_justiceCaseState");
++        fineOnlyState.Enabled = true;
++        fineOnlyState.Charges.Add(new JusticeCharge
++        {
++            ChargeId = "charge:fine-only",
++            IncidentId = "incident:fine-only",
++            EpisodeId = "wanted:fine-only",
++            Kind = JusticeCrimeKind.RecklessDischarge,
++            DisplayName = "Tir dangereux sans victime",
++            Points = 6,
++            Fine = 300L,
++            SentenceSeconds = 0
++        });
++        fineOnlyState.RecalculateTotals();
++        SetFieldValue(fineOnlyScript, "_justiceEnabled", true);
++        SetFieldValue(fineOnlyScript, "_justiceSessionId", "custody-fine-only");
++        SetFieldValue(fineOnlyScript, "_justiceMonotonicTimeMs", 6000L);
++
++        Assert.IsTrue((bool)InvokeInstance(
++            fineOnlyScript,
++            "EnsureJusticeCaseForPoliceCustody",
++            true,
++            "capture avec dossier sans détention"));
++        Assert.AreEqual(2, fineOnlyState.Charges.Count,
++            "Un dossier limité à une amende doit recevoir la peine minimale de capture.");
++        Assert.AreEqual(120, fineOnlyState.SentenceSeconds,
++            "Une arrestation réelle ne doit jamais déboucher sur une libération immédiate.");
++        Assert.AreEqual(
++            1,
++            fineOnlyState.Charges.Count(charge => charge.Kind == JusticeCrimeKind.EvadingPolice),
++            "La peine minimale doit rester idempotente même avec un dossier préexistant.");
++
++        object custodialScript = CreateJusticeHeadlessScript();
++        JusticeCaseState custodialState = GetFieldValue<JusticeCaseState>(
++            custodialScript,
++            "_justiceCaseState");
++        custodialState.Enabled = true;
++        custodialState.Charges.Add(new JusticeCharge
++        {
++            ChargeId = "charge:custodial",
++            IncidentId = "incident:custodial",
++            EpisodeId = "wanted:custodial",
++            Kind = JusticeCrimeKind.SimpleAssault,
++            DisplayName = "Agression simple",
++            Points = 18,
++            Fine = 1000L,
++            SentenceSeconds = 90
++        });
++        custodialState.RecalculateTotals();
++        SetFieldValue(custodialScript, "_justiceEnabled", true);
++        SetFieldValue(custodialScript, "_justiceSessionId", "custody-existing");
++        SetFieldValue(custodialScript, "_justiceMonotonicTimeMs", 7000L);
++
++        Assert.IsTrue((bool)InvokeInstance(
++            custodialScript,
++            "EnsureJusticeCaseForPoliceCustody",
++            true,
++            "capture avec peine existante"));
++        Assert.AreEqual(1, custodialState.Charges.Count,
++            "Une peine de détention existante ne doit recevoir aucune charge artificielle.");
++        Assert.AreEqual(90, custodialState.SentenceSeconds);
++
++        string runtime = ReadRuntimeSource();
++        string earlyTick = ExecutableMethodBody(runtime, "UpdateJusticeEarly");
++        AssertOrdered(
++            earlyTick,
++            "bool liveArrestEvidence",
++            "bool policeCustodyEvidence",
++            "bool livePoliceCustodyFront",
++            "EnsureJusticeCaseForPoliceCustody(",
++            "bool policePursuitDeath",
++            "TryResolveJusticeMaskedArrestOnWantedLoss");
++        StringAssert.Contains(
++            earlyTick,
++            "HasJusticePoliceCustodyEvidence(wantedLevel, player, dead) || liveArrestEvidence");
++        StringAssert.Contains(
++            ExecutableMethodBody(runtime, "HasJusticePoliceCustodyEvidence"),
++            "WasJusticePlayerKilledByPoliceSafe(player)");
++    }
++
++    [TestMethod]
++    public void RuntimeJustice_RawPoliceDeathLatchCanPersistBeforeItsFallbackCharge()
++    {
++        JusticeCaseState state = new JusticeCaseState
++        {
++            Enabled = true,
++            Phase = JusticePhase.AtLarge
++        };
++
++        Assert.IsTrue((bool)InvokeStatic(
++            "IsJusticeProfilePendingDeathValid",
++            state,
++            true,
++            -1,
++            0),
++            "Le front de mort doit survivre au redémarrage avant la matérialisation de sa charge minimale.");
++
++        state.Enabled = false;
++        Assert.IsFalse((bool)InvokeStatic(
++            "IsJusticeProfilePendingDeathValid",
++            state,
++            true,
++            -1,
++            0),
++            "Un profil Justice désactivé ne doit jamais adopter un front de mort brut.");
++    }
++
+     [TestMethod]
+     public void RuntimeJustice_MaskedArrestUsesRecentTimerBeforeCreatingAWarrant()
+     {
+@@ -2042,16 +2181,17 @@ public sealed class JusticeRuntimeContractTests
+                 Tuple.Create("prison_rassemblement", 30, 30)
+             });
+ 
+-        Assert.AreEqual(3000, GetStaticFieldValue<int>("JusticeCustodyEscapeGraceMs"));
++        Assert.AreEqual(6000, GetStaticFieldValue<int>("JusticeCustodyEscapeGraceMs"));
+         Assert.AreEqual(1800, GetStaticFieldValue<int>("JusticeCustodyMaximumSentenceSeconds"));
+     }
+ 
+     [TestMethod]
+-    public void BolingbrokeEscapeVolume_FollowsTheEnclosureAndExcludesOutsideCorners()
++    public void BolingbrokeEscapeVolume_FollowsTheEnclosureAndRequiresAClearExit()
+     {
+         object prison = GetStaticFieldValue<object>("JusticeBolingbrokeLayout");
+-        Array volumes = (Array)GetMemberValue(prison, "AllowedVolumes");
+-        Vector3[] insidePerimeter =
++        Array playableVolumes = (Array)GetMemberValue(prison, "AllowedVolumes");
++        Array containmentVolumes = (Array)GetMemberValue(prison, "ContainmentVolumes");
++        Vector3[] insidePlayablePerimeter =
+         {
+             new Vector3(1510.0f, 2550.0f, 45.0f),
+             new Vector3(1805.0f, 2550.0f, 45.0f),
+@@ -2059,34 +2199,64 @@ public sealed class JusticeRuntimeContractTests
+             new Vector3(1650.0f, 2715.0f, 45.0f)
+         };
+ 
+-        foreach (Vector3 position in insidePerimeter)
++        foreach (Vector3 position in insidePlayablePerimeter)
+         {
+             Assert.IsTrue(
+-                volumes.Cast<object>().Any(
++                playableVolumes.Cast<object>().Any(
+                     volume => (bool)InvokeObjectInstance(volume, "Contains", position)),
+-                "Le périmètre intérieur de Bolingbroke ne doit pas déclencher l'évasion.");
++                "Le périmètre intérieur de Bolingbroke doit rester jouable.");
+         }
+ 
+-        Vector3[] outsideCorners =
++        Vector3[] outsidePlayableCorners =
+         {
+             new Vector3(1505.0f, 2390.0f, 45.0f),
+             new Vector3(1805.0f, 2390.0f, 45.0f),
+             new Vector3(1505.0f, 2710.0f, 45.0f),
+             new Vector3(1805.0f, 2710.0f, 45.0f)
+         };
+-        foreach (Vector3 position in outsideCorners)
++        foreach (Vector3 position in outsidePlayableCorners)
++        {
++            Assert.IsFalse(
++                playableVolumes.Cast<object>().Any(
++                    volume => (bool)InvokeObjectInstance(volume, "Contains", position)),
++                "Un coin au-delà des murs ne doit pas devenir une zone d'activité artificielle.");
++        }
++
++        Vector3[] insideOuterEnclosure =
++        {
++            new Vector3(1490.0f, 2550.0f, 45.0f),
++            new Vector3(1828.0f, 2550.0f, 45.0f),
++            new Vector3(1650.0f, 2370.0f, 45.0f),
++            new Vector3(1650.0f, 2740.0f, 45.0f)
++        };
++        foreach (Vector3 position in insideOuterEnclosure)
++        {
++            Assert.IsTrue(
++                containmentVolumes.Cast<object>().Any(
++                    volume => (bool)InvokeObjectInstance(volume, "Contains", position)),
++                "Les murs, portes, tours et marges de streaming doivent rester dans l'enceinte de détention.");
++        }
++
++        Vector3[] clearOutsidePositions =
++        {
++            new Vector3(1450.0f, 2550.0f, 45.0f),
++            new Vector3(1850.0f, 2550.0f, 45.0f),
++            new Vector3(1650.0f, 2330.0f, 45.0f),
++            new Vector3(1650.0f, 2770.0f, 45.0f)
++        };
++        foreach (Vector3 position in clearOutsidePositions)
+         {
+             Assert.IsFalse(
+-                volumes.Cast<object>().Any(
++                containmentVolumes.Cast<object>().Any(
+                     volume => (bool)InvokeObjectInstance(volume, "Contains", position)),
+-                "Un coin situé au-delà des murs ne doit plus prolonger artificiellement la prison.");
++                "L'évasion ne doit être possible qu'après une sortie claire de l'enceinte extérieure.");
+         }
+ 
+         Vector3 release = (Vector3)GetMemberValue(prison, "ReleasePosition");
+         Assert.IsFalse(
+-            volumes.Cast<object>().Any(
++            containmentVolumes.Cast<object>().Any(
+                 volume => (bool)InvokeObjectInstance(volume, "Contains", release)),
+-            "Le point de libération doit rester hors de l'enceinte.");
++            "Le point de libération légale doit rester hors de l'enceinte.");
+     }
+ 
+     [TestMethod]
+@@ -3106,6 +3276,24 @@ public sealed class JusticeRuntimeContractTests
+             ExecutableMethodBody(custodySource, "JusticeWriteCustodyXml"),
+             "waitingForRespawn",
+             "WriteJusticeDisciplineIntentXml(writer)");
++
++        string custodyUpdate = ExecutableMethodBody(custodySource, "JusticeUpdateCustody");
++        AssertOrdered(
++            custodyUpdate,
++            "_justiceCustodyWaitingForRespawn = false",
++            "JusticeFlushStateNow()",
++            "_justiceCustodyRespawnTransferPending = true",
++            "CompleteJusticeCustodyTransfer(player, now)");
++
++        string transfer = ExecutableMethodBody(custodySource, "CompleteJusticeCustodyTransfer");
++        AssertOrdered(
++            transfer,
++            "bool maskRespawnOrigin = _justiceCustodyRespawnTransferPending",
++            "BeginJusticeCustodyRespawnTransferMask()",
++            "TeleportPlayerWithFadeSafe",
++            "IsInsideJusticeCustodyLayout(layout, player.Position)",
++            "_justiceCustodyRespawnTransferPending = false",
++            "_justiceCustodyContainmentEstablished = true");
+     }
+ 
+     [TestMethod]
+@@ -3167,10 +3355,20 @@ public sealed class JusticeRuntimeContractTests
+         string escape = ExecutableMethodBody(custodySource, "UpdateJusticeCustodyEscape");
+         AssertOrdered(
+             escape,
++            "bool insideContainment",
++            "if (!_justiceCustodyContainmentEstablished)",
++            "if (!insideContainment)",
++            "return",
++            "_justiceCustodyContainmentEstablished = true",
++            "if (insideContainment)",
++            "_justiceOutsideCustodySinceAt = 0",
+             "_justiceCaseState.Phase = JusticePhase.Escaping",
+             "elapsed < JusticeCustodyEscapeGraceMs",
+             "return",
+             "CompleteJusticeCustodyEscape(player)");
++        StringAssert.Contains(
++            ExecutableMethodBody(custodySource, "IsInsideJusticeCustodyLayout"),
++            "layout.ContainmentVolumes ?? layout.AllowedVolumes");
+ 
+         string discipline = ExecutableMethodBody(custodySource, "CompleteJusticeCustodyDiscipline");
+         AssertOrdered(
+@@ -4097,10 +4295,12 @@ public sealed class JusticeRuntimeContractTests
+     {
+         Assert.AreEqual(expectedSite, GetMemberValue(layout, "Site").ToString());
+         Array volumes = (Array)GetMemberValue(layout, "AllowedVolumes");
++        Array containmentVolumes = (Array)GetMemberValue(layout, "ContainmentVolumes");
+         Array guards = (Array)GetMemberValue(layout, "GuardPositions");
+         Array inmates = (Array)GetMemberValue(layout, "InmatePositions");
+         Array activities = (Array)GetMemberValue(layout, "Activities");
+         Assert.IsTrue(volumes.Length >= 1);
++        Assert.IsTrue(containmentVolumes.Length >= 1);
+         Assert.AreEqual(expectedGuards, guards.Length);
+         Assert.AreEqual(expectedInmates, inmates.Length);
+         Assert.AreEqual(expectedMaximumReduction, GetMemberValue(layout, "MaximumActivityReductionSeconds"));
+@@ -4108,8 +4308,15 @@ public sealed class JusticeRuntimeContractTests
+ 
+         Vector3 arrival = (Vector3)GetMemberValue(layout, "ArrivalPosition");
+         Vector3 cell = (Vector3)GetMemberValue(layout, "CellPosition");
++        Vector3 release = (Vector3)GetMemberValue(layout, "ReleasePosition");
+         Assert.IsTrue(volumes.Cast<object>().Any(volume => (bool)InvokeObjectInstance(volume, "Contains", arrival)));
+         Assert.IsTrue(volumes.Cast<object>().Any(volume => (bool)InvokeObjectInstance(volume, "Contains", cell)));
++        Assert.IsTrue(containmentVolumes.Cast<object>().Any(
++            volume => (bool)InvokeObjectInstance(volume, "Contains", arrival)));
++        Assert.IsTrue(containmentVolumes.Cast<object>().Any(
++            volume => (bool)InvokeObjectInstance(volume, "Contains", cell)));
++        Assert.IsFalse(containmentVolumes.Cast<object>().Any(
++            volume => (bool)InvokeObjectInstance(volume, "Contains", release)));
+ 
+         for (int index = 0; index < expectedActivities.Length; index++)
+         {

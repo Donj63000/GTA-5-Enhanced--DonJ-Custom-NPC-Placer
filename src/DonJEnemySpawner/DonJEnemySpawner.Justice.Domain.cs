@@ -1519,6 +1519,82 @@ internal sealed class JusticePolicy
             : -1;
     }
 
+    internal static int ResolvePoliceDeathFrontOwnerSlot(
+        int currentSlot,
+        int activeProfileSlot,
+        int lastCanonicalSlot)
+    {
+        // Je donne la priorité au slot que GTA prouve sur le ped mort. Pendant
+        // un changement de héros, il peut déjà différer du profil encore actif.
+        if (currentSlot >= 0 && currentSlot <= 2)
+        {
+            return currentSlot;
+        }
+        if (activeProfileSlot >= 0 && activeProfileSlot <= 2)
+        {
+            return activeProfileSlot;
+        }
+        return ResolveTrustedCanonicalPlayerSlot(currentSlot, lastCanonicalSlot);
+    }
+
+    internal static bool IsPoliceDeathFrontAdmissionAllowed(
+        bool ownerEnabled,
+        bool ownerIsActiveProfile,
+        int currentWantedLevel,
+        int lastWantedLevel,
+        bool pursuitActive,
+        bool killedByPolice)
+    {
+        if (!ownerEnabled)
+        {
+            return false;
+        }
+
+        // Je n'attribue jamais au nouveau héros les latches de poursuite encore
+        // attachés à l'ancien profil pendant un changement de personnage. Dans
+        // ce cas, seules les étoiles du ped courant ou son tueur policier prouvent
+        // le front. Le profil déjà actif conserve la tolérance à la frame où GTA
+        // efface les étoiles avant WASTED.
+        return currentWantedLevel > 0 || killedByPolice ||
+            (ownerIsActiveProfile &&
+             (lastWantedLevel > 0 || pursuitActive));
+    }
+
+    internal static bool IsDeferredRuntimeFrontLatchOwnerCompatible(
+        int latchPlayerSlot,
+        int latchPlayerModel,
+        int currentPlayerSlot,
+        int currentPlayerModel)
+    {
+        // Je lie chaque arête scalaire au couple slot/modèle qui a produit son
+        // état précédent. Le slot interdit P -> Q et le modèle ferme aussi un
+        // remplacement de ped non observé pendant une réparation du primaire.
+        return latchPlayerSlot >= 0 && latchPlayerSlot <= 2 &&
+               currentPlayerSlot == latchPlayerSlot &&
+               currentPlayerModel == latchPlayerModel;
+    }
+
+    internal static bool IsDeferredArrestFrontAdmissionAllowed(
+        bool ownerEnabled,
+        bool latchOwnerCompatible,
+        bool arrested,
+        bool wasBeingArrested,
+        bool endedFront)
+    {
+        if (!ownerEnabled)
+        {
+            return false;
+        }
+
+        // Une fin d'arrestation n'existe que si le même protagoniste portait le
+        // latch montant. Le niveau natif arrested=true est en revanche une preuve
+        // directe du héros courant : au premier échantillon de Q je peux garder
+        // son arrestation sans consulter la valeur précédente appartenant à P.
+        return endedFront
+            ? latchOwnerCompatible && !arrested && wasBeingArrested
+            : arrested && (!latchOwnerCompatible || !wasBeingArrested);
+    }
+
     internal static bool ShouldDeferCustodyFinancialMutationUntilRespawn(
         bool waitingForRespawn,
         bool playerAvailable,

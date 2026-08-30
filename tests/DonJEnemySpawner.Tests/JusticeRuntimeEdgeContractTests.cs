@@ -547,26 +547,43 @@ public sealed class JusticeRuntimeEdgeContractTests
     }
 
     [TestMethod]
-    public void LoadedPursuitWithoutWanted_BecomesWarrantWithoutCreatingACharge()
+    public void LoadedPursuitWithoutWanted_ReconcilesWantedAndSurrenderingWithoutCreatingACharge()
     {
-        foreach (JusticePhase phase in new[] { JusticePhase.Wanted, JusticePhase.Surrendering })
-        {
-            object script = CreateHeadlessScript();
-            JusticeCaseState state = GetFieldValue<JusticeCaseState>(script, "_justiceCaseState");
-            state.Enabled = true;
-            state.ActiveScore = 48;
-            state.Phase = phase;
-            SetFieldValue(script, "_justiceEnabled", true);
-            SetFieldValue(script, "_justicePursuitActive", true);
+        object wantedPursuit = CreateHeadlessScript();
+        JusticeCaseState wantedState = GetFieldValue<JusticeCaseState>(wantedPursuit, "_justiceCaseState");
+        wantedState.Enabled = true;
+        wantedState.ActiveScore = 48;
+        wantedState.Phase = JusticePhase.Wanted;
+        SetFieldValue(wantedPursuit, "_justiceEnabled", true);
+        SetFieldValue(wantedPursuit, "_justicePursuitActive", true);
 
-            InvokeInstance(script, "ReconcileLoadedJusticePursuitState", 0);
+        InvokeInstance(wantedPursuit, "ReconcileLoadedJusticePursuitState", 0);
 
-            Assert.IsTrue(state.HasWarrant, phase + " sans étoile doit devenir un mandat.");
-            Assert.AreEqual(JusticePhase.AtLarge, state.Phase);
-            Assert.AreEqual(0, state.Charges.Count, "Le reload ne doit inventer aucune infraction.");
-            Assert.IsFalse(GetFieldValue<bool>(script, "_justicePursuitActive"));
-            Assert.IsTrue(GetFieldValue<bool>(script, "_justiceStateDirty"));
-        }
+        Assert.IsTrue(wantedState.HasWarrant, "Wanted sans étoile doit devenir un mandat.");
+        Assert.AreEqual(JusticePhase.AtLarge, wantedState.Phase);
+        Assert.AreEqual(0, wantedState.Charges.Count, "Le reload ne doit inventer aucune infraction.");
+        Assert.IsFalse(GetFieldValue<bool>(wantedPursuit, "_justicePursuitActive"));
+        Assert.IsTrue(GetFieldValue<bool>(wantedPursuit, "_justiceStateDirty"));
+
+        object surrenderingPursuit = CreateHeadlessScript();
+        JusticeCaseState surrenderingState = GetFieldValue<JusticeCaseState>(surrenderingPursuit, "_justiceCaseState");
+        surrenderingState.Enabled = true;
+        surrenderingState.ActiveScore = 48;
+        surrenderingState.Phase = JusticePhase.Surrendering;
+        SetFieldValue(surrenderingPursuit, "_justiceEnabled", true);
+        SetFieldValue(surrenderingPursuit, "_justicePursuitActive", true);
+
+        InvokeInstance(surrenderingPursuit, "ReconcileLoadedJusticePursuitState", 0);
+
+        // Je conserve le front durable Surrendering après reload : la sonde
+        // BUSTED décidera ensuite capture ou mandat sans inventer de charge.
+        Assert.IsFalse(surrenderingState.HasWarrant);
+        Assert.AreEqual(JusticePhase.Surrendering, surrenderingState.Phase);
+        Assert.IsTrue(GetFieldValue<bool>(surrenderingPursuit, "_justiceArrestCompletionProbePending"));
+        Assert.IsTrue(GetFieldValue<bool>(surrenderingPursuit, "_justiceWantedLossPending"));
+        Assert.AreEqual(0, surrenderingState.Charges.Count, "La reprise de sonde ne doit inventer aucune infraction.");
+        Assert.IsTrue(GetFieldValue<bool>(surrenderingPursuit, "_justicePursuitActive"));
+        Assert.IsFalse(GetFieldValue<bool>(surrenderingPursuit, "_justiceStateDirty"));
 
         object activePursuit = CreateHeadlessScript();
         JusticeCaseState activeState = GetFieldValue<JusticeCaseState>(activePursuit, "_justiceCaseState");
