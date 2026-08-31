@@ -8,8 +8,7 @@ public sealed partial class DonJEnemySpawner
     {
         None = 0,
         Placement = 1,
-        JusticeDiscipline = 2,
-        JusticePreJudgmentHolding = 4
+        JusticePreJudgmentHolding = 2
     }
 
     /*

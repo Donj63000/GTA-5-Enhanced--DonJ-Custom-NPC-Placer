@@ -58,25 +58,14 @@ public sealed class PlayerInvincibilityRegressionTests
     }
 
     [TestMethod]
-    public void JusticeDiscipline_SharesTheSameInvincibilityOwnership()
+    public void JusticeCustody_MisconductNeverAcquiresInvincibility()
     {
         string source = ReadSource("DonJEnemySpawner.Justice.Custody.cs");
-        string begin = ExtractMethodBody(source, "BeginJusticeCustodyDiscipline");
-        string restore = ExtractMethodBody(
-            source,
-            "TryRestoreJusticeDisciplineInvincibility");
 
-        AssertOrdered(
-            begin,
-            "TryAcquirePlayerInvincibility(",
-            "PlayerInvincibilityOwner.JusticeDiscipline",
-            "if (!nonLethalProtectionVerified)");
-        AssertOrdered(
-            restore,
-            "TryReleasePlayerInvincibility(",
-            "PlayerInvincibilityOwner.JusticeDiscipline",
-            "_justiceDisciplineStoredInvincible",
-            "_justiceDisciplineInvincibilityRestorePending = false");
+        Assert.IsFalse(source.Contains("BeginJusticeCustodyDiscipline"));
+        Assert.IsFalse(source.Contains("TryRestoreJusticeDisciplineInvincibility"));
+        Assert.IsFalse(source.Contains("PlayerInvincibilityOwner.JusticeDiscipline"));
+        Assert.IsFalse(source.Contains("TASK_COMBAT_PED"));
     }
 
 #if DONJ_STUB_API
@@ -157,10 +146,10 @@ public sealed class PlayerInvincibilityRegressionTests
     {
         VerifySharedOwnerReleaseOrder(
             "Placement",
-            "JusticeDiscipline",
+            "JusticePreJudgmentHolding",
             false);
         VerifySharedOwnerReleaseOrder(
-            "JusticeDiscipline",
+            "JusticePreJudgmentHolding",
             "Placement",
             false);
     }
@@ -170,7 +159,7 @@ public sealed class PlayerInvincibilityRegressionTests
     {
         VerifySharedOwnerReleaseOrder(
             "Placement",
-            "JusticeDiscipline",
+            "JusticePreJudgmentHolding",
             true);
     }
 
@@ -200,7 +189,7 @@ public sealed class PlayerInvincibilityRegressionTests
             Handle = 74,
             IsInvincible = true
         };
-        object justice = GetOwner("JusticeDiscipline");
+        object justice = GetOwner("JusticePreJudgmentHolding");
 
         Assert.IsTrue(Release(script, player, justice, false, true));
         Assert.IsFalse(player.IsInvincible);

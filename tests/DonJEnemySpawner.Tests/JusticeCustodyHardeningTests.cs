@@ -94,13 +94,11 @@ public sealed class JusticeCustodyHardeningTests
         Assert.IsFalse(shutdown.Contains("RestoreJusticeWeaponSnapshot(player)"));
         Assert.IsFalse(shutdown.Contains("RemoveJusticePlayerWeaponsSafe"));
         Assert.AreEqual(
-            6,
+            4,
             CountOccurrences(shutdown, "RunJusticeCustodyShutdownStep("),
             "Chaque domaine de nettoyage doit être isolé, police comprise dans le finally.");
         AssertOrdered(
             shutdown,
-            "\"Activite\"",
-            "\"Discipline\"",
             "\"Inventaire\"",
             "RestoreJusticeInventoryProvisionallyOnShutdown(player)",
             "\"EtatJoueur\"",
@@ -154,42 +152,25 @@ public sealed class JusticeCustodyHardeningTests
     }
 
     [TestMethod]
-    public void Discipline_RequiresDamageEvidenceInsteadOfCombatState()
+    public void CustodyMisconduct_DoesNotCreateAnArtificialDisciplinePath()
     {
-        string misconduct = ExtractMethodBody(
-            ReadCustodySource(),
-            "TryGetJusticeCustodyMisconduct");
-        Assert.IsFalse(misconduct.Contains("IsInCombatAgainst"));
-        Assert.IsFalse(misconduct.Contains("player.IsShooting"));
-        Assert.IsFalse(misconduct.Contains("player.IsInMeleeCombat"));
+        string source = ReadCustodySource();
+        string update = ExtractMethodBody(source, "JusticeUpdateCustody");
+        string escape = ExtractMethodBody(source, "UpdateJusticeCustodyEscape");
+
+        Assert.IsFalse(source.Contains("UpdateJusticeCustodyDiscipline"));
+        Assert.IsFalse(source.Contains("BeginJusticeCustodyDiscipline"));
+        Assert.IsFalse(source.Contains("CompleteJusticeCustodyDiscipline"));
+        Assert.IsFalse(source.Contains("JusticeRegisterCustodyDisciplineCharge"));
+        Assert.IsFalse(source.Contains("Hash.TASK_COMBAT_PED"));
+        Assert.IsFalse(update.Contains("TryAcquirePlayerInvincibility"));
         AssertOrdered(
-            misconduct,
-            "TryCaptureJusticeDamageFront(guard, player)",
-            "guard.IsDead && IsJusticeDeathAttributedTo",
-            "if (damagedByPlayer)",
-            "JusticeCrimeKind.AssaultOfficer",
-            "TryCaptureJusticeDamageFront(player, inmate)",
-            "RememberJusticeCustodyAggressor(inmate)",
-            "TryCaptureJusticeDamageFront(inmate, player)",
-            "inmate.IsDead && IsJusticeDeathAttributedTo",
-            "if (damagedByPlayer)",
-            "HasFreshJusticeCustodyAggression(inmate, canUseUnarmedCombat)",
-            "JusticeCrimeKind.SimpleAssault");
-    }
-
-    [TestMethod]
-    public void CustodySelfDefense_AllowsOnlyFreshNonLethalVerifiedUnarmedResponse()
-    {
-        MethodInfo helper = ScriptType.GetMethod(
-            "IsJusticeCustodySelfDefenseWindowActive",
-            PrivateStatic);
-        Assert.IsNotNull(helper);
-
-        Assert.IsTrue((bool)helper.Invoke(null, new object[] { 1000L, 9000L, false, true }));
-        Assert.IsFalse((bool)helper.Invoke(null, new object[] { 9000L, 9000L, false, true }));
-        Assert.IsFalse((bool)helper.Invoke(null, new object[] { 1000L, 9000L, true, true }));
-        Assert.IsFalse((bool)helper.Invoke(null, new object[] { 1000L, 9000L, false, false }));
-        Assert.IsFalse((bool)helper.Invoke(null, new object[] { -1L, 9000L, false, true }));
+            update,
+            "MaintainJusticeCustodyPoliceSuppression(player, now)",
+            "UpdateJusticeCustodyEscape(player, now)",
+            "AdvanceJusticeCustodyClock(now)",
+            "EnsureJusticeCustodyScene(now)");
+        Assert.IsFalse(escape.Contains("TeleportPlayerWithFadeSafe"));
     }
 
     [TestMethod]
@@ -303,7 +284,7 @@ public sealed class JusticeCustodyHardeningTests
         {
             Enabled = true,
             Phase = JusticePhase.Incarcerated,
-            SentenceSeconds = 720,
+            SentenceSeconds = 540,
             CustodyEpisodeId = "custody:respawn"
         };
         JusticeTickInput duplicateCompletion = new JusticeTickInput
@@ -319,7 +300,7 @@ public sealed class JusticeCustodyHardeningTests
         Assert.AreEqual(JusticePhase.Incarcerated, second.NextPhase);
         Assert.IsNull(first.Operation);
         Assert.IsNull(second.Operation);
-        Assert.AreEqual(720, state.SentenceSeconds);
+        Assert.AreEqual(540, state.SentenceSeconds);
 
         string transfer = ExtractMethodBody(ReadCustodySource(), "CompleteJusticeCustodyTransfer");
         AssertOrdered(
@@ -998,7 +979,8 @@ public sealed class JusticeCustodyHardeningTests
             compaction,
             "bool ownedPed = IsJusticeCustodyPedOwnershipValid(ped)",
             "if (ownedPed)",
-            "DeleteEntitySafe(ped)");
+            "continue;");
+        Assert.IsFalse(compaction.Contains("DeleteEntitySafe(ped)"));
         AssertOrdered(
             deletion,
             "IsJusticeCustodyPedOwnershipValid(ped)",
@@ -1006,31 +988,17 @@ public sealed class JusticeCustodyHardeningTests
     }
 
     [TestMethod]
-    public void CustodyDiscipline_ForcesAFinalEvidenceScanBeforeExitOrSceneCompaction()
+    public void CustodyScene_NeverScansMisconductBeforeCompaction()
     {
         string source = ReadCustodySource();
-        string update = ExtractMethodBody(source, "UpdateJusticeCustodyDiscipline");
-        string finalizer = ExtractMethodBody(
-            source,
-            "FinalizeJusticePendingDisciplineBeforeCustodyExit");
         string scene = ExtractMethodBody(source, "EnsureJusticeCustodyScene");
 
         AssertOrdered(
-            update,
-            "_justiceNextDisciplineScanAt = JusticeCustodyFutureTime",
-            "TryGetJusticeCustodyMisconduct(player, out crimeKind)",
-            "bool homicide",
-            "BeginJusticeCustodyDiscipline(player, now, crimeKind)");
-        AssertOrdered(
-            finalizer,
-            "TryBeginJusticeCustodyDisciplineFromCurrentEvidence(player, now)",
-            "if (_justiceDisciplineIntent == null)");
-        AssertOrdered(
             scene,
-            "_justiceDisciplineIntent != null || _justiceDisciplineActive",
-            "TryBeginJusticeCustodyDisciplineFromCurrentEvidence(player, now)",
             "CompactJusticeCustodyPedList(_justiceCustodyGuards)",
             "CompactJusticeCustodyPedList(_justiceCustodyInmates)");
+        Assert.IsFalse(scene.Contains("Discipline"));
+        Assert.IsFalse(scene.Contains("Misconduct"));
     }
 
     [TestMethod]
@@ -1075,10 +1043,8 @@ public sealed class JusticeCustodyHardeningTests
         string update = ExtractMethodBody(source, "JusticeUpdateCustody");
         AssertOrdered(
             update,
-            "RetryJusticeCustodyActivityTaskClear(player, now)",
             "EnforceJusticeCustodyWeaponLock(player)",
             "if (!JusticeCustodyCanMutateWorld(player))",
-            "CancelJusticeCustodyActivity(false, now)",
             "InterruptJusticeCustodyEscapeObservation()",
             "ResetJusticeCustodyClock(now)",
             "return;");
@@ -1095,11 +1061,9 @@ public sealed class JusticeCustodyHardeningTests
             parking,
             "InterruptJusticeCustodyEscapeObservation()",
             "CanParkCurrentJusticeCustodyForProfileSwitch()",
-            "ApplyLoadedJusticeActivityCooldowns(now)",
             "SetJusticeCustodyPoliceSuppression(false)",
             "_justicePoliceSuppressionRestorePending",
             "if (!canPark)",
-            "CancelJusticeCustodyActivity(false, now)",
             "CleanupJusticeCustodySceneEntitiesAndGroups()",
             "ResetJusticeCustodyClock(now)");
         Assert.IsFalse(parking.Contains("RestoreJusticeInventory"));
@@ -1116,7 +1080,6 @@ public sealed class JusticeCustodyHardeningTests
         AssertOrdered(
             transfer,
             "bool resumingCustody = _justiceCustodyResumePending",
-            "TryClearJusticeCustodyPlayerTasks(player, now)",
             "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)",
             "_justiceCustodyResumePending = false");
 
@@ -1124,7 +1087,6 @@ public sealed class JusticeCustodyHardeningTests
         AssertOrdered(
             release,
             "IsJusticeLegalReleasePrecommitState()",
-            "TryClearJusticeCustodyPlayerTasks(player, now)",
             "RestoreJusticeInventoryForLegalRelease(player, now)",
             "ResetJusticeCustodyPersistentFields()");
     }

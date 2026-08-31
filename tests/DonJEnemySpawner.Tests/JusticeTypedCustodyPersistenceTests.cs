@@ -121,28 +121,21 @@ public sealed class JusticeTypedCustodyPersistenceTests
         Assert.AreEqual("true", root.GetAttribute("storedCanRagdoll"));
         Assert.AreEqual(1, root.SelectNodes("FineDebitIntent").Count);
         Assert.AreEqual(1, root.SelectNodes("VoluntaryFinePaymentIntent").Count);
-        Assert.AreEqual(1, root.SelectNodes("DisciplineIntent").Count);
+        Assert.IsFalse(root.HasAttribute("activityReductionSeconds"));
+        Assert.AreEqual(0, root.SelectNodes("DisciplineIntent").Count);
+        Assert.AreEqual(0, root.SelectNodes("ActivityCooldowns").Count);
         Assert.AreEqual(1, root.SelectNodes("InventorySnapshot/Weapon").Count);
         Assert.AreEqual(2, root.SelectNodes("InventorySnapshot/Weapon/Component").Count);
         Assert.AreEqual("0", ((XmlElement)root.SelectSingleNode("FineDebitIntent"))
             .GetAttribute("preparedAtUtcTicks"));
         Assert.AreEqual("Attempted", ((XmlElement)root.SelectSingleNode("FineDebitIntent"))
             .GetAttribute("resolution"));
-        Assert.AreEqual("17", ((XmlElement)root.SelectSingleNode(
-            "ActivityCooldowns/Cooldown[@id='exercise']"))
-            .GetAttribute("remainingSeconds"));
     }
 
     [TestMethod]
-    public void TypedCustodyCapture_DetachesRuntimeIntentsWeaponsComponentsAndCooldowns()
+    public void TypedCustodyCapture_DetachesRuntimeIntentsAndInventoryWithoutLegacyDiscipline()
     {
         object script = FormatterServices.GetUninitializedObject(ScriptType);
-        Dictionary<string, int> cooldowns =
-            new Dictionary<string, int>(StringComparer.Ordinal)
-            {
-                { "exercise", 2500 }
-            };
-        SetField(script, "_justiceActivityCooldownUntil", cooldowns);
 
         object item = CreateNested("JusticeWeaponSnapshotItem");
         SetNestedField(item, "WeaponHash", 111);
@@ -171,11 +164,6 @@ public sealed class JusticeTypedCustodyPersistenceTests
         SetNestedField(voluntary, "FineBefore", 400L);
         SetField(script, "_justiceVoluntaryFinePaymentIntent", voluntary);
 
-        object discipline = CreateNested("JusticeDisciplineIntent");
-        SetNestedField(discipline, "IncidentId", "before:discipline");
-        SetNestedField(discipline, "PenaltySeconds", 15);
-        SetField(script, "_justiceDisciplineIntent", discipline);
-
         JusticeCustodyPersistenceSnapshot captured =
             InvokeDeterministicCapture(script, 1000);
         string beforeMutation =
@@ -184,10 +172,8 @@ public sealed class JusticeTypedCustodyPersistenceTests
         SetNestedField(item, "WeaponHash", 222);
         components.Add(7002);
         weapons.Clear();
-        cooldowns.Clear();
         SetNestedField(fine, "EpisodeId", "after:fine");
         SetNestedField(voluntary, "PaymentId", "after:payment");
-        SetNestedField(discipline, "IncidentId", "after:discipline");
 
         string afterMutation =
             DonJEnemySpawner.SerializeJusticeCustodyPersistenceSnapshot(captured);
@@ -200,14 +186,12 @@ public sealed class JusticeTypedCustodyPersistenceTests
             .GetAttribute("episodeId"));
         Assert.AreEqual("before:payment", ((XmlElement)root.SelectSingleNode(
             "VoluntaryFinePaymentIntent")).GetAttribute("paymentId"));
-        Assert.AreEqual("before:discipline", ((XmlElement)root.SelectSingleNode(
-            "DisciplineIntent")).GetAttribute("incidentId"));
+        Assert.IsFalse(root.HasAttribute("activityReductionSeconds"));
+        Assert.AreEqual(0, root.SelectNodes("DisciplineIntent").Count);
+        Assert.AreEqual(0, root.SelectNodes("ActivityCooldowns").Count);
         Assert.AreEqual("111", ((XmlElement)root.SelectSingleNode(
             "InventorySnapshot/Weapon")).GetAttribute("hash"));
         Assert.AreEqual(1, root.SelectNodes("InventorySnapshot/Weapon/Component").Count);
-        Assert.AreEqual("2", ((XmlElement)root.SelectSingleNode(
-            "ActivityCooldowns/Cooldown[@id='exercise']"))
-            .GetAttribute("remainingSeconds"));
     }
 
     [TestMethod]

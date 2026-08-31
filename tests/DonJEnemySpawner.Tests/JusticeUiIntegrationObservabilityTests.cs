@@ -329,14 +329,14 @@ public sealed class JusticeUiIntegrationObservabilityTests
         SetField(
             script,
             "_statusText",
-            "Formalités administratives : 20 s, reste dans la zone.");
+            "Justice : ancien dossier effacé, restauration terminée.");
         SetField(script, "_statusUntil", int.MaxValue);
         SetField(script, "_statusOwnedByJusticeProfile", true);
         InvokeInstance(script, "ResetJusticeRuntimeFrontsForProfileChange");
         Assert.AreEqual(
             string.Empty,
             GetField<string>(script, "_statusText"),
-            "Un libellé dynamique d'activité doit suivre le détenu qui l'a créé.");
+            "Un libellé Justice doit suivre le protagoniste qui l'a créé.");
         Assert.IsFalse(GetField<bool>(script, "_statusOwnedByJusticeProfile"));
 
         SetField(script, "_statusOwnedByJusticeProfile", true);
@@ -351,8 +351,8 @@ public sealed class JusticeUiIntegrationObservabilityTests
             "Désactivation différée : libération en cours.",
             "Paiement disponible uniquement pour le héros joué.",
             "Évasion en attente : sécurisation en cours.",
-            "Activité interrompue : aucune réduction.",
-            "Discipline en attente : reprise sécurisée."
+            "Réinitialisation Justice en cours.",
+            "Prison de Bolingbroke : transfert en cours."
         })
         {
             Assert.IsTrue(
@@ -365,12 +365,8 @@ public sealed class JusticeUiIntegrationObservabilityTests
             "src",
             "DonJEnemySpawner",
             "DonJEnemySpawner.Justice.Custody.cs")).Replace("\r\n", "\n");
-        StringAssert.Contains(
-            custodySource,
-            "ShowJusticeProfileStatus(\n                activity.DisplayName");
-        StringAssert.Contains(
-            custodySource,
-            "ShowJusticeProfileStatus(\n            granted > 0");
+        Assert.IsFalse(custodySource.Contains("Activité interrompue"));
+        Assert.IsFalse(custodySource.Contains("Discipline en attente"));
     }
 
     [TestMethod]

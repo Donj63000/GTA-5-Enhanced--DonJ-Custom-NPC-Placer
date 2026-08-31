@@ -578,7 +578,7 @@ internal sealed class JusticeRecordState
     }
 
     // Je garde la condamnation de la détention courante hors de la politique
-    // d'éviction afin que les fautes disciplinaires ne cassent jamais son WAL.
+    // d'éviction afin que sa libération ne perde jamais son ancrage WAL.
     internal string PinnedConvictionId { get; set; }
 }
 
@@ -904,7 +904,8 @@ internal sealed class JusticePolicy
     // billion protège seulement le XML et les additions saturées; elle reste
     // hors d'atteinte d'une partie normale et autorise une dette très élevée.
     internal const long MaxActiveFine = 1000000000000L;
-    internal const int MaxActiveSentenceSeconds = 30 * 60;
+    internal const int MaxActiveSentenceSeconds = 10 * 60;
+    internal const int SentenceRoundingQuantumSeconds = 5;
     internal const long FineDebitAmbiguityTimeoutTicks = 5L * TimeSpan.TicksPerSecond;
     internal const int MaxConvictions = 20;
     internal const int MaxActiveCharges = 512;
@@ -983,7 +984,9 @@ internal sealed class JusticePolicy
 
         int boundedPoints = (int)Math.Min(MaxActiveScore, points);
         long roundedFine = Math.Min(MaxActiveFine, RoundUp(fine, 50L));
-        int roundedSentence = (int)Math.Min(MaxActiveSentenceSeconds, RoundUp(sentence, 15L));
+        int roundedSentence = (int)Math.Min(
+            MaxActiveSentenceSeconds,
+            RoundUp(sentence, SentenceRoundingQuantumSeconds));
 
         return new JusticeSanction(true, boundedPoints, roundedFine, roundedSentence, circumstanceBasisPoints);
     }
@@ -2411,20 +2414,20 @@ internal sealed class JusticePolicy
         AddDefinition(catalog, JusticeCrimeKind.VehicleDamage, "Dégradation volontaire de véhicule", 8, 500L, 0);
         AddDefinition(catalog, JusticeCrimeKind.ArmedThreat, "Menace armée soutenue", 10, 600L, 0);
         AddDefinition(catalog, JusticeCrimeKind.VehicleTheft, "Vol de véhicule vide", 12, 750L, 0);
-        AddDefinition(catalog, JusticeCrimeKind.VehicleDestruction, "Destruction volontaire de véhicule", 18, 1250L, 60);
-        AddDefinition(catalog, JusticeCrimeKind.SimpleAssault, "Agression simple", 18, 1000L, 90);
-        AddDefinition(catalog, JusticeCrimeKind.HitAndRun, "Délit de fuite après blessure", 18, 1200L, 90);
-        AddDefinition(catalog, JusticeCrimeKind.EvadingPolice, "Refus d'obtempérer", 20, 1500L, 120);
-        AddDefinition(catalog, JusticeCrimeKind.AccessoryAssaultOfficer, "Complicité d'agression sur agent", 22, 2000L, 120);
-        AddDefinition(catalog, JusticeCrimeKind.Carjacking, "Carjacking", 24, 1750L, 120);
-        AddDefinition(catalog, JusticeCrimeKind.ResistingArrest, "Résistance à une arrestation", 30, 2500L, 180);
-        AddDefinition(catalog, JusticeCrimeKind.AggravatedAssault, "Agression aggravée", 34, 3000L, 240);
-        AddDefinition(catalog, JusticeCrimeKind.AssaultOfficer, "Agression sur policier ou gardien", 48, 5000L, 360);
-        AddDefinition(catalog, JusticeCrimeKind.AccessoryMurderOfficer, "Complicité d'homicide sur agent", 52, 7500L, 420);
-        AddDefinition(catalog, JusticeCrimeKind.Manslaughter, "Homicide involontaire", 55, 6000L, 480);
-        AddDefinition(catalog, JusticeCrimeKind.MurderCivilian, "Meurtre d'un civil", 75, 10000L, 720);
-        AddDefinition(catalog, JusticeCrimeKind.Escape, "Évasion", 90, 10000L, 900);
-        AddDefinition(catalog, JusticeCrimeKind.MurderOfficer, "Meurtre d'un policier ou gardien", 100, 15000L, 1080);
+        AddDefinition(catalog, JusticeCrimeKind.VehicleDestruction, "Destruction volontaire de véhicule", 18, 1250L, 20);
+        AddDefinition(catalog, JusticeCrimeKind.SimpleAssault, "Agression simple", 18, 1000L, 30);
+        AddDefinition(catalog, JusticeCrimeKind.HitAndRun, "Délit de fuite après blessure", 18, 1200L, 30);
+        AddDefinition(catalog, JusticeCrimeKind.EvadingPolice, "Refus d'obtempérer", 20, 1500L, 40);
+        AddDefinition(catalog, JusticeCrimeKind.AccessoryAssaultOfficer, "Complicité d'agression sur agent", 22, 2000L, 40);
+        AddDefinition(catalog, JusticeCrimeKind.Carjacking, "Carjacking", 24, 1750L, 40);
+        AddDefinition(catalog, JusticeCrimeKind.ResistingArrest, "Résistance à une arrestation", 30, 2500L, 60);
+        AddDefinition(catalog, JusticeCrimeKind.AggravatedAssault, "Agression aggravée", 34, 3000L, 80);
+        AddDefinition(catalog, JusticeCrimeKind.AssaultOfficer, "Agression sur policier ou gardien", 48, 5000L, 120);
+        AddDefinition(catalog, JusticeCrimeKind.AccessoryMurderOfficer, "Complicité d'homicide sur agent", 52, 7500L, 140);
+        AddDefinition(catalog, JusticeCrimeKind.Manslaughter, "Homicide involontaire", 55, 6000L, 160);
+        AddDefinition(catalog, JusticeCrimeKind.MurderCivilian, "Meurtre d'un civil", 75, 10000L, 240);
+        AddDefinition(catalog, JusticeCrimeKind.Escape, "Évasion", 90, 10000L, 300);
+        AddDefinition(catalog, JusticeCrimeKind.MurderOfficer, "Meurtre d'un policier ou gardien", 100, 15000L, 360);
 
         return catalog;
     }

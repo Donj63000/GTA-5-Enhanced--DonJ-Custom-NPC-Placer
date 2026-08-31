@@ -875,7 +875,7 @@ public sealed partial class DonJEnemySpawner
         if (HasJusticeCustodyRecoveryState())
         {
             // Je laisse uniquement une incarceration stable passer en arrière-plan.
-            // Toute transaction, restitution ou discipline reste liée au bon héros.
+            // Toute transaction ou restitution reste liée au bon héros.
             if (!TryPrepareJusticeCustodyForProfileSwitch(switchAt))
             {
                 return false;
@@ -1159,7 +1159,28 @@ public sealed partial class DonJEnemySpawner
         profile.RecordState = _justiceRecordState;
         // Je conserve un graphe typé profondément détaché. La matérialisation XML
         // est réservée au worker de persistance et ne bloque plus le thread GTA.
-        profile.CustodySnapshot = CaptureJusticeCustodyPersistenceSnapshot();
+        JusticeCustodyPersistenceSnapshot capturedCustody =
+            CaptureJusticeCustodyPersistenceSnapshot();
+        int policyRecoveryBit = 1 << _justiceActivePlayerProfileSlot;
+        if ((_justicePolicyResetRecoveryMask & policyRecoveryBit) != 0)
+        {
+            // Je ne remplace jamais le dernier jeton durable par un snapshot
+            // momentanément vide entre deux étapes physiques. Si un retry
+            // courant expose encore un état récupérable, je le réduis au même
+            // contrat technique sans réintroduire de donnée judiciaire legacy.
+            JusticeCustodyPersistenceSnapshot refreshedRecovery =
+                CreateJusticeSentencePolicyRecoveryToken(
+                    capturedCustody,
+                    _justiceActivePlayerProfileSlot);
+            if (refreshedRecovery != null)
+            {
+                profile.CustodySnapshot = refreshedRecovery;
+            }
+        }
+        else
+        {
+            profile.CustodySnapshot = capturedCustody;
+        }
         profile.PendingDeathCapture = _justicePursuitDeathObservedDuringSuspension;
         profile.PendingDeathCapturePlayerSlot =
             _justiceSuspendedPursuitDeathPlayerSlot;
@@ -1367,9 +1388,7 @@ public sealed partial class DonJEnemySpawner
                statusText.StartsWith("Activation", StringComparison.OrdinalIgnoreCase) ||
                statusText.StartsWith("Désactivation", StringComparison.OrdinalIgnoreCase) ||
                statusText.StartsWith("Paiement", StringComparison.OrdinalIgnoreCase) ||
-               statusText.StartsWith("Discipline", StringComparison.OrdinalIgnoreCase) ||
                statusText.StartsWith("Évasion", StringComparison.OrdinalIgnoreCase) ||
-               statusText.StartsWith("Activité", StringComparison.OrdinalIgnoreCase) ||
                statusText.StartsWith("Réinitialisation", StringComparison.OrdinalIgnoreCase) ||
                statusText.StartsWith("Commissariat", StringComparison.OrdinalIgnoreCase) ||
                statusText.StartsWith("Prison de Bolingbroke", StringComparison.OrdinalIgnoreCase);
@@ -1427,7 +1446,8 @@ public sealed partial class DonJEnemySpawner
     }
 
     private bool TryHydrateJusticeV2CustodySnapshots(
-        JusticePlayerProfileState[] profiles)
+        JusticePlayerProfileState[] profiles,
+        int sentencePolicyRecoveryMask)
     {
         if (profiles == null || profiles.Length != JusticePlayerProfileCount)
         {
@@ -1455,16 +1475,38 @@ public sealed partial class DonJEnemySpawner
                 _justiceRecordState = profile.RecordState;
                 XmlElement custody = LoadJusticeXmlFragment(
                     profile.CustodyXml).DocumentElement;
-                if (custody == null ||
-                    !ReadJusticeCustodyXmlFragment(profile.CustodyXml))
+                bool policyRecoveryExpected =
+                    (sentencePolicyRecoveryMask & (1 << slot)) != 0;
+                if (custody == null)
                 {
                     hydrated = false;
                     break;
                 }
 
-                profile.CustodySnapshot =
-                    CaptureLoadedJusticeCustodyPersistenceSnapshot(
-                        custody.SelectSingleNode("ActivityCooldowns") != null);
+                if (policyRecoveryExpected)
+                {
+                    JusticeCustodyPersistenceSnapshot policyRecovery;
+                    if (!TryReadJusticeSentencePolicyRecoveryCustody(
+                            custody,
+                            slot,
+                            out policyRecovery))
+                    {
+                        hydrated = false;
+                        break;
+                    }
+                    profile.CustodySnapshot = policyRecovery;
+                }
+                else
+                {
+                    if (!ReadJusticeCustodyXmlFragment(profile.CustodyXml))
+                    {
+                        hydrated = false;
+                        break;
+                    }
+                    profile.CustodySnapshot =
+                        CaptureLoadedJusticeCustodyPersistenceSnapshot(
+                            custody.SelectSingleNode("ActivityCooldowns") != null);
+                }
             }
         }
         catch
@@ -1510,7 +1552,7 @@ public sealed partial class DonJEnemySpawner
     {
         return "<Custody active=\"false\" site=\"None\" " +
                "policeSuppressionApplied=\"false\" policeDispatchDisabled=\"false\" " +
-               "initialSentenceSeconds=\"0\" activityReductionSeconds=\"0\" " +
+               "initialSentenceSeconds=\"0\" " +
                "inventoryRemoved=\"false\" weaponControlsLocked=\"false\" " +
                "deferredInventoryRestore=\"false\" waitingForRespawn=\"false\" " +
                "deathRebindPending=\"false\" playerStateStored=\"false\" " +
@@ -1585,7 +1627,8 @@ public sealed partial class DonJEnemySpawner
         XmlElement root,
         out JusticePlayerProfileState[] profiles,
         out int persistedActiveSlot,
-        out bool hasProfiles)
+        out bool hasProfiles,
+        int sentencePolicyRecoveryMask)
     {
         profiles = null;
         persistedActiveSlot = -1;
@@ -1682,7 +1725,10 @@ public sealed partial class DonJEnemySpawner
 
             XmlNodeList caseNodes = element.SelectNodes("Case");
             XmlNodeList recordNodes = element.SelectNodes("Record");
-            XmlElement custody = element.SelectSingleNode("Custody") as XmlElement;
+            XmlNodeList custodyNodes = element.SelectNodes("Custody");
+            XmlElement custody = custodyNodes != null && custodyNodes.Count == 1
+                ? custodyNodes[0] as XmlElement
+                : null;
             if (caseNodes == null || caseNodes.Count != 1 ||
                 recordNodes == null || recordNodes.Count != 1 || custody == null)
             {
@@ -1691,9 +1737,21 @@ public sealed partial class DonJEnemySpawner
 
             JusticeCaseState caseState = ReadJusticeCaseXml(caseNodes[0] as XmlElement);
             JusticeRecordState recordState = ReadJusticeRecordXml(recordNodes[0] as XmlElement);
+            bool policyRecoveryExpected =
+                (sentencePolicyRecoveryMask & (1 << slot)) != 0;
+            JusticeCustodyPersistenceSnapshot policyRecoverySnapshot = null;
+            bool custodyIsValid = policyRecoveryExpected
+                ? TryReadJusticeSentencePolicyRecoveryCustody(
+                    custody,
+                    slot,
+                    out policyRecoverySnapshot)
+                : IsJusticeCustodyXmlSemanticallyValid(
+                    element,
+                    caseState,
+                    recordState);
             if (caseState == null || recordState == null ||
                 !IsJusticeCaseRecordLinkValid(caseState, recordState) ||
-                !IsJusticeCustodyXmlSemanticallyValid(element, caseState, recordState) ||
+                !custodyIsValid ||
                 !IsJusticeProfilePendingDeathValid(
                     caseState,
                     pendingDeath,
@@ -1715,6 +1773,9 @@ public sealed partial class DonJEnemySpawner
                 CaseState = caseState,
                 RecordState = recordState,
                 CustodyXml = custody.OuterXml,
+                // Je conserve la forme typée du jeton pour vérifier que son
+                // contenu correspond exactement au masque avant publication.
+                CustodySnapshot = policyRecoverySnapshot,
                 PendingDeathCapture = pendingDeath,
                 PendingDeathCapturePlayerSlot = pendingSlot,
                 PendingDeathCapturePlayerModel = pendingModel,
@@ -2013,6 +2074,8 @@ public sealed partial class DonJEnemySpawner
         string[] replacements = new string[_justicePlayerProfiles.Length];
         JusticeCustodyPersistenceSnapshot[] typedReplacements =
             new JusticeCustodyPersistenceSnapshot[_justicePlayerProfiles.Length];
+        bool[] clearTypedRecovery = new bool[_justicePlayerProfiles.Length];
+        int clearedPolicyRecoveryMask = 0;
         try
         {
             for (int slot = 0; slot < _justicePlayerProfiles.Length; slot++)
@@ -2033,9 +2096,22 @@ public sealed partial class DonJEnemySpawner
                     if (profile.CustodySnapshot.PoliceSuppressionApplied ||
                         profile.CustodySnapshot.PoliceDispatchDisabled)
                     {
-                        typedReplacements[slot] =
+                        JusticeCustodyPersistenceSnapshot replacement =
                             CloneJusticeCustodyPersistenceSnapshotWithoutPoliceTokens(
                                 profile.CustodySnapshot);
+                        int policyBit = 1 << slot;
+                        if ((_justicePolicyResetRecoveryMask & policyBit) != 0 &&
+                            !RequiresJusticeSentencePolicyRecovery(replacement))
+                        {
+                            // La police est globale : une fois rendue, un jeton
+                            // inactif qui ne porte rien d'autre peut être acquitté.
+                            clearTypedRecovery[slot] = true;
+                            clearedPolicyRecoveryMask |= policyBit;
+                        }
+                        else
+                        {
+                            typedReplacements[slot] = replacement;
+                        }
                     }
                     continue;
                 }
@@ -2075,7 +2151,13 @@ public sealed partial class DonJEnemySpawner
 
         for (int slot = 0; slot < replacements.Length; slot++)
         {
-            if (typedReplacements[slot] != null)
+            if (clearTypedRecovery[slot])
+            {
+                _justicePlayerProfiles[slot].CustodySnapshot = null;
+                _justicePlayerProfiles[slot].CustodyXml =
+                    CreateCanonicalEmptyJusticeCustodyXml();
+            }
+            else if (typedReplacements[slot] != null)
             {
                 _justicePlayerProfiles[slot].CustodySnapshot = typedReplacements[slot];
             }
@@ -2083,6 +2165,12 @@ public sealed partial class DonJEnemySpawner
             {
                 _justicePlayerProfiles[slot].CustodyXml = replacements[slot];
             }
+        }
+        if (clearedPolicyRecoveryMask != 0)
+        {
+            _justicePolicyResetRecoveryMask &= ~clearedPolicyRecoveryMask;
+            _justicePolicyResetRecoveryPublicationPending = true;
+            JusticeMarkStateDirty();
         }
         return true;
     }

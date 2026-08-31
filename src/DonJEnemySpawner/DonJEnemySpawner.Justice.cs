@@ -5,7 +5,6 @@ using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
-using System.Windows.Forms;
 using System.Xml;
 using GTA;
 using GTA.Math;
@@ -117,8 +116,7 @@ public sealed partial class DonJEnemySpawner
     private const int JusticeCircuitLineOfSight = 1 << 9;
     private const int JusticeCircuitCanSeeEntity = 1 << 10;
     private const int JusticeCircuitClearDamage = 1 << 11;
-    private const int JusticeCircuitActivityScenario = 1 << 12;
-    private const int JusticeCircuitPedTimeOfDeath = 1 << 13;
+    private const int JusticeCircuitPedTimeOfDeath = 1 << 12;
     private const ulong JusticeNativeGetSelectedPedWeapon = 0x0A6DB4965674D243UL;
     private const ulong JusticeNativeClearPlayerWantedLevel = 0xB302540597885499UL;
 
@@ -383,6 +381,13 @@ public sealed partial class DonJEnemySpawner
         bool legacyAmnestyRecovered = MigrateLegacyJusticeAmnestyState();
 
         InitializeJusticePersistenceServices();
+        if (_justicePolicyResetPublicationPending ||
+            _justicePolicyResetRecoveryMask != 0)
+        {
+            // Je publie le nouveau dossier vide avant toute restitution monde.
+            // Le tick gardera Justice bloquée jusqu'à la preuve primaire+backup.
+            JusticeMarkStateDirty();
+        }
         PrewarmJusticeRuntimeBuffers();
         _justiceLastWantedLevel = GetJusticeWantedLevelSafe();
         if (loaded)
@@ -553,6 +558,18 @@ public sealed partial class DonJEnemySpawner
             {
                 _justiceWasDead = dead;
             }
+            _justiceLastWantedLevel = wantedLevel;
+            return;
+        }
+
+        if (!ResumeJusticeSentencePolicyUpgradeIfRequired())
+        {
+            _justiceProfileContextBlocked = true;
+            if (arrestStateValid)
+            {
+                _justiceWasBeingArrested = arrested;
+            }
+            _justiceWasDead = dead;
             _justiceLastWantedLevel = wantedLevel;
             return;
         }
@@ -1452,6 +1469,13 @@ public sealed partial class DonJEnemySpawner
             SuspendJusticeSentenceClocks(nowRaw);
             return;
         }
+        if (IsJusticeSentencePolicyRecoveryBlockingActiveProfile())
+        {
+            // Le reset de barème ne laisse ni incident, ni horloge, ni effet
+            // monde dépasser une restitution encore non redondante.
+            SuspendJusticeSentenceClocks(nowRaw);
+            return;
+        }
         if (_justiceBackupRepairPending)
         {
             // UpdateJusticeEarly porte seul le retry cadencé de réparation. Je
@@ -1776,16 +1800,6 @@ public sealed partial class DonJEnemySpawner
         _justiceSuspendedPursuitDeathPlayerSlot = -1;
         _justiceSuspendedPursuitDeathPlayerModelHash = 0;
         CancelJusticePoliceDeathRespawnMaskIntentIfUnclaimed();
-    }
-
-    private bool HandleJusticeWorldKey(Keys key)
-    {
-        if (!_justiceInitialized || !_justiceEnabled || !JusticeIsCustodyActive)
-        {
-            return false;
-        }
-
-        return JusticeHandleCustodyWorldKey(key);
     }
 
     private void RequestJusticeToggle()
@@ -4866,19 +4880,45 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        if (_justiceCaseState.EscapeWantedMinimumAttempted &&
-            !IsJusticeCriticalBarrierPending(nameof(RetryJusticeEscapeWantedMinimum)))
+        bool escapeWantedBarrierPending = IsJusticeCriticalBarrierPending(
+            nameof(RetryJusticeEscapeWantedMinimum));
+        if (!_justiceCaseState.EscapeWantedMinimumAttempted &&
+            escapeWantedBarrierPending)
         {
-            // Après un redémarrage, un essai précommitté mais non acquitté est
-            // ambigu : je privilégie at-most-once et ne remonte jamais des
-            // étoiles que GTA aurait déjà fait redescendre naturellement.
-            _justiceCaseState.EscapeWantedMinimumPending = false;
+            // Je termine d'abord le précommit du réarmement à false. Je ne
+            // prépare la tentative suivante qu'à partir d'un tick ultérieur,
+            // afin que ce nouvel effet GTA possède sa propre frontière durable.
+            PersistJusticeCriticalPrecommitRedundantly(
+                nameof(RetryJusticeEscapeWantedMinimum));
+            return;
+        }
+
+        if (_justiceCaseState.EscapeWantedMinimumAttempted &&
+            !escapeWantedBarrierPending)
+        {
+            // Après un redémarrage, GTA confirme que le minimum n'est toujours
+            // pas atteint. Je réarme donc durablement le droit de tentative sans
+            // jamais acquitter silencieusement la demande encore nécessaire.
             _justiceCaseState.EscapeWantedMinimumAttempted = false;
             JusticeMarkStateDirty();
-            JusticeFlushStateNow();
+
+            bool rearmCommitted = PersistJusticeCriticalPrecommitRedundantly(
+                nameof(RetryJusticeEscapeWantedMinimum));
+            bool rearmPending = IsJusticeCriticalBarrierPending(
+                nameof(RetryJusticeEscapeWantedMinimum));
+            if (!rearmCommitted && !rearmPending)
+            {
+                // Aucun snapshot du réarmement n'a pu être accepté. Je conserve
+                // alors l'état ambigu afin que le prochain tick reprenne cette
+                // même étape au lieu de franchir la frontière sans preuve.
+                _justiceCaseState.EscapeWantedMinimumAttempted = true;
+                JusticeMarkStateDirty();
+                return;
+            }
+
             LogWarning(
                 "Justice.Evasion",
-                "Essai wanted ambigu repris sans nouvelle écriture GTA.");
+                "Essai wanted ambigu réarmé durablement avant une nouvelle tentative.");
             return;
         }
 
@@ -4903,123 +4943,12 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        // Une erreur native explicitement connue peut être retentée, mais je
-        // rends d'abord ce droit durable. Un crash avant ce commit reste donc
-        // at-most-once et n'écrira pas des étoiles à tort au prochain lancement.
+        // Une erreur native explicitement connue peut être retentée. Si un crash
+        // survient avant la persistance de ce réarmement, la reprise ambiguë
+        // repassera par la frontière durable ci-dessus avant toute nouvelle écriture.
         _justiceCaseState.EscapeWantedMinimumAttempted = false;
         JusticeMarkStateDirty();
         JusticeFlushStateNow();
-    }
-
-    private bool JusticeRegisterCustodyDisciplineCharge(
-        JusticeCrimeKind kind,
-        int minimumPenaltySeconds,
-        string reason,
-        string incidentId)
-    {
-        if (minimumPenaltySeconds <= 0 || _justiceCaseState == null ||
-            string.IsNullOrWhiteSpace(incidentId))
-        {
-            return false;
-        }
-
-        int remainingSentence = Math.Max(0, _justiceCaseState.SentenceSeconds);
-        long remainingFine = Math.Max(0L, _justiceCaseState.FineDue);
-        string episode = string.IsNullOrWhiteSpace(_justiceCaseState.CustodyEpisodeId)
-            ? CurrentJusticeEpisodeId()
-            : _justiceCaseState.CustodyEpisodeId;
-        string normalizedIncidentId = incidentId.Trim();
-        for (int index = 0; index < _justiceCaseState.ProcessedIncidentIds.Count; index++)
-        {
-            if (string.Equals(
-                _justiceCaseState.ProcessedIncidentIds[index],
-                normalizedIncidentId,
-                StringComparison.Ordinal))
-            {
-                // Je peux reprendre après un arrêt situé entre l'ajout de la
-                // charge et l'effacement de l'intention sans rejuger la faute.
-                bool resumesPersistedIntent = _justiceDisciplineIntent != null &&
-                    string.Equals(
-                        _justiceDisciplineIntent.IncidentId,
-                        normalizedIncidentId,
-                        StringComparison.Ordinal);
-                return resumesPersistedIntent &&
-                       IsJusticeDisciplineIntentWalConsistent(_justiceDisciplineIntent) &&
-                       JusticeFlushStateNow();
-            }
-        }
-
-        string disciplineEpisode = episode + ":discipline:" + normalizedIncidentId;
-        JusticeIncident incident = new JusticeIncident
-        {
-            IncidentId = normalizedIncidentId,
-            // Je donne à chaque faute prouvée son propre sous-épisode. Deux
-            // fautes distinctes restent donc sanctionnées, tandis qu'un rejeu
-            // du même incident conserve exactement la même clé idempotente.
-            EpisodeId = disciplineEpisode,
-            Kind = kind,
-            CreatedAtMs = _justiceMonotonicTimeMs,
-            ExpiresAtMs = _justiceMonotonicTimeMs + JusticePolicy.PendingIncidentLifetimeMs,
-            Circumstances = JusticeCircumstances.InCustody,
-            Evidence = new JusticeEvidence
-            {
-                Kind = JusticeEvidenceKind.DirectGameReport,
-                HasPlausibleObserver = true,
-                ObservedAtMs = _justiceMonotonicTimeMs,
-                ReportDueAtMs = _justiceMonotonicTimeMs,
-                ReportCompleted = true
-            },
-            IsConfirmed = true
-        };
-        JusticeCharge charge = JusticePolicy.ApplyConfirmedIncident(
-            _justiceCaseState,
-            incident,
-            _justiceRecordState);
-        if (charge == null)
-        {
-            return false;
-        }
-
-        int addedSentence = Math.Max(minimumPenaltySeconds, Math.Max(0, charge.SentenceSeconds));
-        charge.SentenceSeconds = addedSentence;
-        _justiceCaseState.SentenceSeconds = (int)Math.Min(
-            JusticePolicy.MaxActiveSentenceSeconds,
-            (long)remainingSentence + addedSentence);
-        _justiceCaseState.FineDue = JusticePolicy.SaturatingAdd(
-            remainingFine,
-            Math.Max(0L, charge.Fine),
-            JusticePolicy.MaxActiveFine);
-        _justiceCaseState.LastCrimeLabel = string.IsNullOrWhiteSpace(reason)
-            ? charge.DisplayName
-            : reason.Trim();
-
-        // Je juge uniquement la nouvelle faute dans un dossier temporaire : le
-        // casier progresse sans condamner une seconde fois tout le dossier initial.
-        JusticeCaseState disciplineCase = new JusticeCaseState
-        {
-            Enabled = true,
-            // Je donne à chaque faute disciplinaire son propre jugement
-            // idempotent, distinct de la condamnation qui a ouvert la détention.
-            CustodyEpisodeId = disciplineEpisode
-        };
-        disciplineCase.Charges.Add(charge);
-        disciplineCase.RecalculateTotals();
-        JusticePolicy.ApplyConviction(disciplineCase, _justiceRecordState, DateTime.UtcNow);
-
-        JusticeMarkStateDirty();
-        if (!JusticeFlushStateNow())
-        {
-            return false;
-        }
-        ShowStatus(
-            "Justice : " + charge.DisplayName + " en détention, +" +
-            FormatJusticeDuration(addedSentence) + ".",
-            3600);
-        LogInfo(
-            "Justice.Discipline",
-            charge.DisplayName + " | incident=" + incident.IncidentId +
-            " | peine ajoutée=" + addedSentence.ToString(CultureInfo.InvariantCulture) + " s.");
-        return true;
     }
 
     private void RecordJusticeAllyPoliceEngagement(Ped ally, Ped target, bool structured)
@@ -7234,7 +7163,8 @@ public sealed partial class DonJEnemySpawner
                     root,
                     out profiles,
                     out persistedActiveSlot,
-                    out hasProfiles))
+                    out hasProfiles,
+                    0))
             {
                 return false;
             }
@@ -7512,6 +7442,21 @@ public sealed partial class DonJEnemySpawner
                         "Réparation du primaire différée; les mutations Justice restent suspendues.");
                 }
                 return true;
+            }
+
+            if (!backupOnly && index == 0)
+            {
+                string quarantined = FindJusticeSentencePolicyQuarantineState();
+                if (!string.IsNullOrWhiteSpace(quarantined) &&
+                    TryReadJusticeStateFile(quarantined))
+                {
+                    _justicePolicyResetPublicationPending = true;
+                    _justicePolicyResetLegacySourcePath = quarantined;
+                    LogWarning(
+                        "Justice.Migration.Barème",
+                        "Reprise du reset depuis la quarantaine legacy.");
+                    return true;
+                }
             }
 
             if (!ShouldContinueJusticeStateSearch(index, primaryExists, backupExists))
@@ -7864,6 +7809,18 @@ public sealed partial class DonJEnemySpawner
         int oldActiveProfileSlot = _justiceActivePlayerProfileSlot;
         bool oldProfileSelectionPending = _justiceProfileSelectionPending;
         bool oldLegacyProfileReloadPending = _justiceLegacyProfileReloadPending;
+        int oldSentencePolicyVersion = _justiceSentencePolicyVersion;
+        int oldPolicyResetRecoveryMask = _justicePolicyResetRecoveryMask;
+        int oldPolicyResetWorldRecoveryAppliedMask =
+            _justicePolicyResetWorldRecoveryAppliedMask;
+        bool oldPolicyResetPublicationPending =
+            _justicePolicyResetPublicationPending;
+        bool oldPolicyResetRecoveryPublicationPending =
+            _justicePolicyResetRecoveryPublicationPending;
+        bool oldPolicyResetLegacyIdentityProofPending =
+            _justicePolicyResetLegacyIdentityProofPending;
+        string oldPolicyResetLegacySourcePath =
+            _justicePolicyResetLegacySourcePath;
         string oldCustodyXml = CaptureCurrentJusticeCustodyXmlSafe();
         JusticePersistenceSnapshot loadedV2Snapshot = null;
 
@@ -7904,6 +7861,58 @@ public sealed partial class DonJEnemySpawner
             if (root == null || !string.Equals(root.Name, "JusticeState", StringComparison.Ordinal) ||
                 ReadJusticeInt(root, "version", -1) != JusticeStateVersion)
             {
+                return false;
+            }
+            int earlySentencePolicyVersion;
+            if (!TryReadJusticeSentencePolicyVersionStrict(
+                    loadedV2Snapshot,
+                    out earlySentencePolicyVersion))
+            {
+                // Je ne transforme jamais un marqueur présent mais corrompu en
+                // autorisation d'effacer les trois dossiers judiciaires.
+                return false;
+            }
+            if (earlySentencePolicyVersion > JusticeSentencePolicyVersion)
+            {
+                return false;
+            }
+            int earlyPolicyResetRecoveryMask =
+                ReadJusticePolicyResetRecoveryMask(loadedV2Snapshot);
+            if (earlySentencePolicyVersion == JusticeSentencePolicyVersion &&
+                earlyPolicyResetRecoveryMask < 0)
+            {
+                return false;
+            }
+            if (earlySentencePolicyVersion < JusticeSentencePolicyVersion)
+            {
+                // Je ne fais jamais passer un ancien dossier de 30 minutes dans
+                // les bornes du nouveau domaine à 10 minutes. Cet extracteur ne
+                // lit que Enabled et les données physiques de restitution, puis
+                // détruit tout le contenu judiciaire avant son activation.
+                if (!LoadJusticeLegacySentencePolicyForReset(
+                        root,
+                        loadedV2Snapshot,
+                        path))
+                {
+                    if (_justicePolicyResetLegacyIdentityProofPending)
+                    {
+                        // Je laisse le fichier historique totalement intact et
+                        // j'attends une identité GTA canonique avant de relire le
+                        // même reset. Aucun profil arbitraire n'est adopté.
+                        _justicePolicyResetLegacyIdentityProofPending = false;
+                        _justiceProfileSelectionPending = true;
+                        _justiceLegacyProfileReloadPending = true;
+                        return false;
+                    }
+                    throw new InvalidDataException(
+                        "Etat Justice legacy inexploitable pour le reset de barème.");
+                }
+                return true;
+            }
+            if (ContainsJusticeRemovedSentencePolicyCustodyFields(root))
+            {
+                // Un document déjà validé en policy v2 ne peut plus transporter
+                // les activités ou la discipline réservées au seul extracteur v1.
                 return false;
             }
             int loadedNextIdentityGeneration;
@@ -8056,7 +8065,21 @@ public sealed partial class DonJEnemySpawner
             {
                 return false;
             }
-            if (!IsJusticeCustodyXmlSemanticallyValid(root, loadedCase, loadedRecord))
+            bool activeProfileHasPolicyRecovery =
+                loadedV2Snapshot != null &&
+                IsJusticeCanonicalProfileSlot(
+                    loadedV2Snapshot.ActiveProfileSlot) &&
+                (earlyPolicyResetRecoveryMask &
+                 (1 << loadedV2Snapshot.ActiveProfileSlot)) != 0;
+            bool rootCustodyIsValid = activeProfileHasPolicyRecovery
+                ? IsJusticeSentencePolicyRecoveryCustodyXmlValid(
+                    root,
+                    loadedV2Snapshot.ActiveProfileSlot)
+                : IsJusticeCustodyXmlSemanticallyValid(
+                    root,
+                    loadedCase,
+                    loadedRecord);
+            if (!rootCustodyIsValid)
             {
                 return false;
             }
@@ -8068,7 +8091,8 @@ public sealed partial class DonJEnemySpawner
                     root,
                     out loadedProfiles,
                     out persistedActiveSlot,
-                    out hasProfiles) ||
+                    out hasProfiles,
+                    earlyPolicyResetRecoveryMask) ||
                 (hasProfiles && !AreJusticeProfileMirrorNodesEqual(
                     root,
                     loadedProfiles,
@@ -8077,7 +8101,9 @@ public sealed partial class DonJEnemySpawner
                 return false;
             }
             if (loadedV2Snapshot != null &&
-                !TryHydrateJusticeV2CustodySnapshots(loadedProfiles))
+                !TryHydrateJusticeV2CustodySnapshots(
+                    loadedProfiles,
+                    earlyPolicyResetRecoveryMask))
             {
                 return false;
             }
@@ -8154,6 +8180,75 @@ public sealed partial class DonJEnemySpawner
                 };
             }
 
+            int loadedSentencePolicyVersion =
+                ReadJusticeSentencePolicyVersion(loadedV2Snapshot);
+            int loadedPolicyResetRecoveryMask =
+                earlyPolicyResetRecoveryMask;
+            if (loadedSentencePolicyVersion > JusticeSentencePolicyVersion ||
+                (loadedSentencePolicyVersion == JusticeSentencePolicyVersion &&
+                 loadedPolicyResetRecoveryMask < 0))
+            {
+                return false;
+            }
+
+            bool sentencePolicyUpgradeRequired =
+                loadedSentencePolicyVersion < JusticeSentencePolicyVersion;
+            if (sentencePolicyUpgradeRequired)
+            {
+                bool allCustodySnapshotsHydrated = true;
+                for (int slot = 0; slot < loadedProfiles.Length; slot++)
+                {
+                    allCustodySnapshotsHydrated &=
+                        loadedProfiles[slot] != null &&
+                        loadedProfiles[slot].CustodySnapshot != null;
+                }
+                if (!allCustodySnapshotsHydrated &&
+                    !TryHydrateJusticeV2CustodySnapshots(
+                        loadedProfiles,
+                        loadedPolicyResetRecoveryMask))
+                {
+                    return false;
+                }
+
+                loadedPolicyResetRecoveryMask =
+                    PrepareJusticeProfilesForSentencePolicyUpgrade(
+                        loadedProfiles);
+                loadedSentencePolicyVersion = JusticeSentencePolicyVersion;
+                loadedNextIdentityGeneration = 0;
+                loadedPoliceIntegrationMode =
+                    (int)JusticePoliceIntegrationMode.FreeroamBestEffort;
+                _justicePolicyResetPublicationPending = true;
+                _justicePolicyResetRecoveryPublicationPending = false;
+                _justicePolicyResetLegacySourcePath = Path.GetFullPath(path);
+                _justiceV1MigrationSourcePath = string.Empty;
+                LogWarning(
+                    "Justice.Migration.Barème",
+                    "Anciennes données judiciaires supprimées; préférences ON/OFF conservées.");
+            }
+            else
+            {
+                if (!AreJusticeSentencePolicyRecoveryTokensValid(
+                        loadedProfiles,
+                        loadedPolicyResetRecoveryMask))
+                {
+                    return false;
+                }
+                _justicePolicyResetPublicationPending =
+                    HasJusticeSentencePolicyQuarantine();
+                // Je requalifie aussi la paire primaire/backup après chaque
+                // redémarrage. Un crash entre les deux remplacements du commit
+                // d'un jeton ne doit jamais libérer Justice sur le seul primaire.
+                _justicePolicyResetRecoveryPublicationPending =
+                    !IsJusticeSentencePolicySnapshotPairRedundant(
+                        path,
+                        loadedPolicyResetRecoveryMask);
+                _justicePolicyResetLegacySourcePath =
+                    FindJusticeSentencePolicyQuarantineState();
+            }
+            _justiceSentencePolicyVersion = loadedSentencePolicyVersion;
+            _justicePolicyResetRecoveryMask = loadedPolicyResetRecoveryMask;
+            _justicePolicyResetWorldRecoveryAppliedMask = 0;
+
             _justicePlayerProfiles = loadedProfiles;
             _justiceActivePlayerProfileSlot = selectedProfileSlot;
             _justiceProfileSelectionPending = selectionPending;
@@ -8183,6 +8278,18 @@ public sealed partial class DonJEnemySpawner
                 _justiceActivePlayerProfileSlot = oldActiveProfileSlot;
                 _justiceProfileSelectionPending = oldProfileSelectionPending;
                 _justiceLegacyProfileReloadPending = oldLegacyProfileReloadPending;
+                _justiceSentencePolicyVersion = oldSentencePolicyVersion;
+                _justicePolicyResetRecoveryMask = oldPolicyResetRecoveryMask;
+                _justicePolicyResetWorldRecoveryAppliedMask =
+                    oldPolicyResetWorldRecoveryAppliedMask;
+                _justicePolicyResetPublicationPending =
+                    oldPolicyResetPublicationPending;
+                _justicePolicyResetRecoveryPublicationPending =
+                    oldPolicyResetRecoveryPublicationPending;
+                _justicePolicyResetLegacyIdentityProofPending =
+                    oldPolicyResetLegacyIdentityProofPending;
+                _justicePolicyResetLegacySourcePath =
+                    oldPolicyResetLegacySourcePath;
                 ReadJusticeCustodyXmlFragment(oldCustodyXml);
                 return false;
             }
@@ -8194,6 +8301,13 @@ public sealed partial class DonJEnemySpawner
                 _justiceLoadedSchemaMajor = JusticeXmlPersistenceCodec.SchemaMajor;
                 _justiceV1MigrationSourcePath = string.Empty;
                 LoadJusticeProfilePersistenceGenerations(loadedV2Snapshot);
+                if (sentencePolicyUpgradeRequired)
+                {
+                    // Les générations legacy ne prouvent aucun nouveau dossier.
+                    _justicePersistenceRevision = 0L;
+                    _justiceProfilePersistenceGenerations =
+                        new long[JusticePlayerProfileCount];
+                }
             }
             else
             {
@@ -8233,6 +8347,18 @@ public sealed partial class DonJEnemySpawner
             _justiceActivePlayerProfileSlot = oldActiveProfileSlot;
             _justiceProfileSelectionPending = oldProfileSelectionPending;
             _justiceLegacyProfileReloadPending = oldLegacyProfileReloadPending;
+            _justiceSentencePolicyVersion = oldSentencePolicyVersion;
+            _justicePolicyResetRecoveryMask = oldPolicyResetRecoveryMask;
+            _justicePolicyResetWorldRecoveryAppliedMask =
+                oldPolicyResetWorldRecoveryAppliedMask;
+            _justicePolicyResetPublicationPending =
+                oldPolicyResetPublicationPending;
+            _justicePolicyResetRecoveryPublicationPending =
+                oldPolicyResetRecoveryPublicationPending;
+            _justicePolicyResetLegacyIdentityProofPending =
+                oldPolicyResetLegacyIdentityProofPending;
+            _justicePolicyResetLegacySourcePath =
+                oldPolicyResetLegacySourcePath;
             ReadJusticeCustodyXmlFragment(oldCustodyXml);
             LogWarning("Justice.Chargement", "Etat ignoré (" + Path.GetFileName(path) + ") : " + ex.Message);
             return false;

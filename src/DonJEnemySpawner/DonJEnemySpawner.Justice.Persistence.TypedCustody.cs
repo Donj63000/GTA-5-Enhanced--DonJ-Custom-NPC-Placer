@@ -342,29 +342,13 @@ public sealed partial class DonJEnemySpawner
     private JusticeCustodyPersistenceSnapshot CaptureJusticeCustodyPersistenceSnapshot(
         int capturedGameTime)
     {
-        List<JusticeActivityCooldownPersistenceSnapshot> cooldowns =
-            new List<JusticeActivityCooldownPersistenceSnapshot>(
-                _justiceActivityCooldownUntil.Count);
-        foreach (KeyValuePair<string, int> pair in _justiceActivityCooldownUntil)
-        {
-            int remainingSeconds = Math.Max(
-                0,
-                (JusticeCustodyMillisecondsUntil(capturedGameTime, pair.Value) + 999) / 1000);
-            if (remainingSeconds > 0)
-            {
-                cooldowns.Add(new JusticeActivityCooldownPersistenceSnapshot(
-                    pair.Key,
-                    remainingSeconds));
-            }
-        }
-
         return new JusticeCustodyPersistenceSnapshot(
             JusticeIsCustodyActive,
             (int)_justiceCustodySite,
             _justicePoliceIgnoreApplied,
             _justicePoliceDispatchDisabled,
             _justiceCustodyInitialSentenceSeconds,
-            _justiceActivityReductionGrantedSeconds,
+            0,
             _justiceInventoryRemoved,
             _justiceWeaponControlsLocked,
             (int)_justiceInventoryCustodyState,
@@ -384,28 +368,15 @@ public sealed partial class DonJEnemySpawner
             _justiceAmnestyWantedClearAttempted,
             CaptureJusticeFineDebitPersistenceSnapshot(),
             CaptureJusticeVoluntaryPaymentPersistenceSnapshot(),
-            CaptureJusticeDisciplinePersistenceSnapshot(),
+            null,
             CaptureJusticeInventoryPersistenceSnapshot(),
-            _justiceActivityCooldownUntil.Count > 0,
-            cooldowns);
+            false,
+            new JusticeActivityCooldownPersistenceSnapshot[0]);
     }
 
     private JusticeCustodyPersistenceSnapshot CaptureLoadedJusticeCustodyPersistenceSnapshot(
         bool hasActivityCooldownContainer)
     {
-        List<JusticeActivityCooldownPersistenceSnapshot> cooldowns =
-            new List<JusticeActivityCooldownPersistenceSnapshot>(
-                _justiceLoadedActivityCooldownSeconds.Count);
-        foreach (KeyValuePair<string, int> pair in _justiceLoadedActivityCooldownSeconds)
-        {
-            if (pair.Value > 0)
-            {
-                cooldowns.Add(new JusticeActivityCooldownPersistenceSnapshot(
-                    pair.Key,
-                    pair.Value));
-            }
-        }
-
         // Je matérialise le fragment validé en DTO sans convertir ses durées
         // restantes en GameTime. Un profil inactif conserve ainsi exactement la
         // preuve relue jusqu'à sa prochaine activation.
@@ -415,7 +386,7 @@ public sealed partial class DonJEnemySpawner
             _justicePoliceIgnoreApplied,
             _justicePoliceDispatchDisabled,
             _justiceCustodyInitialSentenceSeconds,
-            _justiceActivityReductionGrantedSeconds,
+            0,
             _justiceInventoryRemoved,
             _justiceWeaponControlsLocked,
             (int)_justiceInventoryCustodyState,
@@ -435,10 +406,10 @@ public sealed partial class DonJEnemySpawner
             _justiceAmnestyWantedClearAttempted,
             CaptureJusticeFineDebitPersistenceSnapshot(),
             CaptureJusticeVoluntaryPaymentPersistenceSnapshot(),
-            CaptureJusticeDisciplinePersistenceSnapshot(),
+            null,
             CaptureJusticeInventoryPersistenceSnapshot(),
-            hasActivityCooldownContainer,
-            cooldowns);
+            false,
+            new JusticeActivityCooldownPersistenceSnapshot[0]);
     }
 
     private JusticeFineDebitPersistenceSnapshot CaptureJusticeFineDebitPersistenceSnapshot()
@@ -487,17 +458,6 @@ public sealed partial class DonJEnemySpawner
                 (int)intent.Resolution,
                 intent.AmbiguousAmount,
                 intent.DebtCommitted);
-    }
-
-    private JusticeDisciplinePersistenceSnapshot CaptureJusticeDisciplinePersistenceSnapshot()
-    {
-        JusticeDisciplineIntent intent = _justiceDisciplineIntent;
-        return intent == null
-            ? null
-            : new JusticeDisciplinePersistenceSnapshot(
-                intent.IncidentId,
-                (int)intent.CrimeKind,
-                intent.PenaltySeconds);
     }
 
     private JusticeInventoryPersistenceSnapshot CaptureJusticeInventoryPersistenceSnapshot()
@@ -683,7 +643,6 @@ public sealed partial class DonJEnemySpawner
         _justiceNextPoliceSuppressionRestoreAt = 0;
 
         _justiceCustodyInitialSentenceSeconds = snapshot.InitialSentenceSeconds;
-        _justiceActivityReductionGrantedSeconds = snapshot.ActivityReductionSeconds;
         _justiceInventoryRemoved = snapshot.InventoryRemoved;
         _justiceWeaponControlsLocked = snapshot.WeaponControlsLocked;
         _justiceInventoryCustodyState =
@@ -707,20 +666,7 @@ public sealed partial class DonJEnemySpawner
         _justiceFineDebitIntent = RestoreJusticeFineDebitIntent(snapshot.FineDebitIntent);
         _justiceVoluntaryFinePaymentIntent =
             RestoreJusticeVoluntaryPaymentIntent(snapshot.VoluntaryPaymentIntent);
-        _justiceDisciplineIntent = RestoreJusticeDisciplineIntent(snapshot.DisciplineIntent);
         _justiceWeaponSnapshot = RestoreJusticeInventorySnapshot(snapshot.InventorySnapshot);
-
-        _justiceLoadedActivityCooldownSeconds.Clear();
-        for (int index = 0; index < snapshot.Cooldowns.Count && index < 16; index++)
-        {
-            JusticeActivityCooldownPersistenceSnapshot cooldown = snapshot.Cooldowns[index];
-            if (cooldown.RemainingSeconds > 0 &&
-                cooldown.RemainingSeconds <= 300 &&
-                FindJusticeCustodyActivityById(cooldown.Id) != null)
-            {
-                _justiceLoadedActivityCooldownSeconds[cooldown.Id] = cooldown.RemainingSeconds;
-            }
-        }
 
         // Un précommit de confiscation n'acquiert jamais les contrôles avant que
         // RemoveAll soit confirmé par GTA.
@@ -793,19 +739,6 @@ public sealed partial class DonJEnemySpawner
                 Resolution = (JusticePaymentResolution)source.Resolution,
                 AmbiguousAmount = source.AmbiguousAmount,
                 DebtCommitted = source.DebtCommitted
-            };
-    }
-
-    private static JusticeDisciplineIntent RestoreJusticeDisciplineIntent(
-        JusticeDisciplinePersistenceSnapshot source)
-    {
-        return source == null
-            ? null
-            : new JusticeDisciplineIntent
-            {
-                IncidentId = source.IncidentId,
-                CrimeKind = (JusticeCrimeKind)source.CrimeKind,
-                PenaltySeconds = source.PenaltySeconds
             };
     }
 
@@ -894,10 +827,6 @@ public sealed partial class DonJEnemySpawner
             writer,
             "initialSentenceSeconds",
             snapshot.InitialSentenceSeconds);
-        WriteJusticePersistenceAttribute(
-            writer,
-            "activityReductionSeconds",
-            snapshot.ActivityReductionSeconds);
         WriteJusticePersistenceAttribute(writer, "inventoryRemoved", snapshot.InventoryRemoved);
         WriteJusticePersistenceAttribute(
             writer,
@@ -939,9 +868,7 @@ public sealed partial class DonJEnemySpawner
 
         WriteJusticeFineDebitPersistenceXml(writer, snapshot.FineDebitIntent);
         WriteJusticeVoluntaryPaymentPersistenceXml(writer, snapshot.VoluntaryPaymentIntent);
-        WriteJusticeDisciplinePersistenceXml(writer, snapshot.DisciplineIntent);
         WriteJusticeInventoryPersistenceXml(writer, snapshot.InventorySnapshot);
-        WriteJusticeActivityCooldownPersistenceXml(writer, snapshot);
         writer.WriteEndElement();
     }
 
@@ -1016,24 +943,6 @@ public sealed partial class DonJEnemySpawner
         writer.WriteEndElement();
     }
 
-    private static void WriteJusticeDisciplinePersistenceXml(
-        XmlWriter writer,
-        JusticeDisciplinePersistenceSnapshot intent)
-    {
-        if (intent == null)
-        {
-            return;
-        }
-
-        writer.WriteStartElement("DisciplineIntent");
-        writer.WriteAttributeString("incidentId", intent.IncidentId);
-        writer.WriteAttributeString(
-            "crimeKind",
-            ((JusticeCrimeKind)intent.CrimeKind).ToString());
-        WriteJusticePersistenceAttribute(writer, "penaltySeconds", intent.PenaltySeconds);
-        writer.WriteEndElement();
-    }
-
     private static void WriteJusticeInventoryPersistenceXml(
         XmlWriter writer,
         JusticeInventoryPersistenceSnapshot inventory)
@@ -1068,35 +977,6 @@ public sealed partial class DonJEnemySpawner
                     weapon.ComponentHashes[componentIndex]);
                 writer.WriteEndElement();
             }
-            writer.WriteEndElement();
-        }
-        writer.WriteEndElement();
-    }
-
-    private static void WriteJusticeActivityCooldownPersistenceXml(
-        XmlWriter writer,
-        JusticeCustodyPersistenceSnapshot snapshot)
-    {
-        if (!snapshot.HasActivityCooldownContainer)
-        {
-            return;
-        }
-
-        writer.WriteStartElement("ActivityCooldowns");
-        for (int index = 0; index < snapshot.Cooldowns.Count; index++)
-        {
-            JusticeActivityCooldownPersistenceSnapshot cooldown = snapshot.Cooldowns[index];
-            if (cooldown.RemainingSeconds <= 0)
-            {
-                continue;
-            }
-
-            writer.WriteStartElement("Cooldown");
-            writer.WriteAttributeString("id", cooldown.Id);
-            WriteJusticePersistenceAttribute(
-                writer,
-                "remainingSeconds",
-                cooldown.RemainingSeconds);
             writer.WriteEndElement();
         }
         writer.WriteEndElement();

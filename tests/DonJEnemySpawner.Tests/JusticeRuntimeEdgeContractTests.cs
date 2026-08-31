@@ -434,52 +434,27 @@ public sealed class JusticeRuntimeEdgeContractTests
     }
 
     [TestMethod]
-    public void CustodyActivityKey_RefusesWorldMutationDuringSuspensionOrIdentityMismatch()
+    public void CustodyWorldKeyHandler_IsRemovedWithActivities()
     {
         string source = ReadSource("DonJEnemySpawner.Justice.Custody.cs");
-        string handler = ExtractMethodBody(source, "JusticeHandleCustodyWorldKey");
-
-        AssertOrdered(
-            handler,
-            "Ped player = Game.Player.Character",
-            "JusticeCustodyCanMutateWorld(player)",
-            "IsJusticeCustodyPlayerIdentityCompatible(player)",
-            "FindNearestJusticeCustodyActivity(",
-            "StartJusticeCustodyActivity(player, activity, now)");
+        Assert.IsFalse(source.Contains("JusticeHandleCustodyWorldKey"));
     }
 
     [TestMethod]
-    public void CustodyActivityScenarioProbe_FreezesInsteadOfCancellingOnNativeFailure()
+    public void CustodyActivityScenarioRuntime_IsCompletelyAbsent()
     {
         string source = ReadSource("DonJEnemySpawner.Justice.Custody.cs");
-        string update = ExtractMethodBody(source, "UpdateJusticeCustodyActivity");
-
-        AssertOrdered(
-            update,
-            "_justiceActivityScenarioValidationPending &&",
-            "AdvanceJusticeActivityClock(",
-            "TryCallJusticeBooleanNativeWithCircuit(",
-            "if (!scenarioStateValid)",
-            "_justiceActivityScenarioValidationPending = true",
-            "JusticeNativeCircuitRetryMs",
-            "AdvanceJusticeActivityClock(",
-            "return;",
-            "_justiceActivityScenarioValidationPending = false",
-            "if (!scenarioActive)",
-            "CancelJusticeCustodyActivity(true, now)",
-            "_justiceActivityElapsedMs = AdvanceJusticeActivityClock");
-        Assert.IsFalse(update.Contains("uint rawElapsed"));
+        Assert.IsFalse(source.Contains("UpdateJusticeCustodyActivity"));
+        Assert.IsFalse(source.Contains("AdvanceJusticeActivityClock"));
+        Assert.IsFalse(source.Contains("JusticeNativeTaskStartScenarioInPlace"));
+        Assert.IsFalse(source.Contains("World.DrawMarker("));
     }
 
     [TestMethod]
-    public void CustodyTransientState_RetriesEachSetterAndDisciplineInvincibility()
+    public void CustodyTransientState_RetriesEachSetterWithoutDisciplineInvincibility()
     {
         string source = ReadSource("DonJEnemySpawner.Justice.Custody.cs");
         string restore = ExtractMethodBody(source, "RestoreJusticeCustodyPlayerTransientState");
-        string endDiscipline = ExtractMethodBody(source, "EndJusticeCustodyDiscipline");
-        string retryDiscipline = ExtractMethodBody(
-            source,
-            "TryRestoreJusticeDisciplineInvincibility");
         string amnesty = ExtractMethodBody(source, "JusticeAmnestyCustody");
 
         AssertOrdered(
@@ -493,21 +468,11 @@ public sealed class JusticeRuntimeEdgeContractTests
             Regex.Matches(restore, @"catch\s*\{").Count,
             "Chaque propriété temporaire doit conserver son propre chemin de retry.");
         AssertOrdered(
-            endDiscipline,
-            "_justiceDisciplineInvincibilityRestorePending = true",
-            "TryRestoreJusticeDisciplineInvincibility(player)",
-            "return playerRestored;");
-        AssertOrdered(
-            retryDiscipline,
-            "TryReleasePlayerInvincibility(",
-            "PlayerInvincibilityOwner.JusticeDiscipline",
-            "_justiceDisciplineStoredInvincible",
-            "_justiceDisciplineInvincibilityRestorePending = false");
-        AssertOrdered(
             amnesty,
-            "EndJusticeCustodyDiscipline(player)",
             "RestoreJusticeCustodyPlayerTransientState(player)",
             "_justiceCustodyPlayerStateStored = false");
+        Assert.IsFalse(source.Contains("TryRestoreJusticeDisciplineInvincibility"));
+        Assert.IsFalse(source.Contains("PlayerInvincibilityOwner.JusticeDiscipline"));
     }
 
     [TestMethod]
@@ -708,7 +673,7 @@ public sealed class JusticeRuntimeEdgeContractTests
     }
 
     [TestMethod]
-    public void Persistence_MissingCaseOrRecordRejectsPrimaryAndFallsBackToBackup()
+    public void Persistence_IncompleteLegacyProfileFallsBackThenResetsBackup()
     {
         WithTemporarySaveDirectory(directory =>
         {
@@ -735,28 +700,35 @@ public sealed class JusticeRuntimeEdgeContractTests
                 File.WriteAllText(primary, incompletePrimary);
                 File.WriteAllText(backup, validBackup);
                 object reader = CreateHeadlessScript();
+                SetFieldValue(
+                    reader,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 0));
 
                 Assert.IsTrue(
                     (bool)InvokeInstance(reader, "TryLoadJusticeState", false),
                     "Un primaire incomplet doit être rejeté pour permettre la lecture du .bak.");
                 JusticeCaseState loaded = GetFieldValue<JusticeCaseState>(reader, "_justiceCaseState");
-                Assert.AreEqual(73, loaded.ActiveScore);
-                Assert.AreEqual("backup-episode", loaded.WantedEpisodeId);
+                Assert.IsTrue(loaded.Enabled, "La préférence du backup valide doit être conservée.");
+                Assert.AreEqual(0, loaded.ActiveScore);
+                Assert.AreEqual(string.Empty, loaded.WantedEpisodeId);
+                Assert.AreEqual(0, loaded.Charges.Count);
                 Assert.IsTrue(GetFieldValue<bool>(reader, "_justiceDamageFrontPrimingPending"));
+                Assert.AreEqual(2, GetFieldValue<int>(reader, "_justiceSentencePolicyVersion"));
             }
         });
     }
 
     [TestMethod]
-    public void Persistence_InvalidFineIntentOrInventorySnapshotFallsBackToBackup()
+    public void Persistence_LegacyFineIntentIsIgnoredButInvalidInventoryFallsBack()
     {
         WithTemporarySaveDirectory(directory =>
         {
             string primary = Path.Combine(directory, "_justice_state.xml");
             string backup = primary + ".bak";
             string validBackup =
-                "<JusticeState version='1' enabled='true'>" +
-                "<Case enabled='true' activeScore='73' fineDue='1250' sentenceSeconds='60' " +
+                "<JusticeState version='1' enabled='false'>" +
+                "<Case enabled='false' activeScore='73' fineDue='1250' sentenceSeconds='60' " +
                 "hasWarrant='true' phase='AtLarge' wantedEpisodeId='backup-semantic'>" +
                 "<Charges><Charge kind='MurderCivilian' points='73' fine='1250' sentenceSeconds='60' /></Charges>" +
                 "</Case>" +
@@ -769,7 +741,7 @@ public sealed class JusticeRuntimeEdgeContractTests
                 "<Case enabled='true' activeScore='30' fineDue='1000' sentenceSeconds='240' " +
                 "phase='Captured' custodyEpisodeId='custody:bad-fine' />" +
                 "<Record recidivism='0' />" +
-                "<Custody active='true' site='MissionRow' playerModelHash='12345'>" +
+                "<Custody active='true' site='MissionRow' playerModelHash='12345' playerSlot='0'>" +
                 "<FineDebitIntent episodeId='custody:bad-fine' slot='0' fineAmount='1000' " +
                 "debitAmount='600' cashBefore='2000' cashAfter='1900' " +
                 "sentenceIfDebited='240' sentenceIfConverted='270' stationPlanned='true' />" +
@@ -779,22 +751,36 @@ public sealed class JusticeRuntimeEdgeContractTests
                 "phase='Incarcerated' custodyEpisodeId='custody:bad-snapshot' />" +
                 "<Record recidivism='0' />" +
                 "<Custody active='true' site='MissionRow' inventoryRemoved='true' " +
-                "weaponControlsLocked='false' playerModelHash='12345'>" +
+                "weaponControlsLocked='false' playerModelHash='12345' playerSlot='0'>" +
                 "<InventorySnapshot validated='true' selectedWeapon='0'>" +
                 "<Weapon hash='0' ammo='25' clip='10' tint='0' />" +
                 "</InventorySnapshot></Custody></JusticeState>"
             };
 
-            foreach (string invalidPrimary in invalidPrimaries)
+            for (int index = 0; index < invalidPrimaries.Length; index++)
             {
-                File.WriteAllText(primary, invalidPrimary);
+                File.WriteAllText(primary, invalidPrimaries[index]);
                 File.WriteAllText(backup, validBackup);
                 object reader = CreateHeadlessScript();
+                SetFieldValue(
+                    reader,
+                    "_justiceCanonicalPlayerSlotOverride",
+                    new Func<int>(() => 0));
 
                 Assert.IsTrue((bool)InvokeInstance(reader, "TryLoadJusticeState", false));
                 JusticeCaseState loaded = GetFieldValue<JusticeCaseState>(reader, "_justiceCaseState");
-                Assert.AreEqual(73, loaded.ActiveScore);
-                Assert.AreEqual("backup-semantic", loaded.WantedEpisodeId);
+                Assert.AreEqual(0, loaded.ActiveScore);
+                Assert.AreEqual(string.Empty, loaded.WantedEpisodeId);
+                Assert.AreEqual(0, loaded.Charges.Count);
+                Assert.AreEqual(
+                    index == 0,
+                    loaded.Enabled,
+                    index == 0
+                        ? "Une ancienne intention financière invalide est effacée avec le dossier."
+                        : "Un inventaire physique invalide doit forcer le fallback sur le backup OFF.");
+                Assert.AreEqual(index == 0 ? 1 : 0, GetFieldValue<int>(
+                    reader,
+                    "_justicePolicyResetRecoveryMask"));
             }
         });
     }
@@ -836,9 +822,7 @@ public sealed class JusticeRuntimeEdgeContractTests
                      "_justiceSelfDefenseUntilByVictim",
                      "_justiceDamageFrontsToConsume",
                      "_justiceDamagePairBaselines",
-                     "_justiceWitnessSnapshots",
-                     "_justiceActivityCooldownUntil",
-                     "_justiceLoadedActivityCooldownSeconds"
+                     "_justiceWitnessSnapshots"
                  })
         {
             InitializeEmptyCollectionField(script, fieldName);

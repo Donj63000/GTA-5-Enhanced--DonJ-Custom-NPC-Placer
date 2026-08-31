@@ -16,20 +16,20 @@ public sealed class JusticeDomainTests
             { JusticeCrimeKind.VehicleDamage, Tuple.Create(8, 500L, 0) },
             { JusticeCrimeKind.ArmedThreat, Tuple.Create(10, 600L, 0) },
             { JusticeCrimeKind.VehicleTheft, Tuple.Create(12, 750L, 0) },
-            { JusticeCrimeKind.VehicleDestruction, Tuple.Create(18, 1250L, 60) },
-            { JusticeCrimeKind.SimpleAssault, Tuple.Create(18, 1000L, 90) },
-            { JusticeCrimeKind.HitAndRun, Tuple.Create(18, 1200L, 90) },
-            { JusticeCrimeKind.EvadingPolice, Tuple.Create(20, 1500L, 120) },
-            { JusticeCrimeKind.AccessoryAssaultOfficer, Tuple.Create(22, 2000L, 120) },
-            { JusticeCrimeKind.Carjacking, Tuple.Create(24, 1750L, 120) },
-            { JusticeCrimeKind.ResistingArrest, Tuple.Create(30, 2500L, 180) },
-            { JusticeCrimeKind.AggravatedAssault, Tuple.Create(34, 3000L, 240) },
-            { JusticeCrimeKind.AssaultOfficer, Tuple.Create(48, 5000L, 360) },
-            { JusticeCrimeKind.AccessoryMurderOfficer, Tuple.Create(52, 7500L, 420) },
-            { JusticeCrimeKind.Manslaughter, Tuple.Create(55, 6000L, 480) },
-            { JusticeCrimeKind.MurderCivilian, Tuple.Create(75, 10000L, 720) },
-            { JusticeCrimeKind.Escape, Tuple.Create(90, 10000L, 900) },
-            { JusticeCrimeKind.MurderOfficer, Tuple.Create(100, 15000L, 1080) }
+            { JusticeCrimeKind.VehicleDestruction, Tuple.Create(18, 1250L, 20) },
+            { JusticeCrimeKind.SimpleAssault, Tuple.Create(18, 1000L, 30) },
+            { JusticeCrimeKind.HitAndRun, Tuple.Create(18, 1200L, 30) },
+            { JusticeCrimeKind.EvadingPolice, Tuple.Create(20, 1500L, 40) },
+            { JusticeCrimeKind.AccessoryAssaultOfficer, Tuple.Create(22, 2000L, 40) },
+            { JusticeCrimeKind.Carjacking, Tuple.Create(24, 1750L, 40) },
+            { JusticeCrimeKind.ResistingArrest, Tuple.Create(30, 2500L, 60) },
+            { JusticeCrimeKind.AggravatedAssault, Tuple.Create(34, 3000L, 80) },
+            { JusticeCrimeKind.AssaultOfficer, Tuple.Create(48, 5000L, 120) },
+            { JusticeCrimeKind.AccessoryMurderOfficer, Tuple.Create(52, 7500L, 140) },
+            { JusticeCrimeKind.Manslaughter, Tuple.Create(55, 6000L, 160) },
+            { JusticeCrimeKind.MurderCivilian, Tuple.Create(75, 10000L, 240) },
+            { JusticeCrimeKind.Escape, Tuple.Create(90, 10000L, 300) },
+            { JusticeCrimeKind.MurderOfficer, Tuple.Create(100, 15000L, 360) }
         };
 
         Assert.AreEqual(expected.Count, JusticePolicy.Catalog.Count);
@@ -42,6 +42,24 @@ public sealed class JusticeDomainTests
             Assert.AreEqual(pair.Value.Item2, definition.BaseFine, pair.Key.ToString());
             Assert.AreEqual(pair.Value.Item3, definition.BaseSentenceSeconds, pair.Key.ToString());
         }
+    }
+
+    [TestMethod]
+    public void SentencingPolicy_UsesTheTenMinuteCapAndFiveSecondQuantum()
+    {
+        Assert.AreEqual(600, JusticePolicy.MaxActiveSentenceSeconds);
+        Assert.AreEqual(5, JusticePolicy.SentenceRoundingQuantumSeconds);
+
+        JusticeSanction sanction = JusticePolicy.Evaluate(
+            ConfirmedIncident(
+                JusticeCrimeKind.VehicleDestruction,
+                "five-second-quantum",
+                20,
+                1,
+                JusticeCircumstances.Armed),
+            new JusticeRecordState());
+
+        Assert.AreEqual(25, sanction.SentenceSeconds);
     }
 
     [TestMethod]
@@ -110,7 +128,7 @@ public sealed class JusticeDomainTests
         Assert.AreEqual(6000, excessiveSanction.CircumstanceBasisPoints);
         Assert.AreEqual(11, excessiveSanction.Points);
         Assert.AreEqual(600L, excessiveSanction.Fine);
-        Assert.AreEqual(60, excessiveSanction.SentenceSeconds);
+        Assert.AreEqual(20, excessiveSanction.SentenceSeconds);
     }
 
     [TestMethod]
@@ -136,7 +154,7 @@ public sealed class JusticeDomainTests
         Assert.IsTrue(resistingSanction.IsChargeable);
         Assert.AreEqual(35, resistingSanction.Points);
         Assert.AreEqual(2900L, resistingSanction.Fine);
-        Assert.AreEqual(210, resistingSanction.SentenceSeconds);
+        Assert.AreEqual(70, resistingSanction.SentenceSeconds);
     }
 
     [TestMethod]
@@ -160,7 +178,7 @@ public sealed class JusticeDomainTests
         Assert.AreEqual(23000, sanction.CircumstanceBasisPoints);
         Assert.AreEqual(230, sanction.Points);
         Assert.AreEqual(34500L, sanction.Fine);
-        Assert.AreEqual(1800, sanction.SentenceSeconds);
+        Assert.AreEqual(JusticePolicy.MaxActiveSentenceSeconds, sanction.SentenceSeconds);
 
         JusticeIncident collective = ConfirmedIncident(
             JusticeCrimeKind.SimpleAssault,
@@ -185,7 +203,7 @@ public sealed class JusticeDomainTests
         JusticeSanction sanction = JusticePolicy.Evaluate(incident, record);
         Assert.AreEqual(24, sanction.Points);
         Assert.AreEqual(1500L, sanction.Fine);
-        Assert.AreEqual(165, sanction.SentenceSeconds);
+        Assert.AreEqual(55, sanction.SentenceSeconds);
     }
 
     [TestMethod]
@@ -412,7 +430,7 @@ public sealed class JusticeDomainTests
             state.Charges[0].Circumstances & JusticeCircumstances.GroupCrime);
         Assert.AreEqual(53, state.Charges[0].Points);
         Assert.AreEqual(5500L, state.Charges[0].Fine);
-        Assert.AreEqual(405, state.Charges[0].SentenceSeconds);
+        Assert.AreEqual(135, state.Charges[0].SentenceSeconds);
         CollectionAssert.AreEqual(new[] { 501 }, state.Charges[0].AlliedContributorHandles);
     }
 
@@ -459,7 +477,7 @@ public sealed class JusticeDomainTests
             upgraded.Circumstances & JusticeCircumstances.OrganizedBand);
         Assert.AreEqual(28, upgraded.Points);
         Assert.AreEqual(2500L, upgraded.Fine);
-        Assert.AreEqual(150, upgraded.SentenceSeconds);
+        Assert.AreEqual(50, upgraded.SentenceSeconds);
         CollectionAssert.AreEquivalent(new[] { 601, 602 }, upgraded.AlliedContributorHandles);
     }
 

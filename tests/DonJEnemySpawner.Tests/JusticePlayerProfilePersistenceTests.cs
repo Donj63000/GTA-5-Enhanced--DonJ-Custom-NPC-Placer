@@ -242,8 +242,6 @@ public sealed class JusticePlayerProfilePersistenceTests
             SetField(writer, "_justiceWeaponControlsLocked", true);
             SetField(writer, "_justiceCustodyPlayerStateStored", true);
             SetField(writer, "_justiceCustodyStoredCanRagdoll", true);
-            GetField<Dictionary<string, int>>(writer, "_justiceActivityCooldownUntil")
-                ["prison_travail"] = 60000;
             AssertCurrentCustodyFragmentIsValid(writer, profiles[0]);
             FlushAndAwait(writer);
 
@@ -255,11 +253,6 @@ public sealed class JusticePlayerProfilePersistenceTests
             Assert.AreEqual(0, GetField<int>(reader, "_justiceActivePlayerProfileSlot"));
             Assert.IsTrue(GetField<bool>(reader, "_justiceCustodyRuntimeActive"));
             Assert.IsTrue(GetField<bool>(reader, "_justiceCustodyResumePending"));
-            Assert.AreEqual(
-                1,
-                GetField<Dictionary<string, int>>(
-                    reader,
-                    "_justiceLoadedActivityCooldownSeconds").Count);
 
             SetField(reader, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 1));
             SwitchProfileAndAwait(reader);
@@ -269,12 +262,7 @@ public sealed class JusticePlayerProfilePersistenceTests
             Assert.AreEqual(1, GetField<int>(reader, "_justiceActivePlayerProfileSlot"));
             Assert.AreSame(loaded[1].CaseState, GetField<JusticeCaseState>(reader, "_justiceCaseState"));
             Assert.IsTrue(loaded[0].CanAdvanceCustodyInBackground);
-            Assert.IsTrue(
-                RequireTypedCustodySnapshot(loaded[0]).Cooldowns.Any(
-                    cooldown => string.Equals(
-                        cooldown.Id,
-                        "prison_travail",
-                        StringComparison.Ordinal)));
+            Assert.AreEqual(0, RequireTypedCustodySnapshot(loaded[0]).Cooldowns.Count);
             Assert.IsFalse(GetField<bool>(reader, "_justiceCustodyRuntimeActive"));
             Assert.IsFalse(GetField<bool>(reader, "_justiceCustodyResumePending"));
             Assert.IsNull(GetField<object>(reader, "_justiceWeaponSnapshot"));
@@ -753,7 +741,7 @@ public sealed class JusticePlayerProfilePersistenceTests
     }
 
     [TestMethod]
-    public void PlayerProfiles_LegacyV1MigratesOnlyToTheProvenCanonicalSlot()
+    public void PlayerProfiles_LegacyV1ResetsTheProvenCanonicalSlotAndKeepsEnabledOnly()
     {
         WithTemporaryJusticeDirectory(directory =>
         {
@@ -784,17 +772,20 @@ public sealed class JusticePlayerProfilePersistenceTests
             JusticePlayerProfileState[] migrated =
                 GetField<JusticePlayerProfileState[]>(reader, "_justicePlayerProfiles");
             Assert.AreEqual(0, migrated[0].RecordState.RecidivismIndex);
-            Assert.AreEqual(5, migrated[1].RecordState.RecidivismIndex);
+            Assert.AreEqual(0, migrated[1].RecordState.RecidivismIndex);
             Assert.AreEqual(0, migrated[2].RecordState.RecidivismIndex);
             Assert.IsFalse(migrated[1].CaseState.Enabled);
-            Assert.AreEqual(34, migrated[1].CaseState.ActiveScore);
-            Assert.AreEqual(1800L, migrated[1].CaseState.FineDue);
-            Assert.AreEqual(90, migrated[1].CaseState.SentenceSeconds);
-            Assert.IsTrue(migrated[1].CaseState.HasWarrant);
-            Assert.AreEqual(JusticePhase.Wanted, migrated[1].CaseState.Phase);
-            Assert.AreEqual("episode:paused-v1-migration", migrated[1].CaseState.WantedEpisodeId);
-            Assert.AreEqual("Agression test", migrated[1].CaseState.LastCrimeLabel);
-            Assert.AreEqual(1, migrated[1].CaseState.Charges.Count);
+            Assert.AreEqual(0, migrated[1].CaseState.ActiveScore);
+            Assert.AreEqual(0L, migrated[1].CaseState.FineDue);
+            Assert.AreEqual(0, migrated[1].CaseState.SentenceSeconds);
+            Assert.IsFalse(migrated[1].CaseState.HasWarrant);
+            Assert.AreEqual(JusticePhase.AtLarge, migrated[1].CaseState.Phase);
+            Assert.AreEqual(string.Empty, migrated[1].CaseState.WantedEpisodeId);
+            Assert.AreEqual(string.Empty, migrated[1].CaseState.LastCrimeLabel);
+            Assert.AreEqual(0, migrated[1].CaseState.Charges.Count);
+            Assert.AreEqual(
+                2,
+                GetField<int>(reader, "_justiceSentencePolicyVersion"));
 
             FlushAndAwait(reader);
             XDocument migratedXml = XDocument.Load(path);
@@ -804,9 +795,6 @@ public sealed class JusticePlayerProfilePersistenceTests
             Assert.AreEqual(
                 "1",
                 (string)migratedXml.Root.Element("RuntimeRecovery").Attribute("activePlayerSlot"));
-            Assert.IsTrue(
-                File.Exists(Path.Combine(directory, "_justice_state.v1.bak")),
-                "La migration doit conserver l'original v1 avant le premier remplacement v2.");
         });
     }
 
@@ -4333,10 +4321,22 @@ public sealed class JusticePlayerProfilePersistenceTests
             legacy.Save(path);
             object legacyReader = CreateHeadlessScript(null, -1);
             SetField(legacyReader, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
-            Assert.IsTrue((bool)Invoke(legacyReader, "TryReadJusticeStateFile", path));
-            Assert.IsTrue(GetField<bool>(legacyReader, "_justiceLegalReleaseFinalizationPending"));
+            bool legacyLoaded = (bool)Invoke(
+                legacyReader,
+                "TryReadJusticeStateFile",
+                path);
+            Assert.IsTrue(
+                legacyLoaded,
+                "L'ancien précommit doit être lisible par le reset de politique.");
+            Assert.IsFalse(
+                GetField<bool>(legacyReader, "_justiceLegalReleaseFinalizationPending"),
+                "Le WAL de libération historique ne doit jamais être rejoué.");
             Assert.IsNotNull(GetField<object>(legacyReader, "_justiceWeaponSnapshot"));
-            Assert.IsTrue((bool)Invoke(legacyReader, "IsJusticeLegalReleasePrecommitState"));
+            Assert.IsFalse((bool)Invoke(legacyReader, "IsJusticeLegalReleasePrecommitState"));
+            Assert.AreEqual(
+                JusticePhase.AtLarge,
+                GetField<JusticeCaseState>(legacyReader, "_justiceCaseState").Phase);
+            Assert.AreEqual(1, GetField<int>(legacyReader, "_justicePolicyResetRecoveryMask"));
         });
     }
 
@@ -5255,8 +5255,6 @@ public sealed class JusticePlayerProfilePersistenceTests
         SetField(script, "_justiceSuspendedPursuitDeathPlayerSlot", -1);
         SetField(script, "_justiceCustodyPlayerSlot", -1);
         SetField(script, "_justiceReleaseSelectedWeaponHash", unchecked((int)0xA2719263));
-        SetField(script, "_justiceActivityCooldownUntil", new Dictionary<string, int>());
-        SetField(script, "_justiceLoadedActivityCooldownSeconds", new Dictionary<string, int>());
         return script;
     }
 

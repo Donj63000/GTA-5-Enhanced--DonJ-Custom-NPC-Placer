@@ -110,6 +110,7 @@ public sealed partial class DonJEnemySpawner
             string directory = GetSaveDirectory();
             Directory.CreateDirectory(directory);
             string statePath = Path.Combine(directory, JusticeStateFileName);
+            PrepareJusticeSentencePolicyQuarantine(directory);
             if (!string.IsNullOrWhiteSpace(_justiceV1MigrationSourcePath) &&
                 File.Exists(_justiceV1MigrationSourcePath))
             {
@@ -1561,6 +1562,10 @@ public sealed partial class DonJEnemySpawner
             List<JusticePersistenceField> globalFields = new List<JusticePersistenceField>
             {
                 Field("activePlayerSlot", _justiceActivePlayerProfileSlot),
+                // Je n'émets que la politique courante. Une valeur legacy ne
+                // doit jamais être republiée après son extraction destructive.
+                Field("sentencePolicyVersion", JusticeSentencePolicyVersion),
+                Field("policyResetRecoveryMask", _justicePolicyResetRecoveryMask),
                 Field("nextIdentityGeneration", Math.Max(0, _justiceNextIdentityGeneration)),
                 Field("policeIntegrationMode", (int)_justicePoliceIntegrationMode),
                 Field("lastCanonicalPlayerSlot", _justiceLastCanonicalPlayerSlot),
@@ -1909,9 +1914,6 @@ public sealed partial class DonJEnemySpawner
                 return "FineDebit";
             case "VoluntaryFinePayment":
                 return "VoluntaryFinePayment";
-            case "ApplyJusticeCustodyDiscipline":
-            case "ResumeJusticeDisciplineIntent":
-                return "Discipline";
             case "InventoryConfiscation":
             case "CompleteJusticeCustodyEscape":
                 return "Inventory";

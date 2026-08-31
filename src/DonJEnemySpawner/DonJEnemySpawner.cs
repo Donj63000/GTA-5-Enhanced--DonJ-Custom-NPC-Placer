@@ -1070,12 +1070,6 @@ private enum EnemyBehavior
                 return;
             }
 
-            if (HandleJusticeWorldKey(e.KeyCode))
-            {
-                e.Handled = true;
-                return;
-            }
-
             if (TryHandleTerminatorVisionKey(e.KeyCode))
             {
                 e.Handled = true;

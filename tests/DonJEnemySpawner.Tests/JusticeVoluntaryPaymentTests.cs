@@ -789,9 +789,7 @@ public sealed class JusticeVoluntaryPaymentTests
             "_justiceDamagePairBaselines",
             "_justiceWitnessSnapshots",
             "_justiceCustodyGuards",
-            "_justiceCustodyInmates",
-            "_justiceActivityCooldownUntil",
-            "_justiceLoadedActivityCooldownSeconds"
+            "_justiceCustodyInmates"
         };
         for (int index = 0; index < collectionFields.Length; index++)
         {

@@ -372,8 +372,7 @@ public sealed partial class DonJEnemySpawner
             legacyBounds.Width,
             lineHeight);
         string caption = "JUSTICE  //  " + JusticeGetCustodyLocationDisplay() +
-            "  •  reste " + GetJusticeSentenceDisplay() +
-            "  •  " + JusticeGetCustodyActivityDisplay();
+            "  •  reste " + GetJusticeSentenceDisplay();
 
         // Je garde uniquement une ligne discrète pendant la détention. Les crimes
         // et l'évasion utilisent le bandeau temporaire ShowStatus déjà existant.

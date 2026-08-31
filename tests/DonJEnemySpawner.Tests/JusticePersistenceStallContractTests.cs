@@ -286,9 +286,7 @@ public sealed class JusticePersistenceStallContractTests
         foreach (string collectionField in new[]
         {
             "_justiceCustodyGuards",
-            "_justiceCustodyInmates",
-            "_justiceActivityCooldownUntil",
-            "_justiceLoadedActivityCooldownSeconds"
+            "_justiceCustodyInmates"
         })
         {
             InitializeEmptyCollectionField(script, collectionField);

@@ -30,7 +30,6 @@ public sealed class JusticeCustodyDeathFailClosedTests
             observed,
             "TryPersistJusticeCustodyDeathFrontToWal(player)",
             "ArmJusticeCustodyDeathFailClosedState(player, now)",
-            "CancelJusticeCustodyActivity(false, now)",
             "ResetJusticeCustodyClock(now)");
 
         string suspended = ReadMethod(
@@ -227,9 +226,7 @@ public sealed class JusticeCustodyDeathFailClosedTests
         foreach (string collectionField in new[]
         {
             "_justiceCustodyGuards",
-            "_justiceCustodyInmates",
-            "_justiceActivityCooldownUntil",
-            "_justiceLoadedActivityCooldownSeconds"
+            "_justiceCustodyInmates"
         })
         {
             InitializeEmptyCollectionField(script, collectionField);

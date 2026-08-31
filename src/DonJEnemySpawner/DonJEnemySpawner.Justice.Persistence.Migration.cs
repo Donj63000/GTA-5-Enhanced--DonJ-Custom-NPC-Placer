@@ -162,6 +162,25 @@ public sealed partial class DonJEnemySpawner
             {
                 return false;
             }
+            int sentencePolicyVersion;
+            int sentencePolicyRecoveryMask = 0;
+            if (!TryReadJusticeSentencePolicyVersionStrict(
+                    snapshot,
+                    out sentencePolicyVersion) ||
+                (sentencePolicyVersion == JusticeSentencePolicyVersion &&
+                 (sentencePolicyRecoveryMask =
+                     ReadJusticePolicyResetRecoveryMask(snapshot)) < 0))
+            {
+                error = "Marqueur de politique Justice v2 invalide.";
+                return false;
+            }
+            if (sentencePolicyVersion == JusticeSentencePolicyVersion &&
+                ContainsJusticeRemovedSentencePolicyCustodyFields(legacyRoot))
+            {
+                error =
+                    "Le snapshot policy v2 contient une ancienne activité ou discipline.";
+                return false;
+            }
 
             int nextIdentityGeneration;
             int policeIntegrationMode;
@@ -204,7 +223,8 @@ public sealed partial class DonJEnemySpawner
                     legacyRoot,
                     out profiles,
                     out activeSlot,
-                    out hasProfiles) ||
+                    out hasProfiles,
+                    sentencePolicyRecoveryMask) ||
                 !hasProfiles || profiles == null ||
                 activeSlot != snapshot.ActiveProfileSlot ||
                 !AreJusticeProfileMirrorNodesEqual(
@@ -213,6 +233,15 @@ public sealed partial class DonJEnemySpawner
                     activeSlot))
             {
                 error = "Invariants métier des profils Justice v2 invalides.";
+                return false;
+            }
+            if (sentencePolicyVersion == JusticeSentencePolicyVersion &&
+                !AreJusticeSentencePolicyRecoveryTokensValid(
+                    profiles,
+                    sentencePolicyRecoveryMask))
+            {
+                error =
+                    "Jetons techniques de récupération Justice v2 invalides.";
                 return false;
             }
 
