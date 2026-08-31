@@ -386,23 +386,37 @@ public sealed partial class DonJEnemySpawner
     {
         int slot = GetJusticeMenuSelectedProfileSlot();
         JusticeCaseState state = GetJusticeProfileCaseForDisplay(slot);
+
         if (slot == _justiceActivePlayerProfileSlot)
         {
             return GetJusticeStatusDisplay();
         }
-        if (state == null || !state.Enabled)
+
+        if (state == null)
         {
             return "Désactivée";
         }
+
+        if (!state.Enabled)
+        {
+            return IsLoadedJusticeCaseActive(state)
+                ? "Désactivée · dossier conservé"
+                : "Désactivée";
+        }
+
         if (IsJusticeCustodyPhase(state.Phase))
         {
             return "En détention";
         }
+
         if (!IsLoadedJusticeCaseActive(state))
         {
             return "Aucun dossier";
         }
-        return state.HasWarrant ? "Recherché sous mandat" : "Dossier actif";
+
+        return state.HasWarrant
+            ? "Recherché sous mandat"
+            : "Dossier actif";
     }
 
     private string GetJusticeMenuSelectedLastCrimeDisplay()
@@ -1054,10 +1068,9 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        // Le retry wanted est un cache runtime, pas une donnée partageable. Le
-        // profil quitté conserve son intent d'amnistie dans son XML et le
-        // recréera à son retour; il ne peut jamais effacer les étoiles du héros
-        // que je suis en train d'activer.
+        // Je vide le retry wanted avant de charger le profil cible. Une ancienne
+        // intention d'amnistie sera neutralisée juste après sa normalisation et
+        // ne pourra donc jamais effacer les étoiles du héros que j'active.
         CancelJusticeWantedClearRetry();
 
         EnsureJusticePlayerProfilesInitialized();
@@ -1112,6 +1125,12 @@ public sealed partial class DonJEnemySpawner
         }
 
         NormalizeLoadedJusticeState();
+
+        // Un profil inactif peut provenir d'une ancienne sauvegarde et contenir
+        // son propre verrou d'amnistie. Il est neutralisé dès l'activation du
+        // profil, avant toute reprise de son runtime.
+        MigrateLegacyJusticeAmnestyState();
+
         _justicePoliceDeathRespawnMaskIntentPending =
             _justicePursuitDeathObservedDuringSuspension &&
             !JusticeIsCustodyActive;
@@ -1674,7 +1693,6 @@ public sealed partial class DonJEnemySpawner
             JusticeRecordState recordState = ReadJusticeRecordXml(recordNodes[0] as XmlElement);
             if (caseState == null || recordState == null ||
                 !IsJusticeCaseRecordLinkValid(caseState, recordState) ||
-                (!caseState.Enabled && IsLoadedJusticeCaseActive(caseState)) ||
                 !IsJusticeCustodyXmlSemanticallyValid(element, caseState, recordState) ||
                 !IsJusticeProfilePendingDeathValid(
                     caseState,

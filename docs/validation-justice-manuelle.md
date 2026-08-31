@@ -167,6 +167,19 @@ Chaque ligne est exécutée pour un paiement, une confiscation/restitution et, q
 | DOM-15 | Switch après intention d'évasion | Couper le changement une fois le discard engagé : le switch reste fermé jusqu'à la finalisation fail-closed et ne transforme jamais l'évasion durable en simple pause. | NON EXÉCUTÉ | WAL + diagnostic switch |
 | DOM-16 | Maintenance de la scène | Tuer/retirer un garde intermédiaire puis terminer une discipline : son poste exact est recréé et les gardes reviennent sans spam. Les détenus circulent librement dans `AllowedVolumes` et sont rappelés par navmesh seulement après en être sortis, sans téléport visible. | NON EXÉCUTÉ | Vidéo + trace tâches/cadences |
 
+## H. Pause, reprise et migration legacy du bouton ON/OFF
+
+Pour ces six scénarios, je conserve une copie des sauvegardes avant et après chaque étape. Le bouton ON/OFF ne doit jamais appeler une native d'effacement wanted, vider un dossier ou ouvrir la confirmation danger. Les variations naturelles du wanted produites par GTA restent possibles; la preuve doit donc inclure une trace native ou une observation immédiate avant/après le toggle.
+
+| ID | Scénario | Procédure / résultat attendu | Résultat | Preuve |
+|---|---|---|---|---|
+| TGL-A | Ancienne sauvegarde bloquée | Sans supprimer `_justice_state.xml`, installer la nouvelle build sur une sauvegarde qui portait `_justiceAmnestyPending` ou `pendingAmnestyWantedClear` et affichait `Amnistie préparée; sauvegarde finale à reprendre…`. Au démarrage, la migration retire les latches sans effacer dossier, casier ni wanted. Ouvrir F10 puis activer Justice : le message attendu est `Justice avancée ACTIVÉE. Le dossier du personnage est conservé.` et l'ancien message ne revient jamais. | NON EXÉCUTÉ | XML primaire/backup avant/après + capture F10 + trace wanted/log migration |
+| TGL-B | Pause avec dossier actif | Activer Justice, créer au moins une charge avec score, amende et mandat observables, puis relever le wanted GTA. Désactiver depuis F10. Le statut devient `Désactivée · dossier conservé`; charges, score, amende, peine, mandat, dernière infraction, casier et récidive sont inchangés. Aucune confirmation d'amnistie, aucun `CLEAR_PLAYER_WANTED_LEVEL` et aucune écriture `WantedLevel = 0` ne sont émis. | NON EXÉCUTÉ | Captures F10 avant/après + XML diff + trace native wanted |
+| TGL-C | Redémarrage en pause | Laisser Justice désactivée avec le dossier actif de TGL-B, quitter proprement, relancer GTA et reprendre le même protagoniste. Justice reste désactivée, le statut signale le dossier conservé et toutes les données du dossier/casier restent identiques. Aucun ancien latch d'amnistie ne réapparaît. | NON EXÉCUTÉ | XML primaire/backup + captures avant/après reload + log |
+| TGL-D | Reprise après pause | Pendant la pause, produire un fait qui aurait normalement pu devenir une infraction, puis réactiver Justice. Aucun événement de la période de pause n'est ajouté rétroactivement. Si le wanted GTA existe encore, la poursuite reprend sans nouvelle charge; s'il a disparu naturellement, l'ancienne phase persistante devient un mandat sans recréer d'étoiles. Commettre ensuite une nouvelle infraction : elle est enregistrée normalement. | NON EXÉCUTÉ | Casier avant/après + trace wanted + log de détection |
+| TGL-E | Trois protagonistes isolés | Pour Michael, Franklin et Trevor : activer Justice, créer un dossier distinct, désactiver, changer de protagoniste, revenir, vérifier le statut et réactiver. Chaque profil conserve indépendamment son ON/OFF, ses charges, sa dette, son mandat et son casier, sans toucher aux deux autres profils ni au wanted du héros entrant. | NON EXÉCUTÉ | XML des trois profils + captures des trois statuts + trace slot/modèle/wanted |
+| TGL-F | Seul reset destructif | Avec un dossier actif puis avec Justice en pause, vérifier que ON/OFF commute immédiatement sans fenêtre rouge et sans effacement. Exécuter ensuite `Justice → Réinitialiser ce personnage` : cette action seule ouvre la confirmation danger et, après validation, efface le profil ciblé selon son protocole WAL sans toucher aux deux autres profils. | NON EXÉCUTÉ | Vidéo F10 + XML/WAL avant/après + diagnostics des trois slots |
+
 ## Décision de release
 
 | Critère final issu de l'audit | Résultat | Preuve |
@@ -186,6 +199,9 @@ Chaque ligne est exécutée pour un paiement, une confiscation/restitution et, q
 | Sauvegarde complète hors thread GTA | NON EXÉCUTÉ | — |
 | Aucun pic Justice mesurable en foule dense | NON EXÉCUTÉ | — |
 | Profils Michael/Franklin/Trevor isolés | NON EXÉCUTÉ | — |
+| Pause/reprise ON/OFF non destructive avec dossier et wanted conservés | NON EXÉCUTÉ | — |
+| Migration legacy sans retour du message `Amnistie préparée` | NON EXÉCUTÉ | — |
+| `Réinitialiser ce personnage` reste le seul effacement volontaire exposé dans F10 | NON EXÉCUTÉ | — |
 | Chaque frontière transactionnelle possède une reprise testée | NON EXÉCUTÉ | — |
 | SHA-256 du diagnostic identique au manifest publié | NON EXÉCUTÉ | — |
 | Manifest publié propre (`sourceDirty=false`) et package sale non déployable | NON EXÉCUTÉ | — |

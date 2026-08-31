@@ -951,10 +951,6 @@ public sealed partial class DonJEnemySpawner
         {
             return GetJusticeMenuSelectedProfileSlot();
         }
-        if (action == MainMenuAction.JusticeEnabled)
-        {
-            return _justiceActivePlayerProfileSlot;
-        }
 
         return -1;
     }
@@ -1006,6 +1002,7 @@ public sealed partial class DonJEnemySpawner
         int justicePlayerHandle = _pendingDangerJusticePlayerHandle;
         int justicePlayerModelHash = _pendingDangerJusticePlayerModelHash;
         long justiceFineAmount = _pendingDangerJusticeFineAmount;
+
         _pendingDangerAction = null;
         _pendingDangerJusticeProfileSlot = -1;
         _pendingDangerJusticePlayerHandle = 0;
@@ -1031,16 +1028,9 @@ public sealed partial class DonJEnemySpawner
                 CleanAllInteriorPortals();
                 break;
 
-            case MainMenuAction.JusticeEnabled:
-                ExecuteJusticeConfirmedAmnestyAndDisable(
-                    justiceProfileSlot,
-                    justicePlayerHandle,
-                    justicePlayerModelHash);
-                break;
-
             case MainMenuAction.JusticePayFine:
-                // Je revalide le héros et le cash au second Entrée tout en gardant
-                // le montant numérique que le joueur a réellement confirmé.
+                // Le héros et le cash sont revalidés au second appui sur Entrée,
+                // tout en conservant le montant numérique confirmé par le joueur.
                 RequestJusticeConfirmedVoluntaryFinePayment(
                     justiceProfileSlot,
                     justiceFineAmount);
@@ -1075,14 +1065,14 @@ public sealed partial class DonJEnemySpawner
 
     private static bool IsDangerAction(MainMenuAction action)
     {
-        return action == MainMenuAction.CleanNpcs ||
-               action == MainMenuAction.CleanVehicles ||
-               action == MainMenuAction.CleanObjects ||
-               action == MainMenuAction.CleanInteriorPortals ||
-               action == MainMenuAction.JusticeEnabled ||
-               action == MainMenuAction.JusticePayFine ||
-               action == MainMenuAction.JusticeResolveFineDispute ||
-               action == MainMenuAction.JusticeResetProfile;
+        return
+            action == MainMenuAction.CleanNpcs ||
+            action == MainMenuAction.CleanVehicles ||
+            action == MainMenuAction.CleanObjects ||
+            action == MainMenuAction.CleanInteriorPortals ||
+            action == MainMenuAction.JusticePayFine ||
+            action == MainMenuAction.JusticeResolveFineDispute ||
+            action == MainMenuAction.JusticeResetProfile;
     }
 
     private static MenuLayout CalculateMenuLayout(int screenWidth, int screenHeight, float safeZone)
@@ -2284,9 +2274,10 @@ public sealed partial class DonJEnemySpawner
             case MainMenuAction.Load:
                 return "Recharge NPC, vehicules, objets et portails depuis le XML actif.";
             case MainMenuAction.JusticeEnabled:
-                return "Active ou désactive Justice uniquement pour le héros actuellement joué : " +
+                return "Active ou met en pause Justice pour le héros joué : " +
                        GetJusticePlayedProfileDisplay() +
-                       ". Le sélecteur Personnage sert à consulter, payer ou réinitialiser un profil.";
+                       ". Désactiver ne supprime aucun dossier, mandat, casier, amende ou peine. " +
+                       "Utilise Réinitialiser ce personnage uniquement pour tout effacer.";
             case MainMenuAction.JusticeProfile:
                 return "Gauche/Droite choisit le dossier à consulter, payer ou réinitialiser. " +
                        "Pour payer, sélectionne le héros joué : " +
@@ -2731,70 +2722,138 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
-    private void DrawDangerConfirmation(MenuLayout layout, MainMenuAction action)
+    private void DrawDangerConfirmation(
+        MenuLayout layout,
+        MainMenuAction action)
     {
-        Rectangle left = Offset(layout.Content, _menuFrameOffsetX, 0);
-        Rectangle right = Offset(layout.Details, _menuFrameOffsetX, 0);
-        Rectangle area = Rectangle.FromLTRB(left.X, left.Y, right.Right, left.Bottom);
-        MenuRect(area.X, area.Y, area.Width, area.Height, Color.FromArgb(205, 2, 5, 9));
+        Rectangle left = Offset(
+            layout.Content,
+            _menuFrameOffsetX,
+            0);
+
+        Rectangle right = Offset(
+            layout.Details,
+            _menuFrameOffsetX,
+            0);
+
+        Rectangle area = Rectangle.FromLTRB(
+            left.X,
+            left.Y,
+            right.Right,
+            left.Bottom);
+
+        MenuRect(
+            area.X,
+            area.Y,
+            area.Width,
+            area.Height,
+            Color.FromArgb(205, 2, 5, 9));
 
         int width = Math.Min(540, area.Width - 40);
         int height = 222;
         int x = area.X + (area.Width - width) / 2;
         int y = area.Y + (area.Height - height) / 2;
-        MenuRect(x + 5, y + 7, width, height, Color.FromArgb(130, 0, 0, 0));
-        MenuRect(x, y, width, height, Color.FromArgb(248, 17, 11, 17));
-        DrawMenuFrame(new Rectangle(x, y, width, height), MenuDanger);
-        MenuRect(x, y, width, 4, MenuDanger);
-        bool justiceAmnesty = action == MainMenuAction.JusticeEnabled;
-        bool justicePayment = action == MainMenuAction.JusticePayFine;
-        bool justiceDispute = action == MainMenuAction.JusticeResolveFineDispute;
-        bool justiceProfileReset = action == MainMenuAction.JusticeResetProfile;
-        string selectedJusticeProfile = JusticeDisplayOrFallback(
-            _pendingDangerJusticeProfileDisplay);
-        MenuText(
-            justiceProfileReset
-                ? "CONFIRMATION DE RÉINITIALISATION"
-                : (justiceDispute
-                    ? "CONFIRMATION DE RÉSOLUTION"
-                : (justicePayment
+
+        MenuRect(
+            x + 5,
+            y + 7,
+            width,
+            height,
+            Color.FromArgb(130, 0, 0, 0));
+
+        MenuRect(
+            x,
+            y,
+            width,
+            height,
+            Color.FromArgb(248, 17, 11, 17));
+
+        DrawMenuFrame(
+            new Rectangle(x, y, width, height),
+            MenuDanger);
+
+        MenuRect(
+            x,
+            y,
+            width,
+            4,
+            MenuDanger);
+
+        bool justicePayment =
+            action == MainMenuAction.JusticePayFine;
+
+        bool justiceDispute =
+            action == MainMenuAction.JusticeResolveFineDispute;
+
+        bool justiceProfileReset =
+            action == MainMenuAction.JusticeResetProfile;
+
+        string selectedJusticeProfile =
+            JusticeDisplayOrFallback(
+                _pendingDangerJusticeProfileDisplay);
+
+        string title = justiceProfileReset
+            ? "CONFIRMATION DE RÉINITIALISATION"
+            : justiceDispute
+                ? "CONFIRMATION DE RÉSOLUTION"
+                : justicePayment
                     ? "CONFIRMATION DE PAIEMENT"
-                    : (justiceAmnesty ? "CONFIRMATION D'AMNISTIE" : "CONFIRMATION DE NETTOYAGE"))),
+                    : "CONFIRMATION DE NETTOYAGE";
+
+        string firstDetail = justiceProfileReset
+            ? "Personnage : " + selectedJusticeProfile
+            : justiceDispute
+                ? "Personnage : " +
+                  selectedJusticeProfile +
+                  " · Litige : " +
+                  FormatJusticeMoney(
+                      _pendingDangerJusticeFineAmount)
+                : justicePayment
+                    ? "Personnage : " +
+                      selectedJusticeProfile +
+                      " · Dette : " +
+                      JusticeDisplayOrFallback(
+                          _pendingDangerJusticeFineDisplay)
+                    : DangerActionCount(action) +
+                      " element(s) geres par DonJ sont concernes.";
+
+        string secondDetail = justiceProfileReset
+            ? "Casier, dossier, récidive, dette et détention seront effacés."
+            : justiceDispute
+                ? "Aucun nouveau débit : le montant sera annulé explicitement en faveur du joueur."
+                : justicePayment
+                    ? "Le débit restera plafonné au montant confirmé et au cash disponible."
+                    : "Cette action ne touche pas aux sauvegardes XML.";
+
+        MenuText(
+            title,
             x + width / 2,
             y + 23,
             0.32f,
             MenuTextPrimary,
             true,
             true);
-        MenuText(DangerActionDisplayName(action), x + width / 2, y + 61, 0.29f, MenuDanger, true, true);
+
         MenuText(
-            justiceProfileReset
-                ? "Personnage : " + selectedJusticeProfile
-                : (justiceDispute
-                    ? "Personnage : " + selectedJusticeProfile + " · Litige : " +
-                      FormatJusticeMoney(_pendingDangerJusticeFineAmount)
-                : (justicePayment
-                    ? "Personnage : " + selectedJusticeProfile + " · Dette : " +
-                      JusticeDisplayOrFallback(_pendingDangerJusticeFineDisplay)
-                    : (justiceAmnesty
-                    ? "Dossier, mandat, amende et peine actifs seront effaces."
-                    : DangerActionCount(action) + " element(s) geres par DonJ sont concernes."))),
+            DangerActionDisplayName(action),
+            x + width / 2,
+            y + 61,
+            0.29f,
+            MenuDanger,
+            true,
+            true);
+
+        MenuText(
+            firstDetail,
             x + width / 2,
             y + 96,
             0.21f,
             MenuTextMuted,
             true,
             false);
+
         MenuText(
-            justiceProfileReset
-                ? "Casier, dossier, récidive, dette et détention seront effacés."
-                : (justiceDispute
-                    ? "Aucun nouveau débit : le montant sera annulé explicitement en faveur du joueur."
-                : (justicePayment
-                    ? "Le débit restera plafonné au montant confirmé et au cash disponible."
-                    : (justiceAmnesty
-                    ? "Le casier historique et l'indice de recidive sont conserves."
-                    : "Cette action ne touche pas aux sauvegardes XML."))),
+            secondDetail,
             x + width / 2,
             y + 121,
             0.19f,
@@ -2803,8 +2862,20 @@ public sealed partial class DonJEnemySpawner
             false);
 
         int chipY = y + 158;
-        DrawConfirmationChip(x + width / 2 - 166, chipY, 152, "ENTREE  CONFIRMER", MenuDanger);
-        DrawConfirmationChip(x + width / 2 + 14, chipY, 152, "ECHAP  ANNULER", MenuCyan);
+
+        DrawConfirmationChip(
+            x + width / 2 - 166,
+            chipY,
+            152,
+            "ENTREE  CONFIRMER",
+            MenuDanger);
+
+        DrawConfirmationChip(
+            x + width / 2 + 14,
+            chipY,
+            152,
+            "ECHAP  ANNULER",
+            MenuCyan);
     }
 
     private void DrawConfirmationChip(int x, int y, int width, string text, Color accent)
@@ -2818,15 +2889,29 @@ public sealed partial class DonJEnemySpawner
     {
         switch (action)
         {
-            case MainMenuAction.CleanNpcs: return "SUPPRIMER TOUS LES NPC";
-            case MainMenuAction.CleanVehicles: return "SUPPRIMER TOUS LES VEHICULES";
-            case MainMenuAction.CleanObjects: return "SUPPRIMER TOUS LES OBJETS";
-            case MainMenuAction.CleanInteriorPortals: return "SUPPRIMER TOUS LES PORTAILS";
-            case MainMenuAction.JusticeEnabled: return "EFFACER LE DOSSIER ACTIF";
-            case MainMenuAction.JusticePayFine: return "PAYER LA DETTE DU HÉROS JOUÉ";
-            case MainMenuAction.JusticeResolveFineDispute: return "ANNULER LE MONTANT LITIGIEUX";
-            case MainMenuAction.JusticeResetProfile: return "RÉINITIALISER CE PERSONNAGE";
-            default: return "ACTION DE NETTOYAGE";
+            case MainMenuAction.CleanNpcs:
+                return "SUPPRIMER TOUS LES NPC";
+
+            case MainMenuAction.CleanVehicles:
+                return "SUPPRIMER TOUS LES VEHICULES";
+
+            case MainMenuAction.CleanObjects:
+                return "SUPPRIMER TOUS LES OBJETS";
+
+            case MainMenuAction.CleanInteriorPortals:
+                return "SUPPRIMER TOUS LES PORTAILS";
+
+            case MainMenuAction.JusticePayFine:
+                return "PAYER LA DETTE DU HÉROS JOUÉ";
+
+            case MainMenuAction.JusticeResolveFineDispute:
+                return "ANNULER LE MONTANT LITIGIEUX";
+
+            case MainMenuAction.JusticeResetProfile:
+                return "RÉINITIALISER CE PERSONNAGE";
+
+            default:
+                return "ACTION DE NETTOYAGE";
         }
     }
 

@@ -511,29 +511,69 @@ public sealed class JusticeRuntimeEdgeContractTests
     }
 
     [TestMethod]
-    public void ActivationAndReload_PrimeAndFlushHistoricalDamageBeforeDetection()
+    public void ActivationPauseAndReload_UseDedicatedRuntimeFrontHelpersBeforeDetection()
     {
         string source = ReadSource("DonJEnemySpawner.Justice.cs");
         string initialize = ExtractMethodBody(source, "InitializeJusticeSystem");
         string toggle = ExtractMethodBody(source, "RequestJusticeToggle");
+        string resume = ExtractMethodBody(source, "PrepareJusticeRuntimeAfterResume");
+        string pause = ExtractMethodBody(source, "PauseJusticeRuntimeWithoutErasingCase");
         string update = ExtractMethodBody(source, "UpdateJusticeSystem");
+        string early = ExtractMethodBody(source, "UpdateJusticeEarly");
         string prime = ExtractMethodBody(source, "PrimeJusticeEventFronts");
         string read = ExtractMethodBody(source, "TryReadJusticeStateFile");
 
         AssertOrdered(
             initialize,
             "TryLoadJusticeState(false)",
+            "NormalizeLoadedJusticeState()",
+            "MigrateLegacyJusticeAmnestyState()",
+            "InitializeJusticePersistenceServices()",
             "_justiceLastWantedLevel = GetJusticeWantedLevelSafe()",
             "_justiceDamageFrontPrimingPending = _justiceEnabled");
-        StringAssert.Contains(toggle, "_justiceDamageFrontPrimingPending = true");
         AssertOrdered(
             toggle,
             "IsJusticePlayedProfileContextReady()",
-            "if (_justiceAmnestyPending)",
-            "_justiceEnabled = true");
+            "HasOpenJusticeProfileResetWal()",
+            "MigrateLegacyJusticeAmnestyState()",
+            "bool targetEnabled = !_justiceEnabled",
+            "_justiceEnabled = targetEnabled",
+            "if (targetEnabled)",
+            "PrepareJusticeRuntimeAfterResume()",
+            "PauseJusticeRuntimeWithoutErasingCase()",
+            "JusticeMarkStateDirty()",
+            "JusticeFlushStateNow()");
         Assert.IsFalse(
             toggle.IndexOf("SynchronizeJusticeEventFronts", StringComparison.Ordinal) >= 0,
             "L'activation doit laisser le tick synchroniser et purger dans une même opération atomique.");
+        Assert.IsFalse(toggle.Contains("RequestDangerConfirmation"));
+        Assert.IsFalse(toggle.Contains("ResumeJusticeAmnestyTransaction"));
+
+        AssertOrdered(
+            resume,
+            "CancelJusticeWantedClearRetry()",
+            "CancelJusticeAmnestyConfirmation()",
+            "_justiceDamagePairBaselineCount = 0",
+            "_justiceDamageFrontPrimingPending = true",
+            "GetJusticeWantedLevelSafe()",
+            "ReconcileLoadedJusticePursuitState(wantedLevel)");
+        AssertOrdered(
+            pause,
+            "_justiceDamageFrontPrimingPending = false",
+            "_justiceDamagePairBaselineCount = 0",
+            "_justiceWantedLossPending = false",
+            "_justicePursuitActive = false",
+            "_justicePendingIncidents.Clear()",
+            "ResetJusticeWitnessSnapshots()",
+            "CancelJusticeWantedClearRetry()",
+            "CancelJusticeAmnestyConfirmation()");
+        Assert.IsFalse(pause.Contains("ClearActiveCase"));
+        Assert.IsFalse(pause.Contains("ClearJusticeWantedLevel"));
+
+        StringAssert.Contains(early, "if (_justiceAmnestyPending)");
+        StringAssert.Contains(early, "MigrateLegacyJusticeAmnestyState()");
+        Assert.IsFalse(early.Contains("ResumeJusticeAmnestyTransaction()"));
+        Assert.IsFalse(early.Contains("RetryJusticeWantedClearAfterAmnesty()"));
 
         StringAssert.Contains(update, "_justiceEnabled && _justiceDamageFrontPrimingPending");
         StringAssert.Contains(update, "_justiceEnabled && !_justiceDamageFrontPrimingPending");

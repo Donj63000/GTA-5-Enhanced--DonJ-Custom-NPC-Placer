@@ -377,6 +377,11 @@ public sealed partial class DonJEnemySpawner
         }
 
         NormalizeLoadedJusticeState();
+
+        // Répare immédiatement une sauvegarde provenant de l'ancien système
+        // d'amnistie avant que le runtime ou le repository puissent la reprendre.
+        bool legacyAmnestyRecovered = MigrateLegacyJusticeAmnestyState();
+
         InitializeJusticePersistenceServices();
         PrewarmJusticeRuntimeBuffers();
         _justiceLastWantedLevel = GetJusticeWantedLevelSafe();
@@ -388,6 +393,16 @@ public sealed partial class DonJEnemySpawner
         _justiceWasDead = IsJusticePlayerDeadSafe(Game.Player.Character);
         _justiceNextCheckpointAtMs = JusticeStateCheckpointMs;
         _justiceInitialized = true;
+
+        // La migration est désormais sauvegardée dans le nouveau snapshot.
+        // Si le writer est temporairement indisponible, le dirty flag conservera
+        // la demande et PersistJusticeStateIfDue() la retentera.
+        if (legacyAmnestyRecovered && !JusticeFlushStateNow())
+        {
+            LogWarning(
+                "Justice.Migration",
+                "Ancien verrou d'amnistie retire en memoire; sauvegarde automatique a retenter.");
+        }
 
         LogInfo(
             "Justice",
@@ -609,27 +624,22 @@ public sealed partial class DonJEnemySpawner
         }
         if (_justiceAmnestyPending)
         {
-            ObserveJusticeCriticalFrontsBeforeTransactionReturn(
-                player,
-                wantedLevel,
-                dead,
-                arrestStateValid,
-                arrested,
-                true);
-            ResumeJusticeAmnestyTransaction();
-            if (arrestStateValid)
+            // Migration défensive pour un profil ancien activé après le
+            // démarrage, notamment après un changement Franklin/Michael/Trevor.
+            //
+            // Le tick ne reprend jamais l'ancienne transaction destructive.
+            if (MigrateLegacyJusticeAmnestyState())
             {
-                _justiceWasBeingArrested = arrested;
+                JusticeFlushStateNow();
             }
-            _justiceWasDead = dead;
-            _justiceLastWantedLevel = GetJusticeWantedLevelSafe();
-            return;
+
+            wantedLevel = GetJusticeWantedLevelSafe();
         }
 
-        // Je ne rejoue l'effacement explicitement demandé par l'amnistie qu'en
-        // gameplay libre. Une mission ou un chargement ne reçoit aucune mutation.
-        RetryJusticeWantedClearAfterAmnesty();
-        wantedLevel = GetJusticeWantedLevelSafe();
+        // Un changement ON/OFF ne modifie jamais le wanted GTA.
+        //
+        // Les écritures wanted restantes concernent uniquement les véritables
+        // transitions judiciaires : évasion, libération, arrestation, etc.
 
         if (_justiceEnabled && _justicePursuitDeathObservedDuringSuspension &&
             !JusticeIsCustodyActive)
@@ -1790,161 +1800,273 @@ public sealed partial class DonJEnemySpawner
             if (_justiceProfileSwitchPersistencePending)
             {
                 ShowStatus(
-                    "Justice : sauvegarde sécurisée du changement de personnage en cours.",
-                    4200);
+                    "Justice : sauvegarde du changement de personnage en cours.",
+                    3600);
             }
             else if (_justiceProfileSelectionPending ||
                      !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot))
             {
                 ShowStatus(
                     "Justice : identification du personnage joué en cours.",
-                    3600);
+                    3200);
             }
             else
             {
                 ShowStatus(
-                    "Justice suspendue : changement de personnage à finaliser.",
-                    4200);
+                    "Justice : changement de personnage à finaliser.",
+                    3600);
             }
+
             return;
         }
 
         if (HasOpenJusticeProfileResetWal())
         {
             ShowStatus(
-                "Justice : confirmation du reset dans le backup en cours…",
-                3600);
+                "Justice : réinitialisation du personnage en cours.",
+                3400);
             return;
         }
 
-        if (_justiceAmnestyPending)
-        {
-            ResumeJusticeAmnestyTransaction();
-            ShowStatus("Amnistie déjà engagée : finalisation sécurisée en cours…", 3200);
-            return;
-        }
+        // Les anciennes versions utilisaient le bouton ON/OFF comme une
+        // transaction d'amnistie destructive. Ce verrou historique est
+        // neutralisé avant toute décision afin qu'il ne puisse plus :
+        //
+        // - effacer le dossier actif ;
+        // - effacer le wanted GTA ;
+        // - bloquer une réactivation ;
+        // - relancer une transaction d'amnistie après un redémarrage.
+        bool legacyStateRecovered = MigrateLegacyJusticeAmnestyState();
 
-        if (_justiceLegalReleaseFinalizationPending)
-        {
-            ResumeJusticeLegalReleaseFinalization(
-                Game.Player.Character,
-                GetJusticeRawGameTimeSafe());
-            ShowStatus(
-                "Justice : termine d'abord la libération en cours avant de changer l'activation.",
-                4000);
-            return;
-        }
+        bool targetEnabled = !_justiceEnabled;
 
-        if (!_justiceEnabled && HasJusticeCustodyRecoveryState())
+        if (!targetEnabled && IsJusticePauseTemporarilyUnsafe())
         {
-            if (_justiceLegalReleaseFinalizationPending)
+            // Une désactivation pendant une transaction qui manipule la mort,
+            // l'arrestation, la détention, l'inventaire ou un paiement pourrait
+            // abandonner le joueur avec des contrôles verrouillés ou un WAL
+            // financier incomplet.
+            //
+            // On refuse donc seulement la mise en pause pendant cette courte
+            // fenêtre critique. Cela ne déclenche jamais une amnistie.
+            if (legacyStateRecovered)
             {
-                ResumeJusticeLegalReleaseFinalization(
-                    Game.Player.Character,
-                    GetJusticeRawGameTimeSafe());
-            }
-            ShowStatus(
-                "Justice : restauration de sécurité en cours avant réactivation.",
-                3800);
-            return;
-        }
-
-        if (!_justiceEnabled)
-        {
-            bool previousEnabled = _justiceEnabled;
-            bool previousCaseEnabled = _justiceCaseState.Enabled;
-            _justiceEnabled = true;
-            _justiceCaseState.Enabled = true;
-            JusticeMarkStateDirty();
-
-            if (!JusticeFlushStateNow())
-            {
-                // Je restaure l'état visible tant que son commit atomique n'a pas
-                // abouti. Les fronts et le wanted restent donc strictement intacts.
-                _justiceEnabled = previousEnabled;
-                _justiceCaseState.Enabled = previousCaseEnabled;
-                JusticeMarkStateDirty();
-                ShowStatus(
-                    "Activation impossible : sauvegarde Justice indisponible, aucun changement appliqué.",
-                    4200);
-                LogWarning("Justice", "Activation refusée faute de commit durable.");
-                return;
+                JusticeFlushStateNow();
             }
 
-            CancelJusticeWantedClearRetry();
-            _justiceDamagePairBaselineCount = 0;
-            _justiceDamagePairReplacementIndex = 0;
-            _justiceDamageFrontPrimingPending = true;
-            CancelJusticeAmnestyConfirmation();
-            ShowStatus("Justice avancée ACTIVÉE. Seuls les faits vus ou signalés seront retenus.", 5200);
-            LogInfo("Justice", "Systeme active par le joueur.");
-            return;
-        }
-
-        if (!HasActiveJusticeCase() && HasJusticeCustodyRecoveryState())
-        {
-            if (_justiceLegalReleaseFinalizationPending)
-            {
-                ResumeJusticeLegalReleaseFinalization(
-                    Game.Player.Character,
-                    GetJusticeRawGameTimeSafe());
-            }
             ShowStatus(
-                "Désactivation différée : la libération et l'inventaire doivent d'abord être acquittés.",
+                "Justice : termine d'abord l'arrestation, la détention ou le paiement en cours.",
                 4200);
             return;
         }
 
-        if (!HasActiveJusticeCase() && !JusticeIsCustodyActive)
+        _justiceEnabled = targetEnabled;
+        _justiceCaseState.Enabled = targetEnabled;
+
+        if (targetEnabled)
         {
-            DisableJusticeWithoutAmnesty();
-            return;
+            PrepareJusticeRuntimeAfterResume();
+
+            ShowStatus(
+                "Justice avancée ACTIVÉE. Le dossier du personnage est conservé.",
+                4200);
+
+            LogInfo(
+                "Justice",
+                "Systeme active par le joueur; dossier conserve.");
+        }
+        else
+        {
+            PauseJusticeRuntimeWithoutErasingCase();
+
+            ShowStatus(
+                "Justice avancée DÉSACTIVÉE. Dossier, casier et mandat conservés.",
+                4600);
+
+            LogInfo(
+                "Justice",
+                "Systeme mis en pause par le joueur; aucune amnistie appliquee.");
         }
 
-        // Je réutilise la confirmation Obsidienne et son verrou de relâchement
-        // Entrée/Num5 : aucun auto-repeat ne peut donc valider une amnistie.
-        RequestDangerConfirmation(MainMenuAction.JusticeEnabled);
-    }
-
-    private void DisableJusticeWithoutAmnesty()
-    {
-        bool previousEnabled = _justiceEnabled;
-        bool previousCaseEnabled = _justiceCaseState.Enabled;
-        _justiceEnabled = false;
-        _justiceCaseState.Enabled = false;
+        // Le bouton est désormais une préférence réversible et non une
+        // transaction destructive.
+        //
+        // Son effet en jeu ne doit donc pas être annulé simplement parce que le
+        // writer asynchrone est temporairement occupé. Le dirty flag existant et
+        // son backoff retenteront automatiquement la persistance.
         JusticeMarkStateDirty();
+
         if (!JusticeFlushStateNow())
         {
-            // Je ne nettoie aucun incident ni cache avant que la désactivation
-            // soit durable : un échec disque laisse le système exactement actif.
-            _justiceEnabled = previousEnabled;
-            _justiceCaseState.Enabled = previousCaseEnabled;
-            JusticeMarkStateDirty();
-            ShowStatus(
-                "Désactivation impossible : sauvegarde Justice indisponible, aucun changement appliqué.",
-                4200);
-            LogWarning("Justice", "Désactivation refusée faute de commit durable.");
-            return;
+            LogWarning(
+                "Justice.Persistence",
+                "Etat ON/OFF applique en session; sauvegarde automatique a retenter.");
         }
+    }
 
+    private bool IsJusticePauseTemporarilyUnsafe()
+    {
+        return _justiceCriticalBarrierRevision > 0L ||
+               _justiceWasBeingArrested ||
+               _justiceActiveProfileResetPending ||
+               _justiceBackupRepairPending ||
+               _justicePursuitDeathObservedDuringSuspension ||
+               _justicePendingDeathFrontWalRecord != null ||
+               _justiceCaptureRetryPending ||
+               _justiceArrestCompletionProbePending ||
+               HasJusticeDeferredRuntimeFronts() ||
+               HasJusticeCustodyRecoveryState();
+    }
+
+    private void PrepareJusticeRuntimeAfterResume()
+    {
+        // Aucun ancien jeton d'effacement wanted ne doit survivre à une
+        // réactivation et effacer les étoiles d'une nouvelle poursuite.
+        CancelJusticeWantedClearRetry();
+        CancelJusticeAmnestyConfirmation();
+
+        // On réarme uniquement les détecteurs transitoires.
+        // Les transactions durables de capture, paiement et détention ne sont
+        // volontairement pas effacées ici.
+        _justiceDamagePairBaselineCount = 0;
+        _justiceDamagePairReplacementIndex = 0;
+        _justiceDeathDetectionBarrierInitialized = false;
+        _justiceDamageFrontPrimingPending = true;
+        _justiceWantedLossPending = false;
+
+        _justiceRecognitionCandidateHandle = 0;
+        _justiceRecognitionCandidateGeneration = 0;
+        _justiceRecognitionStartedAtMs = 0L;
+
+        // Une poursuite GTA peut avoir évolué pendant la pause.
+        //
+        // - Si les étoiles existent encore, on reprend simplement l'épisode.
+        // - Si elles ont disparu, le dossier Wanted persistant est converti en
+        //   mandat, sans recréer d'étoiles et sans ajouter de nouvelle charge.
+        int wantedLevel = GetJusticeWantedLevelSafe();
+        _justiceLastWantedLevel = wantedLevel;
+
+        if (HasActiveJusticeCase() && wantedLevel > 0)
+        {
+            StartJusticePursuitEpisodeIfNeeded();
+
+            if (_justiceCaseState.Phase == JusticePhase.AtLarge)
+            {
+                _justiceCaseState.Phase = JusticePhase.Wanted;
+            }
+        }
+        else
+        {
+            ReconcileLoadedJusticePursuitState(wantedLevel);
+        }
+    }
+
+    private void PauseJusticeRuntimeWithoutErasingCase()
+    {
+        // Les détecteurs runtime sont vidés pour que les événements survenus
+        // pendant la pause ne soient jamais rejoués rétroactivement lors de la
+        // prochaine activation.
         _justiceDamageFrontPrimingPending = false;
         _justiceDeathDetectionBarrierInitialized = false;
         _justiceDamagePairBaselineCount = 0;
+        _justiceDamagePairReplacementIndex = 0;
+        _justicePlayerVitalityBaselineInitialized = false;
+
         _justiceAimTargetHandle = 0;
         _justiceAimTargetGeneration = 0;
         _justiceAimStartedAtMs = 0L;
         _justiceAimThreatQueued = false;
+
+        _justiceActiveDischargeCausalId = string.Empty;
+        _justiceActiveDischargeExpiresAtMs = 0L;
+        _justiceCrimeScanUntilMs = 0L;
+
         _justiceWantedLossPending = false;
         _justiceCaptureRetryPending = false;
         _justiceCaptureRetryDeath = false;
+        _justiceArrestCompletionProbePending = false;
+        _justiceArrestCompletionProbeStartedAtMs = 0L;
+
+        _justicePursuitActive = false;
+        _justiceWantedEpisodeStartedAtMs = 0L;
+
+        _justiceRecognitionCandidateHandle = 0;
+        _justiceRecognitionCandidateGeneration = 0;
+        _justiceRecognitionStartedAtMs = 0L;
+
         _justicePendingIncidents.Clear();
         _justiceRecentVictims.Clear();
         _justiceRecentVehicles.Clear();
         _justiceAllyTokens.Clear();
+
+        ResetJusticeWitnessSnapshots();
         ClearLatchedJusticeWantedRise();
+        CancelJusticeWantedClearRetry();
         CancelJusticeAmnestyConfirmation();
-        ShowStatus("Justice avancée DÉSACTIVÉE. Le casier purgé reste mémorisé.", 4200);
-        LogInfo("Justice", "Systeme desactive sans dossier actif.");
+
+        // Très important :
+        //
+        // aucune autre propriété de _justiceCaseState n'est modifiée ici.
+        //
+        // Sont donc conservés :
+        // - Charges
+        // - ActiveScore
+        // - FineDue
+        // - SentenceSeconds
+        // - HasWarrant
+        // - Phase
+        // - WantedEpisodeId
+        // - CustodyEpisodeId
+        // - LastCrimeLabel
+        // - casier et récidive
+    }
+
+    private bool MigrateLegacyJusticeAmnestyState()
+    {
+        bool changed =
+            _justiceAmnestyPending ||
+            _justiceAmnestyWantedClearAttempted ||
+            _justiceAmnestyPrecommitRedundant ||
+            _justiceWantedClearPending;
+
+        // Neutralisation des latches runtime de l'ancien système.
+        _justiceAmnestyPending = false;
+        _justiceAmnestyWantedClearAttempted = false;
+        _justiceAmnestyPrecommitRedundant = false;
+
+        CancelJusticeWantedClearRetry();
+        CancelJusticeAmnestyConfirmation();
+
+        // Un autre héros que celui actuellement joué peut également contenir
+        // l'ancien marqueur dans son profil persistant.
+        if (_justicePlayerProfiles != null)
+        {
+            for (int slot = 0; slot < _justicePlayerProfiles.Length; slot++)
+            {
+                JusticePlayerProfileState profile = _justicePlayerProfiles[slot];
+
+                if (profile == null || !profile.PendingAmnestyWantedClear)
+                {
+                    continue;
+                }
+
+                profile.PendingAmnestyWantedClear = false;
+                changed = true;
+            }
+        }
+
+        if (!changed)
+        {
+            return false;
+        }
+
+        JusticeMarkStateDirty();
+
+        LogWarning(
+            "Justice.Migration",
+            "Ancien etat d'amnistie neutralise; aucun dossier ni wanted GTA n'a ete efface.");
+
+        return true;
     }
 
     private void ExecuteJusticeConfirmedAmnestyAndDisable(
@@ -7080,7 +7202,6 @@ public sealed partial class DonJEnemySpawner
                     out lastCanonicalPlayerModel) ||
                 caseState == null || recordState == null ||
                 rootEnabled != caseState.Enabled ||
-                (!rootEnabled && IsLoadedJusticeCaseActive(caseState)) ||
                 !IsJusticeCaseRecordLinkValid(caseState, recordState))
             {
                 return false;
@@ -7828,8 +7949,7 @@ public sealed partial class DonJEnemySpawner
             {
                 return false;
             }
-            if (loadedEnabled != loadedCase.Enabled ||
-                (!loadedEnabled && IsLoadedJusticeCaseActive(loadedCase)))
+            if (loadedEnabled != loadedCase.Enabled)
             {
                 return false;
             }
@@ -9206,7 +9326,9 @@ public sealed partial class DonJEnemySpawner
         }
 
         _justiceDetectionEpisodeId = _justiceCaseState.WantedEpisodeId ?? string.Empty;
-        _justiceStateDirty = normalizedPendingDeathCapture;
+        // Je conserve une migration déjà marquée sale pendant l'activation du
+        // profil : la normalisation de démarrage ne doit pas perdre sa réécriture.
+        _justiceStateDirty = _justiceStateDirty || normalizedPendingDeathCapture;
         if (normalizedPendingDeathCapture)
         {
             _justiceNextStateSaveAtMs = 0L;
@@ -9443,24 +9565,31 @@ public sealed partial class DonJEnemySpawner
     {
         if (!_justiceEnabled)
         {
-            return "Désactivée";
+            return HasActiveJusticeCase()
+                ? "Désactivée · dossier conservé"
+                : "Désactivée";
         }
+
         if (JusticeIsCustodyActive)
         {
             return "En détention";
         }
+
         if (_justiceCaseState == null || !HasActiveJusticeCase())
         {
             return "Aucun dossier";
         }
+
         if (_justiceLastWantedLevel > 0 || _justicePursuitActive)
         {
             return "Poursuite active";
         }
+
         if (_justiceCaseState.HasWarrant)
         {
             return "Recherché sous mandat";
         }
+
         return "Dossier actif";
     }
 

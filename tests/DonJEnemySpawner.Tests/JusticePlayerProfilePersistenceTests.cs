@@ -25,7 +25,20 @@ public sealed class JusticePlayerProfilePersistenceTests
         WithTemporaryJusticeDirectory(directory =>
         {
             JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            ConfigureConsistentActiveCase(
+                profiles[0].CaseState,
+                "paused-v2-roundtrip",
+                42,
+                2400L,
+                180);
+            profiles[0].CaseState.Enabled = false;
+            profiles[0].CaseState.HasWarrant = true;
+            profiles[0].CaseState.Phase = JusticePhase.Wanted;
             object writer = CreateHeadlessScript(profiles, 0);
+
+            Assert.AreEqual(
+                "Désactivée · dossier conservé",
+                (string)Invoke(writer, "GetJusticeStatusDisplay"));
 
             FlushAndAwait(writer);
             string path = Path.Combine(directory, "_justice_state.xml");
@@ -66,7 +79,19 @@ public sealed class JusticePlayerProfilePersistenceTests
             Assert.AreEqual(2, loaded[0].RecordState.RecidivismIndex);
             Assert.AreEqual(5, loaded[1].RecordState.RecidivismIndex);
             Assert.IsFalse(loaded[0].CaseState.Enabled);
+            Assert.AreEqual(42, loaded[0].CaseState.ActiveScore);
+            Assert.AreEqual(2400L, loaded[0].CaseState.FineDue);
+            Assert.AreEqual(180, loaded[0].CaseState.SentenceSeconds);
+            Assert.IsTrue(loaded[0].CaseState.HasWarrant);
+            Assert.AreEqual(JusticePhase.Wanted, loaded[0].CaseState.Phase);
+            Assert.AreEqual("episode:paused-v2-roundtrip", loaded[0].CaseState.WantedEpisodeId);
+            Assert.AreEqual("Agression test", loaded[0].CaseState.LastCrimeLabel);
+            Assert.AreEqual(1, loaded[0].CaseState.Charges.Count);
             Assert.IsTrue(loaded[1].CaseState.Enabled);
+            SetField(reader, "_justiceMenuSelectedProfileSlot", 0);
+            Assert.AreEqual(
+                "Désactivée · dossier conservé",
+                (string)Invoke(reader, "GetJusticeMenuSelectedStatusDisplay"));
         });
     }
 
@@ -401,33 +426,173 @@ public sealed class JusticePlayerProfilePersistenceTests
     }
 
     [TestMethod]
-    public void PlayerProfiles_ProfileChangeCannotCarryAnAmnestyWantedRetryToAnotherHero()
+    public void PlayerProfiles_LegacyAmnestyMigrationClearsEveryProfileAndPreservesCase()
     {
         JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
-        profiles[0].PendingAmnestyWantedClear = true;
+        ConfigureConsistentActiveCase(
+            profiles[0].CaseState,
+            "legacy-amnesty-migration",
+            25,
+            1500L,
+            120);
+        for (int slot = 0; slot < profiles.Length; slot++)
+        {
+            profiles[slot].PendingAmnestyWantedClear = true;
+        }
+
         object script = CreateHeadlessScript(profiles, 0);
         InitializeProfileResetRuntimeCollections(script);
         SetField(script, "_justiceAmnestyPending", true);
+        SetField(script, "_justiceAmnestyWantedClearAttempted", true);
+        SetField(script, "_justiceAmnestyPrecommitRedundant", true);
         SetField(script, "_justiceWantedClearPending", true);
         SetField(script, "_justiceNextWantedClearRetryAtMs", 1200L);
         SetField(script, "_justiceWantedClearRetryUntilMs", 9000L);
-        Type actionType = ScriptType.GetNestedType("MainMenuAction", BindingFlags.NonPublic);
-        Assert.IsNotNull(actionType);
-        Invoke(script, "RequestDangerConfirmation", Enum.Parse(actionType, "JusticeEnabled"));
-        Assert.IsNotNull(GetField<object>(script, "_pendingDangerAction"));
 
-        Invoke(script, "ResetJusticeRuntimeFrontsForProfileChange");
+        Assert.IsTrue((bool)Invoke(script, "MigrateLegacyJusticeAmnestyState"));
+        Invoke(script, "NormalizeLoadedJusticeState");
 
+        Assert.IsFalse(GetField<bool>(script, "_justiceAmnestyPending"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceAmnestyWantedClearAttempted"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceAmnestyPrecommitRedundant"));
         Assert.IsFalse(GetField<bool>(script, "_justiceWantedClearPending"));
         Assert.AreEqual(0L, GetField<long>(script, "_justiceNextWantedClearRetryAtMs"));
         Assert.AreEqual(0L, GetField<long>(script, "_justiceWantedClearRetryUntilMs"));
-        Assert.IsNull(
-            GetField<object>(script, "_pendingDangerAction"),
-            "Le second Entrée ne doit jamais exécuter l'amnistie sur le héros nouvellement actif.");
         Assert.IsTrue(
-            GetField<bool>(script, "_justiceAmnestyPending"),
-            "Le cache global est annulé, mais l'intention durable du profil reste reprenable.");
-        Assert.IsTrue(profiles[0].PendingAmnestyWantedClear);
+            GetField<bool>(script, "_justiceStateDirty"),
+            "La normalisation de démarrage doit conserver la migration à réécrire.");
+        Assert.IsTrue(profiles.All(profile => !profile.PendingAmnestyWantedClear));
+        Assert.IsTrue(profiles[0].CaseState.Enabled);
+        Assert.AreEqual(25, profiles[0].CaseState.ActiveScore);
+        Assert.AreEqual(1500L, profiles[0].CaseState.FineDue);
+        Assert.AreEqual(120, profiles[0].CaseState.SentenceSeconds);
+        Assert.IsFalse(
+            (bool)Invoke(script, "MigrateLegacyJusticeAmnestyState"),
+            "La migration doit devenir idempotente après neutralisation.");
+    }
+
+    [TestMethod]
+    public void PlayerProfiles_LegacyAmnestyV2ReloadMigratesAndPersistsWithoutWantedSideEffects()
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            JusticeCaseState originalCase = profiles[0].CaseState;
+            ConfigureConsistentActiveCase(
+                originalCase,
+                "legacy-amnesty-v2-reload",
+                31,
+                1700L,
+                90);
+            originalCase.HasWarrant = true;
+            originalCase.Phase = JusticePhase.Wanted;
+            for (int slot = 0; slot < profiles.Length; slot++)
+            {
+                profiles[slot].PendingAmnestyWantedClear = true;
+            }
+
+            object writer = CreateHeadlessScript(profiles, 0);
+            SetField(writer, "_justiceAmnestyPending", true);
+            FlushAndAwait(writer);
+
+            string path = Path.Combine(directory, "_justice_state.xml");
+            XDocument legacySnapshot = XDocument.Load(path);
+            Assert.AreEqual("2", (string)legacySnapshot.Root.Attribute("schemaMajor"));
+            Assert.IsTrue(
+                legacySnapshot.Root
+                    .Element("Profiles")
+                    .Elements("Profile")
+                    .All(profile => string.Equals(
+                        (string)profile.Attribute("pendingAmnestyWantedClear"),
+                        "true",
+                        StringComparison.Ordinal)),
+                "Le snapshot v2 de départ doit reproduire les anciens verrous d'amnistie.");
+            Invoke(writer, "ShutdownJusticePersistenceServices");
+
+            int wantedObservations = 0;
+            int wantedWrites = 0;
+            object reader = CreateHeadlessScript(null, -1);
+            SetField(reader, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
+            SetField(
+                reader,
+                "_justiceWantedClearObservationOverride",
+                new Func<int?>(() => { wantedObservations++; return 0; }));
+            SetField(
+                reader,
+                "_justiceWantedWriteOverride",
+                new Func<int, bool>(wanted => { wantedWrites++; return true; }));
+
+            Assert.IsTrue((bool)Invoke(reader, "TryReadJusticeStateFile", path));
+            JusticePlayerProfileState[] migrated =
+                GetField<JusticePlayerProfileState[]>(reader, "_justicePlayerProfiles");
+            JusticeCaseState migratedCase = migrated[0].CaseState;
+
+            Assert.IsFalse(GetField<bool>(reader, "_justiceAmnestyPending"));
+            Assert.IsTrue(migrated.All(profile => !profile.PendingAmnestyWantedClear));
+            Assert.IsTrue(migratedCase.Enabled);
+            Assert.AreEqual(31, migratedCase.ActiveScore);
+            Assert.AreEqual(1700L, migratedCase.FineDue);
+            Assert.AreEqual(90, migratedCase.SentenceSeconds);
+            Assert.IsTrue(migratedCase.HasWarrant);
+            Assert.AreEqual(JusticePhase.Wanted, migratedCase.Phase);
+            Assert.AreEqual(
+                "episode:legacy-amnesty-v2-reload",
+                migratedCase.WantedEpisodeId);
+            Assert.AreEqual(1, migratedCase.Charges.Count);
+            Assert.AreEqual("Agression test", migratedCase.LastCrimeLabel);
+            Assert.AreEqual(0, wantedObservations);
+            Assert.AreEqual(0, wantedWrites);
+
+            // Je reproduis la seconde normalisation du démarrage pour garantir
+            // que la migration reste marquée comme une réécriture obligatoire.
+            Invoke(reader, "NormalizeLoadedJusticeState");
+            Assert.IsTrue(
+                GetField<bool>(reader, "_justiceStateDirty"),
+                "La normalisation ne doit pas perdre la migration à persister.");
+            Assert.AreEqual(0, wantedObservations);
+            Assert.AreEqual(0, wantedWrites);
+
+            FlushAndAwait(reader);
+            Invoke(reader, "ShutdownJusticePersistenceServices");
+
+            XDocument migratedSnapshot = XDocument.Load(path);
+            Assert.IsTrue(
+                migratedSnapshot.Root
+                    .Element("Profiles")
+                    .Elements("Profile")
+                    .All(profile => string.Equals(
+                        (string)profile.Attribute("pendingAmnestyWantedClear"),
+                        "false",
+                        StringComparison.Ordinal)),
+                "Tous les verrous legacy doivent être neutralisés sur disque.");
+
+            object finalReader = CreateHeadlessScript(null, -1);
+            SetField(finalReader, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
+            SetField(
+                finalReader,
+                "_justiceWantedClearObservationOverride",
+                new Func<int?>(() => { wantedObservations++; return 0; }));
+            SetField(
+                finalReader,
+                "_justiceWantedWriteOverride",
+                new Func<int, bool>(wanted => { wantedWrites++; return true; }));
+            Assert.IsTrue((bool)Invoke(finalReader, "TryReadJusticeStateFile", path));
+
+            JusticePlayerProfileState[] reloaded =
+                GetField<JusticePlayerProfileState[]>(finalReader, "_justicePlayerProfiles");
+            Assert.IsFalse(GetField<bool>(finalReader, "_justiceAmnestyPending"));
+            Assert.IsTrue(reloaded.All(profile => !profile.PendingAmnestyWantedClear));
+            Assert.AreEqual(31, reloaded[0].CaseState.ActiveScore);
+            Assert.AreEqual(1700L, reloaded[0].CaseState.FineDue);
+            Assert.AreEqual(90, reloaded[0].CaseState.SentenceSeconds);
+            Assert.IsTrue(reloaded[0].CaseState.HasWarrant);
+            Assert.AreEqual(JusticePhase.Wanted, reloaded[0].CaseState.Phase);
+            Assert.AreEqual(0, wantedObservations);
+            Assert.AreEqual(0, wantedWrites);
+            Assert.IsFalse(
+                (bool)Invoke(finalReader, "MigrateLegacyJusticeAmnestyState"),
+                "Le fichier réécrit ne doit plus contenir de verrou à migrer.");
+        });
     }
 
     [TestMethod]
@@ -593,6 +758,15 @@ public sealed class JusticePlayerProfilePersistenceTests
         WithTemporaryJusticeDirectory(directory =>
         {
             JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+            ConfigureConsistentActiveCase(
+                profiles[1].CaseState,
+                "paused-v1-migration",
+                34,
+                1800L,
+                90);
+            profiles[1].CaseState.Enabled = false;
+            profiles[1].CaseState.HasWarrant = true;
+            profiles[1].CaseState.Phase = JusticePhase.Wanted;
             object writer = CreateHeadlessScript(profiles, 1);
             FlushAndAwait(writer);
             string path = Path.Combine(directory, "_justice_state.xml");
@@ -612,7 +786,15 @@ public sealed class JusticePlayerProfilePersistenceTests
             Assert.AreEqual(0, migrated[0].RecordState.RecidivismIndex);
             Assert.AreEqual(5, migrated[1].RecordState.RecidivismIndex);
             Assert.AreEqual(0, migrated[2].RecordState.RecidivismIndex);
-            Assert.AreEqual("Profil Franklin", migrated[1].CaseState.LastCrimeLabel);
+            Assert.IsFalse(migrated[1].CaseState.Enabled);
+            Assert.AreEqual(34, migrated[1].CaseState.ActiveScore);
+            Assert.AreEqual(1800L, migrated[1].CaseState.FineDue);
+            Assert.AreEqual(90, migrated[1].CaseState.SentenceSeconds);
+            Assert.IsTrue(migrated[1].CaseState.HasWarrant);
+            Assert.AreEqual(JusticePhase.Wanted, migrated[1].CaseState.Phase);
+            Assert.AreEqual("episode:paused-v1-migration", migrated[1].CaseState.WantedEpisodeId);
+            Assert.AreEqual("Agression test", migrated[1].CaseState.LastCrimeLabel);
+            Assert.AreEqual(1, migrated[1].CaseState.Charges.Count);
 
             FlushAndAwait(reader);
             XDocument migratedXml = XDocument.Load(path);
@@ -682,7 +864,7 @@ public sealed class JusticePlayerProfilePersistenceTests
     }
 
     [TestMethod]
-    public void PlayerProfiles_DangerConfirmationKeepsItsTargetAndRejectsAPlayedHeroSwitch()
+    public void PlayerProfiles_JusticeToggleIsNotDangerousAndResetConfirmationKeepsItsTarget()
     {
         WithTemporaryJusticeDirectory(directory =>
         {
@@ -700,19 +882,18 @@ public sealed class JusticePlayerProfilePersistenceTests
             Type actionType = ScriptType.GetNestedType("MainMenuAction", BindingFlags.NonPublic);
             Assert.IsNotNull(actionType);
 
+            object toggleAction = Enum.Parse(actionType, "JusticeEnabled");
+            Assert.IsFalse((bool)InvokeStatic("IsDangerAction", toggleAction));
+            Assert.AreEqual(
+                -1,
+                (int)Invoke(script, "GetDangerActionJusticeProfileSlot", toggleAction));
             Invoke(
                 script,
                 "RequestDangerConfirmation",
-                Enum.Parse(actionType, "JusticeEnabled"));
-            Assert.AreEqual(0, GetField<int>(script, "_pendingDangerJusticeProfileSlot"));
-
-            SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 1));
-            Invoke(script, "ConfirmPendingDangerAction");
-
-            Assert.IsFalse(GetField<bool>(script, "_justiceAmnestyPending"));
+                toggleAction);
+            Assert.IsNull(GetField<object>(script, "_pendingDangerAction"));
             Assert.AreEqual(25, profiles[0].CaseState.ActiveScore);
             Assert.AreEqual(1500L, profiles[0].CaseState.FineDue);
-            Assert.IsNull(GetField<object>(script, "_pendingDangerAction"));
 
             SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
             SetField(script, "_justiceMenuSelectedProfileSlot", 1);
@@ -1329,7 +1510,7 @@ public sealed class JusticePlayerProfilePersistenceTests
         Assert.IsFalse(profiles[0].CaseState.Enabled);
         StringAssert.Contains(
             GetField<string>(script, "_statusText"),
-            "backup");
+            "réinitialisation");
 
 #if DONJ_STUB_API
         // Je réserve l'exécution du pont GTA au stub configurable. L'assembly
@@ -1369,7 +1550,7 @@ public sealed class JusticePlayerProfilePersistenceTests
             "private void RequestJusticeToggle()",
             StringComparison.Ordinal);
         int toggleEnd = source.IndexOf(
-            "private void DisableJusticeWithoutAmnesty()",
+            "private bool IsJusticePauseTemporarilyUnsafe()",
             toggleStart,
             StringComparison.Ordinal);
         Assert.IsTrue(toggleStart >= 0 && toggleEnd > toggleStart);
@@ -1377,8 +1558,8 @@ public sealed class JusticePlayerProfilePersistenceTests
             source.Substring(toggleStart, toggleEnd - toggleStart),
             "if (!IsJusticePlayedProfileContextReady())",
             "if (HasOpenJusticeProfileResetWal())",
-            "if (_justiceAmnestyPending)",
-            "if (!_justiceEnabled)");
+            "MigrateLegacyJusticeAmnestyState()",
+            "bool targetEnabled = !_justiceEnabled");
     }
 
     [TestMethod]

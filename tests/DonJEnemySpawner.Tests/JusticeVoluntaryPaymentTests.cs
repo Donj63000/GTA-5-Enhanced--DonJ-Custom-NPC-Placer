@@ -635,49 +635,19 @@ public sealed class JusticeVoluntaryPaymentTests
     }
 
     [TestMethod]
-    public void JusticeToggle_ActivationFailureRollsBackWithoutTouchingRuntimeFronts()
+    public void JusticeToggle_ActivationFlushFailureKeepsSessionEnabledAndRearmsRuntime()
     {
         WithTemporarySaveDirectory(directory =>
         {
             object script = CreatePaymentScript(0L);
             JusticeCaseState state = GetCase(script);
             state.Enabled = false;
+            state.Phase = JusticePhase.AtLarge;
+            state.HasWarrant = true;
             SetField(script, "_justiceEnabled", false);
             SetField(script, "_justiceWantedClearPending", true);
             SetField(script, "_justiceDamagePairBaselineCount", 7);
-            SetField(
-                script,
-                "_justiceStateFlushFailureOverride",
-                new Func<int, bool>(attempt => true));
-
-            Invoke(script, "RequestJusticeToggle");
-
-            Assert.IsFalse(GetField<bool>(script, "_justiceEnabled"));
-            Assert.IsFalse(state.Enabled);
-            Assert.IsTrue(GetField<bool>(script, "_justiceWantedClearPending"));
-            Assert.AreEqual(7, GetField<int>(script, "_justiceDamagePairBaselineCount"));
-            StringAssert.Contains(GetField<string>(script, "_statusText"), "Activation impossible");
-        });
-    }
-
-    [TestMethod]
-    public void JusticeToggle_DeactivationFailureRollsBackBeforeVolatileCleanup()
-    {
-        WithTemporarySaveDirectory(directory =>
-        {
-            object script = CreatePaymentScript(0L);
-            JusticeCaseState state = GetCase(script);
-            state.Charges.Clear();
-            state.ActiveScore = 0;
-            state.FineDue = 0L;
-            state.SentenceSeconds = 0;
-            state.HasWarrant = false;
-            state.Phase = JusticePhase.AtLarge;
-            state.Enabled = true;
-            SetField(script, "_justiceEnabled", true);
-            SetField(script, "_justiceWantedLossPending", true);
-            SetField(script, "_justiceCaptureRetryPending", true);
-            SetField(script, "_justiceDamagePairBaselineCount", 9);
+            SetField(script, "_justiceDamageFrontPrimingPending", false);
             SetField(
                 script,
                 "_justiceStateFlushFailureOverride",
@@ -687,10 +657,57 @@ public sealed class JusticeVoluntaryPaymentTests
 
             Assert.IsTrue(GetField<bool>(script, "_justiceEnabled"));
             Assert.IsTrue(state.Enabled);
-            Assert.IsTrue(GetField<bool>(script, "_justiceWantedLossPending"));
-            Assert.IsTrue(GetField<bool>(script, "_justiceCaptureRetryPending"));
-            Assert.AreEqual(9, GetField<int>(script, "_justiceDamagePairBaselineCount"));
-            StringAssert.Contains(GetField<string>(script, "_statusText"), "Désactivation impossible");
+            Assert.IsFalse(GetField<bool>(script, "_justiceWantedClearPending"));
+            Assert.AreEqual(0, GetField<int>(script, "_justiceDamagePairBaselineCount"));
+            Assert.IsTrue(GetField<bool>(script, "_justiceDamageFrontPrimingPending"));
+            Assert.IsTrue(
+                GetField<bool>(script, "_justiceStateDirty"),
+                "Le changement de session doit rester à sauvegarder après l'échec injecté.");
+            Assert.AreEqual(12, state.ActiveScore);
+            Assert.AreEqual(1, state.Charges.Count);
+            Assert.IsTrue(state.HasWarrant);
+            StringAssert.Contains(GetField<string>(script, "_statusText"), "ACTIVÉE");
+        });
+    }
+
+    [TestMethod]
+    public void JusticeToggle_DeactivationFlushFailureKeepsPauseAndClearsOnlyRuntimeCaches()
+    {
+        WithTemporarySaveDirectory(directory =>
+        {
+            object script = CreatePaymentScript(0L);
+            JusticeCaseState state = GetCase(script);
+            state.Enabled = true;
+            int scoreBeforePause = state.ActiveScore;
+            int chargeCountBeforePause = state.Charges.Count;
+            string episodeBeforePause = state.WantedEpisodeId;
+            SetField(script, "_justiceEnabled", true);
+            SetField(script, "_justiceWantedLossPending", true);
+            SetField(script, "_justiceDamagePairBaselineCount", 9);
+            SetField(script, "_justiceDamageFrontPrimingPending", true);
+            SetField(script, "_justiceAimTargetHandle", 42);
+            SetField(script, "_justicePursuitActive", true);
+            SetField(
+                script,
+                "_justiceStateFlushFailureOverride",
+                new Func<int, bool>(attempt => true));
+
+            Invoke(script, "RequestJusticeToggle");
+
+            Assert.IsFalse(GetField<bool>(script, "_justiceEnabled"));
+            Assert.IsFalse(state.Enabled);
+            Assert.IsFalse(GetField<bool>(script, "_justiceWantedLossPending"));
+            Assert.AreEqual(0, GetField<int>(script, "_justiceDamagePairBaselineCount"));
+            Assert.IsFalse(GetField<bool>(script, "_justiceDamageFrontPrimingPending"));
+            Assert.AreEqual(0, GetField<int>(script, "_justiceAimTargetHandle"));
+            Assert.IsFalse(GetField<bool>(script, "_justicePursuitActive"));
+            Assert.IsTrue(
+                GetField<bool>(script, "_justiceStateDirty"),
+                "La pause doit rester effective et être retentée par le writer.");
+            Assert.AreEqual(scoreBeforePause, state.ActiveScore);
+            Assert.AreEqual(chargeCountBeforePause, state.Charges.Count);
+            Assert.AreEqual(episodeBeforePause, state.WantedEpisodeId);
+            StringAssert.Contains(GetField<string>(script, "_statusText"), "DÉSACTIVÉE");
         });
     }
 

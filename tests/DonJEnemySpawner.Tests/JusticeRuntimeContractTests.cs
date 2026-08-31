@@ -613,63 +613,63 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void RuntimeJustice_AmnestyWantedClearIsPersistedAtMostOnceAcrossAckRetryAndReload()
+    public void RuntimeJustice_LegacyAmnestyMigrationPreservesCaseAndNeverClearsWanted()
     {
-        WithTemporarySaveDirectory(directory =>
+        object script = CreateJusticeHeadlessScript();
+        InvokeInstance(script, "EnsureJusticePlayerProfilesInitialized");
+        JusticePlayerProfileState[] profiles =
+            GetFieldValue<JusticePlayerProfileState[]>(script, "_justicePlayerProfiles");
+        JusticeCaseState state = GetFieldValue<JusticeCaseState>(script, "_justiceCaseState");
+        JusticeRecordState record = GetFieldValue<JusticeRecordState>(script, "_justiceRecordState");
+        state.Enabled = true;
+        Assert.IsNotNull(JusticePolicy.ApplyConfirmedIncident(
+            state,
+            CreateConfirmedDirectIncident(
+                JusticeCrimeKind.SimpleAssault,
+                "incident:legacy-amnesty-migration",
+                "episode:legacy-amnesty-migration",
+                JusticeCircumstances.None),
+            record));
+        profiles[0].CaseState = state;
+        profiles[0].RecordState = record;
+        for (int slot = 0; slot < profiles.Length; slot++)
         {
-            object script = CreateJusticeHeadlessScript();
-            InvokeInstance(script, "EnsureJusticePlayerProfilesInitialized");
-            JusticePlayerProfileState[] profiles =
-                GetFieldValue<JusticePlayerProfileState[]>(script, "_justicePlayerProfiles");
-            JusticeCaseState state = GetFieldValue<JusticeCaseState>(script, "_justiceCaseState");
-            JusticeRecordState record = GetFieldValue<JusticeRecordState>(script, "_justiceRecordState");
-            state.Enabled = true;
-            Assert.IsNotNull(JusticePolicy.ApplyConfirmedIncident(
-                state,
-                CreateConfirmedDirectIncident(
-                    JusticeCrimeKind.SimpleAssault,
-                    "incident:amnesty-clear-wal",
-                    "episode:amnesty-clear-wal",
-                    JusticeCircumstances.None),
-                record));
-            profiles[0].CaseState = state;
-            profiles[0].RecordState = record;
-            SetFieldValue(script, "_justiceEnabled", true);
-            SetFieldValue(script, "_justiceActivePlayerProfileSlot", 0);
-            SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
-            SetFieldValue(script, "_justiceProfileSelectionPending", false);
-            SetFieldValue(script, "_justiceAmnestyPending", true);
+            profiles[slot].PendingAmnestyWantedClear = true;
+        }
 
-            int clears = 0;
-            SetFieldValue(
-                script,
-                "_justiceWantedClearObservationOverride",
-                new Func<int?>(() => { clears++; return 0; }));
+        SetFieldValue(script, "_justiceEnabled", true);
+        SetFieldValue(script, "_justiceActivePlayerProfileSlot", 0);
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(script, "_justiceProfileSelectionPending", false);
+        SetFieldValue(script, "_justiceAmnestyPending", true);
+        SetFieldValue(script, "_justiceAmnestyWantedClearAttempted", true);
+        SetFieldValue(script, "_justiceAmnestyPrecommitRedundant", true);
+        SetFieldValue(script, "_justiceWantedClearPending", true);
 
-            Assert.IsFalse(
-                (bool)InvokeInstance(script, "TryApplyJusticeAmnestyWantedClear"),
-                "Le premier passage doit seulement enfiler le snapshot critique.");
-            AwaitQueuedPersistence(script);
-            Assert.IsTrue((bool)InvokeInstance(script, "TryApplyJusticeAmnestyWantedClear"));
-            Assert.AreEqual(1, clears);
-            Assert.IsTrue(GetFieldValue<bool>(script, "_justiceAmnestyWantedClearAttempted"));
-            Assert.IsTrue((bool)InvokeInstance(script, "TryApplyJusticeAmnestyWantedClear"));
-            Assert.AreEqual(1, clears, "Un échec d'acquittement ne doit jamais rejouer le clear.");
-            FlushAndAwait(script);
+        int wantedObservations = 0;
+        SetFieldValue(
+            script,
+            "_justiceWantedClearObservationOverride",
+            new Func<int?>(() => { wantedObservations++; return 0; }));
 
-            object reader = CreateJusticeHeadlessScript();
-            Assert.IsTrue((bool)InvokeInstance(
-                reader,
-                "TryReadJusticeStateFile",
-                Path.Combine(directory, "_justice_state.xml")));
-            int replayedClears = 0;
-            SetFieldValue(
-                reader,
-                "_justiceWantedClearObservationOverride",
-                new Func<int?>(() => { replayedClears++; return 3; }));
-            Assert.IsTrue((bool)InvokeInstance(reader, "TryApplyJusticeAmnestyWantedClear"));
-            Assert.AreEqual(0, replayedClears);
-        });
+        int initialChargeCount = state.Charges.Count;
+        int initialScore = state.ActiveScore;
+        long initialFine = state.FineDue;
+        Assert.IsTrue((bool)InvokeInstance(script, "MigrateLegacyJusticeAmnestyState"));
+
+        Assert.IsTrue(GetFieldValue<bool>(script, "_justiceEnabled"));
+        Assert.IsTrue(state.Enabled);
+        Assert.AreEqual(initialChargeCount, state.Charges.Count);
+        Assert.AreEqual(initialScore, state.ActiveScore);
+        Assert.AreEqual(initialFine, state.FineDue);
+        Assert.AreEqual(0, wantedObservations);
+        Assert.IsFalse(GetFieldValue<bool>(script, "_justiceAmnestyPending"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_justiceAmnestyWantedClearAttempted"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_justiceAmnestyPrecommitRedundant"));
+        Assert.IsFalse(GetFieldValue<bool>(script, "_justiceWantedClearPending"));
+        Assert.IsTrue(profiles.All(profile => !profile.PendingAmnestyWantedClear));
+        Assert.IsTrue(GetFieldValue<bool>(script, "_justiceStateDirty"));
+        Assert.IsFalse((bool)InvokeInstance(script, "MigrateLegacyJusticeAmnestyState"));
     }
 
     [TestMethod]
@@ -1046,69 +1046,110 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void RuntimeJustice_AmnestyRetriesAndVerifiesWantedClearAfterDisable()
+    public void RuntimeJustice_TogglePausesAndResumesWithoutAmnestyOrWantedMutation()
     {
         string source = ReadRuntimeSource();
-        string amnesty = ExecutableMethodBody(source, "ExecuteJusticeAmnestyAndDisable");
-        string resume = ExecutableMethodBody(source, "ResumeJusticeAmnestyTransaction");
-        string applyClear = ExecutableMethodBody(source, "TryApplyJusticeAmnestyWantedClear");
-        string clear = ExecutableMethodBody(source, "ClearJusticeWantedLevelOnceDetailed");
-        string retry = ExecutableMethodBody(source, "RetryJusticeWantedClearAfterAmnesty");
+        string toggle = ExecutableMethodBody(source, "RequestJusticeToggle");
+        string pause = ExecutableMethodBody(source, "PauseJusticeRuntimeWithoutErasingCase");
+        string resume = ExecutableMethodBody(source, "PrepareJusticeRuntimeAfterResume");
+        string migrate = ExecutableMethodBody(source, "MigrateLegacyJusticeAmnestyState");
+        string unsafePause = ExecutableMethodBody(source, "IsJusticePauseTemporarilyUnsafe");
         string early = ExecutableMethodBody(source, "UpdateJusticeEarly");
+        string initialize = ExecutableMethodBody(source, "InitializeJusticeSystem");
 
         AssertOrdered(
-            amnesty,
-            "_justiceAmnestyPending = true",
-            "_justiceAmnestyPrecommitRedundant = false",
-            "EnsureJusticeAmnestyPrecommitRedundant()",
-            "CancelJusticeAmnestyConfirmation()",
-            "ResumeJusticeAmnestyTransaction()");
+            toggle,
+            "MigrateLegacyJusticeAmnestyState()",
+            "bool targetEnabled = !_justiceEnabled",
+            "IsJusticePauseTemporarilyUnsafe()",
+            "_justiceEnabled = targetEnabled",
+            "_justiceCaseState.Enabled = targetEnabled",
+            "PrepareJusticeRuntimeAfterResume()",
+            "PauseJusticeRuntimeWithoutErasingCase()",
+            "JusticeMarkStateDirty()",
+            "JusticeFlushStateNow()");
+        Assert.IsFalse(toggle.Contains("RequestDangerConfirmation(MainMenuAction.JusticeEnabled)"));
+        Assert.IsFalse(toggle.Contains("ExecuteJusticeAmnestyAndDisable()"));
+        Assert.IsFalse(toggle.Contains("ResumeJusticeAmnestyTransaction()"));
+        Assert.IsFalse(toggle.Contains("ClearJusticeWantedLevel"));
+        Assert.IsFalse(toggle.Contains("previousEnabled"));
+
+        AssertOrdered(
+            pause,
+            "_justiceDamageFrontPrimingPending = false",
+            "_justicePlayerVitalityBaselineInitialized = false",
+            "_justicePendingIncidents.Clear()",
+            "ResetJusticeWitnessSnapshots()",
+            "CancelJusticeWantedClearRetry()",
+            "CancelJusticeAmnestyConfirmation()");
+        Assert.IsFalse(pause.Contains("ClearActiveCase"));
+        Assert.IsFalse(pause.Contains("ClearJusticeWantedLevel"));
+
         AssertOrdered(
             resume,
-            "EnsureJusticeAmnestyPrecommitRedundant()",
-            "EnsureJusticeDeathFrontsDurableBeforeDestructiveTransaction()",
-            "ClearPendingJusticeDeathCapture()",
-            "JusticeAmnestyCustody()",
-            "_justiceCaseState.ClearActiveCase(false)",
-            "_justiceEnabled = false",
-            "JusticeMarkStateDirty()",
-            "JusticeFlushStateNow()",
-            "TryApplyJusticeAmnestyWantedClear()",
+            "CancelJusticeWantedClearRetry()",
+            "_justiceDamageFrontPrimingPending = true",
+            "int wantedLevel = GetJusticeWantedLevelSafe()",
+            "StartJusticePursuitEpisodeIfNeeded()",
+            "ReconcileLoadedJusticePursuitState(wantedLevel)");
+        Assert.IsFalse(resume.Contains("ClearActiveCase"));
+        Assert.IsFalse(resume.Contains("ClearJusticeWantedLevel"));
+
+        AssertOrdered(
+            migrate,
             "_justiceAmnestyPending = false",
+            "_justiceAmnestyWantedClearAttempted = false",
+            "_justiceAmnestyPrecommitRedundant = false",
+            "CancelJusticeWantedClearRetry()",
+            "profile.PendingAmnestyWantedClear = false",
+            "JusticeMarkStateDirty()");
+        Assert.IsFalse(migrate.Contains("ClearActiveCase"));
+        Assert.IsFalse(migrate.Contains("ClearJusticeWantedLevel"));
+
+        AssertOrdered(
+            unsafePause,
+            "_justiceCriticalBarrierRevision > 0L",
+            "_justiceWasBeingArrested",
+            "_justiceActiveProfileResetPending",
+            "_justiceBackupRepairPending",
+            "_justicePursuitDeathObservedDuringSuspension",
+            "_justicePendingDeathFrontWalRecord != null",
+            "_justiceCaptureRetryPending",
+            "_justiceArrestCompletionProbePending",
+            "HasJusticeDeferredRuntimeFronts()",
+            "HasJusticeCustodyRecoveryState()");
+
+        AssertOrdered(
+            initialize,
+            "NormalizeLoadedJusticeState()",
+            "MigrateLegacyJusticeAmnestyState()",
+            "InitializeJusticePersistenceServices()",
+            "_justiceInitialized = true",
             "JusticeFlushStateNow()");
-        AssertOrdered(
-            applyClear,
-            "_justiceAmnestyWantedClearAttempted = true",
-            "PersistJusticeCriticalPrecommitRedundantly()",
-            "ClearJusticeWantedLevelOnceDetailed()",
-            "JusticeWantedClearResult.Rejected",
-            "aucun retry tardif");
-        AssertOrdered(
-            clear,
-            "JusticeNativeClearPlayerWantedLevel",
-            "TryReadJusticeWantedLevel(out observed)",
-            "Game.Player.WantedLevel = 0",
-            "finalReadSucceeded = TryReadJusticeWantedLevel(out observed)",
-            "JusticeWantedClearResult.Rejected",
-            "_justiceWantedClearPending = false");
-        AssertOrdered(
-            retry,
-            "_justiceWantedClearPending",
-            "_justiceWantedClearRetryUntilMs",
-            "ClearJusticeWantedLevelOnce()",
-            "_justiceNextWantedClearRetryAtMs");
-        int suspensionGate = early.IndexOf("if (IsJusticeRuntimeSuspended(player))", StringComparison.Ordinal);
-        int retryAt = early.IndexOf("RetryJusticeWantedClearAfterAmnesty()", StringComparison.Ordinal);
-        int refreshedWanted = early.IndexOf("wantedLevel = GetJusticeWantedLevelSafe()", retryAt, StringComparison.Ordinal);
+        StringAssert.Contains(early, "MigrateLegacyJusticeAmnestyState()");
+        Assert.IsFalse(early.Contains("ResumeJusticeAmnestyTransaction()"));
+        Assert.IsFalse(early.Contains("RetryJusticeWantedClearAfterAmnesty()"));
+    }
+
+    [TestMethod]
+    public void RuntimeJustice_PauseRejectsAnOpenCriticalBarrierAndAnActiveArrest()
+    {
+        object script = CreateJusticeHeadlessScript();
+
+        Assert.IsFalse((bool)InvokeInstance(
+            script,
+            "IsJusticePauseTemporarilyUnsafe"));
+
+        SetFieldValue(script, "_justiceCriticalBarrierRevision", 42L);
         Assert.IsTrue(
-            suspensionGate >= 0 && retryAt > suspensionGate && refreshedWanted > retryAt,
-            "Le retry d'amnistie doit rester après le gate de suspension puis rafraîchir le snapshot wanted.");
-        StringAssert.Contains(retry, "_justiceEnabled || HasActiveJusticeCase() || JusticeIsCustodyActive");
-        StringAssert.Contains(retry, "CancelJusticeWantedClearRetry()");
-        StringAssert.Contains(
-            ExecutableMethodBody(source, "RequestJusticeToggle"),
-            "CancelJusticeWantedClearRetry();",
-            "Réactiver Justice doit invalider le jeton d'amnistie précédent.");
+            (bool)InvokeInstance(script, "IsJusticePauseTemporarilyUnsafe"),
+            "Je ne mets pas Justice sur OFF tant qu'un précommit critique bloque les checkpoints.");
+
+        SetFieldValue(script, "_justiceCriticalBarrierRevision", 0L);
+        SetFieldValue(script, "_justiceWasBeingArrested", true);
+        Assert.IsTrue(
+            (bool)InvokeInstance(script, "IsJusticePauseTemporarilyUnsafe"),
+            "Je laisse l'arrestation GTA atteindre sa sonde de capture avant toute pause.");
     }
 
     [TestMethod]
@@ -4525,7 +4566,7 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void ObsidianJustice_UsesSevenCategoriesExactActionsAndSafeAmnestyModal()
+    public void ObsidianJustice_UsesSevenCategoriesPauseToggleAndProtectedReset()
     {
         Type categoryType = GetNestedType("MenuCategory");
         CollectionAssert.AreEqual(
@@ -4617,16 +4658,29 @@ public sealed class JusticeRuntimeContractTests
         JusticeCaseState state = GetFieldValue<JusticeCaseState>(menuScript, "_justiceCaseState");
         state.Enabled = true;
         state.ActiveScore = 25;
+        InvokeInstance(menuScript, "EnsureJusticePlayerProfilesInitialized");
+        JusticePlayerProfileState[] profiles =
+            GetFieldValue<JusticePlayerProfileState[]>(menuScript, "_justicePlayerProfiles");
+        profiles[0].CaseState = state;
+        profiles[0].RecordState = GetFieldValue<JusticeRecordState>(menuScript, "_justiceRecordState");
         SetFieldValue(menuScript, "_justiceEnabled", true);
         SetFieldValue(menuScript, "_justiceInitialized", true);
+        SetFieldValue(menuScript, "_justiceActivePlayerProfileSlot", 0);
+        SetFieldValue(menuScript, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(menuScript, "_justiceProfileSelectionPending", false);
+        SetFieldValue(menuScript, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
 
         InvokeInstance(menuScript, "RequestJusticeToggle");
-        Assert.AreEqual("JusticeEnabled", GetFieldValue<object>(menuScript, "_pendingDangerAction").ToString());
-        Assert.IsTrue(GetFieldValue<bool>(menuScript, "_dangerConfirmationRequiresEnterRelease"));
-        Assert.IsTrue((bool)InvokeStatic("IsDangerAction", Enum.Parse(GetNestedType("MainMenuAction"), "JusticeEnabled")));
-        Assert.AreEqual(
-            "EFFACER LE DOSSIER ACTIF",
-            InvokeInstance(menuScript, "DangerActionDisplayName", Enum.Parse(GetNestedType("MainMenuAction"), "JusticeEnabled")));
+        object toggleAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticeEnabled");
+        Assert.IsNull(GetFieldValue<object>(menuScript, "_pendingDangerAction"));
+        Assert.IsFalse(GetFieldValue<bool>(menuScript, "_dangerConfirmationRequiresEnterRelease"));
+        Assert.IsFalse((bool)InvokeStatic("IsDangerAction", toggleAction));
+        Assert.IsFalse(GetFieldValue<bool>(menuScript, "_justiceEnabled"));
+        Assert.IsFalse(state.Enabled);
+        Assert.AreEqual(25, state.ActiveScore);
+        StringAssert.Contains(
+            GetFieldValue<string>(menuScript, "_statusText"),
+            "Dossier, casier et mandat conservés");
 
         object profileAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticeProfile");
         object policeModeAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticePoliceMode");
@@ -4650,13 +4704,13 @@ public sealed class JusticeRuntimeContractTests
 
         InvokeInstance(menuScript, "CancelPendingDangerAction");
         Assert.IsNull(GetFieldValue<object>(menuScript, "_pendingDangerAction"));
-        Assert.IsTrue(GetFieldValue<bool>(menuScript, "_justiceEnabled"));
-        Assert.AreEqual(25, state.ActiveScore, "Annuler la modale ne doit produire aucune amnistie.");
+        Assert.IsFalse(GetFieldValue<bool>(menuScript, "_justiceEnabled"));
+        Assert.AreEqual(25, state.ActiveScore, "Annuler le reset ne doit pas modifier le dossier en pause.");
 
         List<MethodBase> confirmCalls = ReadCalledMethods(FindMethod("ConfirmPendingDangerAction", PrivateInstance));
-        Assert.IsTrue(
+        Assert.IsFalse(
             confirmCalls.Any(call => call.Name == "ExecuteJusticeConfirmedAmnestyAndDisable"),
-            "La seconde validation stylée doit être le seul chemin vers l'amnistie.");
+            "Le bouton ON/OFF ne doit plus être routé vers l'amnistie.");
         Assert.IsTrue(
             confirmCalls.Any(call => call.Name == "ExecuteJusticeConfirmedProfileReset"),
             "La seconde validation stylée doit être le seul chemin vers la réinitialisation du profil.");
@@ -4683,6 +4737,10 @@ public sealed class JusticeRuntimeContractTests
         StringAssert.Contains(resetModal, "_pendingDangerJusticeProfileDisplay");
         StringAssert.Contains(resetModal, "_pendingDangerJusticeFineDisplay");
         StringAssert.Contains(resetModal, "Casier, dossier, récidive, dette et détention seront effacés.");
+        Assert.IsFalse(resetModal.Contains("CONFIRMATION D'AMNISTIE"));
+        Assert.IsFalse(resetModal.Contains("justiceAmnesty"));
+        string toggleHint = ExecutableMethodBody(menuSource, "GetObsidianActionHint");
+        StringAssert.Contains(toggleHint, "Désactiver ne supprime aucun dossier");
     }
 
     [TestMethod]

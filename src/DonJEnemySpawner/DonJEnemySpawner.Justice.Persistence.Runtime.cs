@@ -1592,10 +1592,13 @@ public sealed partial class DonJEnemySpawner
     private static bool IsJusticePersistenceProfileSemanticallyValid(
         JusticePlayerProfileState profile)
     {
-        if (profile == null || !IsJusticeCanonicalProfileSlot(profile.Slot) ||
-            profile.CaseState == null || profile.RecordState == null ||
-            !IsJusticeCaseRecordLinkValid(profile.CaseState, profile.RecordState) ||
-            (!profile.CaseState.Enabled && IsLoadedJusticeCaseActive(profile.CaseState)) ||
+        if (profile == null ||
+            !IsJusticeCanonicalProfileSlot(profile.Slot) ||
+            profile.CaseState == null ||
+            profile.RecordState == null ||
+            !IsJusticeCaseRecordLinkValid(
+                profile.CaseState,
+                profile.RecordState) ||
             !IsJusticeProfilePendingDeathValid(
                 profile.CaseState,
                 profile.PendingDeathCapture,
@@ -1614,18 +1617,27 @@ public sealed partial class DonJEnemySpawner
         }
 
         JusticeCustodyPersistenceSnapshot custody = profile.CustodySnapshot;
+
         if (custody != null)
         {
-            bool identityRequired = custody.Active || custody.InventoryRemoved ||
-                custody.DeferredInventoryRestore || custody.InventorySnapshot != null ||
-                custody.FineDebitIntent != null || custody.DisciplineIntent != null;
-            return (!identityRequired || custody.PlayerSlot == profile.Slot) &&
-                   (custody.VoluntaryPaymentIntent == null ||
-                    custody.VoluntaryPaymentIntent.Slot == profile.Slot);
+            bool identityRequired =
+                custody.Active ||
+                custody.InventoryRemoved ||
+                custody.DeferredInventoryRestore ||
+                custody.InventorySnapshot != null ||
+                custody.FineDebitIntent != null ||
+                custody.DisciplineIntent != null;
+
+            return
+                (!identityRequired ||
+                 custody.PlayerSlot == profile.Slot) &&
+                (custody.VoluntaryPaymentIntent == null ||
+                 custody.VoluntaryPaymentIntent.Slot == profile.Slot);
         }
 
-        // Un fragment relu du disque a déjà été validé. Sa relecture, ainsi que la
-        // validation métier complète du document produit, se font sur le writer.
+        // Un fragment relu du disque a déjà été validé.
+        // La validation métier complète du document produit est effectuée par
+        // le writer lors de sa sérialisation.
         return !string.IsNullOrWhiteSpace(profile.CustodyXml);
     }
 
