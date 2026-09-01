@@ -552,6 +552,12 @@ To leave the mode, open the `F10` menu again and select `Mode Terminator`. The m
 | **Mort policière et reprise sûre** | Une mort policière prouvée conduit au site de détention sous un masque continu, sans passage jouable à l'hôpital et sans emprisonner le mauvais protagoniste. |
 | **Persistance résistante aux crashs** | XML principal, backup et journal transactionnel empêchent les doubles débits, doubles peines et reprises ambiguës après un crash ou un changement de héros. |
 
+<p align="center">
+  <img src="Github%20images/justice-prison-bolingbroke.png" alt="Détenu dans la cour de la prison de Bolingbroke avec le temps de peine restant affiché par Justice" width="100%">
+</p>
+
+<p align="center"><em>Les affaires les plus graves peuvent conduire le joueur à la prison de Bolingbroke, où la peine se purge directement en jeu.</em></p>
+
 > [!TIP]
 > Active et consulte le système dans `F10` → `JUSTICE`. Les détails d'architecture sont dans la [documentation développeur](docs/documentation-developpeur.md), et les scénarios de contrôle en jeu dans la [validation manuelle Justice](docs/validation-justice-manuelle.md).
 
