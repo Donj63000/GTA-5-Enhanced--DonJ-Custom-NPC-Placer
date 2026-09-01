@@ -16,7 +16,12 @@ Ou obtenir le package
 5. Ouvrez manifest.json et verifiez que manifestVersion vaut 2, que sourceDirty vaut false,
    que scriptApi.major vaut 2, que scriptApi.abiContract.sha256
    contient 64 caracteres hexadecimaux et que commit correspond au dernier
-   commit de main.
+   commit de main. Verifiez aussi que les cles immatriculation, outfit et warrant
+   de files.justiceAssets contiennent exactement les trois PNG listes ci-dessous,
+   avec leur taille et leur SHA-256. Le bloc hudRenderer doit indiquer
+   optional=true, fallback=native, minimumMajor=3, GTA.UI.CustomSprite et
+   contractVersion=1. available indique si un provider v3 compatible a ete
+   valide pendant le packaging; son nom et sa version sont alors declares.
 
 Fichiers inclus
 ---------------
@@ -28,11 +33,18 @@ Fichiers inclus
   Optionnel. Il sert surtout au debug et rend les logs plus lisibles.
   Vous pouvez le copier aussi, ca ne gene pas.
 
+- Assets\Justice\immatriculation.png
+- Assets\Justice\tenue.png
+- Assets\Justice\mandat.png
+  Obligatoires. Ce sont les trois icones du HUD de reconnaissance Justice.
+  Conservez exactement ce sous-dossier lors de la copie.
+
 - manifest.json
   Il indique le commit, la version de l'API ScriptHookVDotNet ciblee, l'empreinte
   du contrat ABI NIB, les autres versions, les tailles et les SHA-256 exacts du
-  binaire et du PDB issus du meme build teste. Copiez-le dans Scripts en le renommant
-  DonJCustomNpcPlacer.manifest.json pour le diagnostic du mod.
+  binaire, du PDB et des trois assets Justice issus du meme build teste. Copiez-le
+  dans Scripts en le renommant DonJCustomNpcPlacer.manifest.json pour le
+  diagnostic du mod.
 
 - INSTALLATION_SIMPLE.txt
   C'est ce guide. Il reste hors de Scripts.
@@ -40,7 +52,8 @@ Fichiers inclus
 Ou mettre les fichiers
 ----------------------
 
-1. Fermez GTA V Enhanced.
+1. Fermez GTA V Enhanced et ses lanceurs. Le deploiement refuse toute modification
+   tant que GTA5_Enhanced, GTA5 ou PlayGTAV est encore actif et ne les termine jamais.
 
 2. Ouvrez le dossier principal de GTA V Enhanced.
    C'est le dossier ou se trouve GTA5_Enhanced.exe.
@@ -57,14 +70,17 @@ Ou mettre les fichiers
 
    - DonJCustomNpcPlacer.ENdll
    - DonJCustomNpcPlacer.pdb  (optionnel)
+   - le dossier Assets\Justice complet avec ses trois PNG (obligatoire)
    - manifest.json, renomme DonJCustomNpcPlacer.manifest.json
 
 Important
 ---------
 
 Ne copiez pas le dossier du package entier dans Scripts.
-Copiez uniquement DonJCustomNpcPlacer.ENdll, le manifest renomme et, si vous le
-souhaitez, le PDB fourni dans ce meme package verifie.
+Copiez DonJCustomNpcPlacer.ENdll, le dossier Assets\Justice complet, le manifest
+renomme et, si vous le souhaitez, le PDB fourni dans ce meme package verifie.
+Les trois PNG sont obligatoires. Le fallback texte du jeu sert seulement a eviter
+un crash; il ne rend pas une installation incomplete valide.
 
 Ce qu'il faut avoir avant de lancer le jeu
 -----------------------------------------
@@ -78,11 +94,26 @@ vous devez avoir :
 - xinput1_4.dll
 - NIBScriptHookVDotNet.asi
 - NIBScriptHookVDotNet2.dll
+- NIBScriptHookVDotNet3.dll  (optionnelle, version majeure 3 ou plus)
+
+Le gameplay et le binaire du mod restent strictement compiles contre l'API v2.
+NIBScriptHookVDotNet3.dll n'est ni referencee a la compilation ni fournie dans
+ce package. Si elle est installee, elle sert de provider pour afficher les PNG
+Justice via GTA.UI.CustomSprite et le deploiement valide strictement sa forme
+avant toute ecriture. Si elle est absente, le HUD natif P/T/M est utilise et le
+packaging comme le deploiement restent autorises.
 
 Dans le dossier Scripts, vous devez avoir :
 
 - DonJCustomNpcPlacer.ENdll
 - DonJCustomNpcPlacer.manifest.json
+- Assets\Justice\immatriculation.png
+- Assets\Justice\tenue.png
+- Assets\Justice\mandat.png
+
+Le dossier principal de GTA peut contenir NIBScriptHookVDotNet3.dll de version
+majeure 3 ou plus pour le rendu CustomSprite. Elle reste optionnelle et ne doit
+jamais etre copiee depuis le package DonJ, car ce package ne la distribue pas.
 
 Lancer le mod
 -------------
@@ -94,20 +125,48 @@ Lancer le mod
 4. Pour lancer une attaque Ballas hostile : gardez le telephone ouvert et appuyez sur R.
 5. Pour ramasser un objet argent interactif : approchez-vous du cash et appuyez sur E.
 
+Reconnaissance Justice
+----------------------
+
+Quand Justice avancee est activee, une fuite GTA reellement reussie peut memoriser
+la plaque et la peinture du vehicule, la tenue et l'apparence du heros, ainsi qu'un
+mandat local autour de la derniere position connue. Revenir dans cette zone avec
+un signalement encore actif permet a un policier ou a un temoin de vous identifier
+progressivement et de restaurer le niveau wanted memorise. Repeindre le meme
+vehicule plaque neutralise son signalement visuel; changer de tenue, d'apparence
+ou porter un masque reduit le risque sans garantir l'immunite.
+
+Le bouton ON/OFF de Justice est une pause non destructive : il ne supprime ni les
+plaques, ni les tenues, ni le mandat local et n'efface pas les etoiles GTA. Dans
+une installation normalement inscriptible, les donnees des trois heros restent
+separees dans :
+
+Scripts\DonJJusticeRecognition\JusticeRecognition.xml
+
+Le backup et le journal sont conserves dans le meme dossier. Si le sous-dossier
+de donnees prioritaire ne peut pas etre cree, le module utilise d'abord
+%LOCALAPPDATA%\DonJEnemySpawner\JusticeRecognition, puis le sous-dossier
+DonJJusticeRecognition a cote de l'assembly en dernier recours. Les sauvegardes
+de scenes et Scripts\DonJEnemySpawnerSaves\_justice_state.xml restent independants.
+
 Mise a jour du mod
 ------------------
 
 1. Fermez le jeu et ses loaders.
 2. Verifiez le SHA-256 du nouveau DonJCustomNpcPlacer.ENdll avec manifest.json.
-3. Copiez DonJCustomNpcPlacer.ENdll et, si souhaite, DonJCustomNpcPlacer.pdb
-   depuis le package game-ready verifie en remplacant les fichiers du meme nom.
+3. Verifiez aussi les tailles et SHA-256 des trois fichiers declares dans
+   files.justiceAssets.
+4. Copiez DonJCustomNpcPlacer.ENdll, le dossier Assets\Justice complet et, si
+   souhaite, DonJCustomNpcPlacer.pdb depuis le package game-ready verifie en
+   remplacant les fichiers du meme nom.
    Ne supprimez jamais l'ancien ENdll avant d'avoir valide le nouveau fichier a
    copier.
-4. Remplacez Scripts\DonJCustomNpcPlacer.manifest.json par le manifest.json du
+5. Remplacez Scripts\DonJCustomNpcPlacer.manifest.json par le manifest.json du
    meme package, en conservant ce nom stable.
-5. Recalculez le SHA-256 du ENdll installe et comparez-le encore au manifest.
-6. Seulement apres cette validation, retirez les anciens alias listes ci-dessous.
-7. Relancez le jeu.
+6. Recalculez les SHA-256 du ENdll et des trois PNG installes, puis comparez-les
+   encore au manifest.
+7. Seulement apres cette validation, retirez les anciens alias listes ci-dessous.
+8. Relancez le jeu.
 
 Si vous aviez une ancienne version
 ----------------------------------
@@ -127,6 +186,10 @@ Attention
 Ce mod est fait pour le mode histoire / solo uniquement.
 Ne l'utilisez pas dans GTA Online.
 
+Si les icones Justice sont remplacees par les lettres P, T et M, le fallback HUD
+natif fonctionne normalement. Pour obtenir les PNG, fermez le jeu puis verifiez
+leurs SHA-256 et, si vous l'utilisez, NIBScriptHookVDotNet3.dll majeure 3 ou plus.
+
 Desinstallation
 ---------------
 
@@ -135,5 +198,9 @@ Desinstallation
    - DonJCustomNpcPlacer.ENdll
    - DonJCustomNpcPlacer.pdb, s'il est present
    - DonJCustomNpcPlacer.manifest.json
-3. Les sauvegardes DonJEnemySpawnerSaves peuvent etre conservees ou supprimees
-   separement.
+   - Assets\Justice\immatriculation.png
+   - Assets\Justice\tenue.png
+   - Assets\Justice\mandat.png
+3. Les sauvegardes DonJEnemySpawnerSaves et le dossier DonJJusticeRecognition
+   peuvent etre conserves ou supprimes separement. Le second contient
+   JusticeRecognition.xml, son backup et JusticeRecognition.log.

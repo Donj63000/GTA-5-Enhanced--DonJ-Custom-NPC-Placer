@@ -27,7 +27,7 @@ Pas besoin d'être expert : suis les étapes dans l'ordre et coche-les une par u
 |---|---|---|
 | [Microsoft .NET Framework 4.8 Runtime](https://dotnet.microsoft.com/en-us/download/dotnet-framework/net48) | Permet d'exécuter les mods .NET. | Installation Windows normale. |
 | [Script Hook V](https://www.dev-c.com/gtav/scripthookv/) | Charge les scripts GTA ; prends aussi `xinput1_4.dll` fourni pour Enhanced. | Dossier principal de GTA. |
-| [NIBScriptHookVDotNet pour GTA Enhanced](https://www.patreon.com/posts/nibmods-menu-and-22783974) | Charge les scripts .NET de notre mod. | Dossier principal de GTA. |
+| [NIBScriptHookVDotNet pour GTA Enhanced](https://www.patreon.com/posts/nibmods-menu-and-22783974) | Charge le mod avec l'API v2. La DLL v3 est optionnelle pour le rendu `GTA.UI.CustomSprite`; le HUD natif reste disponible sans elle. | Dossier principal de GTA. |
 
 Dans le téléchargement NIB, choisis bien la version **GTA V Enhanced** lorsqu'elle est proposée. Les fichiers ScriptHook/NIB vont à côté de l'exécutable du jeu, **pas** dans `Scripts`.
 
@@ -60,9 +60,9 @@ Crée un dossier nommé exactement `Scripts` s'il n'existe pas encore. C'est le 
 
 #### 4. Copie les fichiers au bon endroit
 
-L'archive contient `DonJCustomNpcPlacer.ENdll`, `manifest.json`, `DonJCustomNpcPlacer.pdb` (facultatif) et `INSTALLATION_SIMPLE.txt`.
+L'archive contient `DonJCustomNpcPlacer.ENdll`, `manifest.json`, `DonJCustomNpcPlacer.pdb` (facultatif), `Assets\Justice` avec trois PNG obligatoires et `INSTALLATION_SIMPLE.txt`.
 
-Copie uniquement `DonJCustomNpcPlacer.ENdll` et `manifest.json` dans `Scripts`. Renomme ensuite `manifest.json` en **`DonJCustomNpcPlacer.manifest.json`**. Tu peux aussi copier le `.pdb` si tu veux des logs plus lisibles. Laisse `INSTALLATION_SIMPLE.txt` hors de `Scripts` et ne copie jamais le dossier entier de l'archive.
+Copie `DonJCustomNpcPlacer.ENdll`, le dossier complet `Assets\Justice` et `manifest.json` dans `Scripts`. Renomme ensuite `manifest.json` en **`DonJCustomNpcPlacer.manifest.json`**. Tu peux aussi copier le `.pdb` si tu veux des logs plus lisibles. Laisse `INSTALLATION_SIMPLE.txt` hors de `Scripts` et ne copie jamais le dossier entier de l'archive.
 
 Ton installation doit ressembler à ceci :
 
@@ -73,10 +73,15 @@ Grand Theft Auto V Enhanced\
 ├── xinput1_4.dll
 ├── NIBScriptHookVDotNet.asi
 ├── NIBScriptHookVDotNet2.dll
+├── NIBScriptHookVDotNet3.dll              (facultatif, majeure 3 ou plus)
 └── Scripts\
     ├── DonJCustomNpcPlacer.ENdll
     ├── DonJCustomNpcPlacer.manifest.json
-    └── DonJCustomNpcPlacer.pdb             (facultatif)
+    ├── DonJCustomNpcPlacer.pdb             (facultatif)
+    └── Assets\Justice\
+        ├── immatriculation.png
+        ├── tenue.png
+        └── mandat.png
 ```
 
 #### 5. Lance et teste le mod
@@ -86,7 +91,7 @@ Grand Theft Auto V Enhanced\
 3. Pour un premier test, choisis `Placement type: NPC`, sélectionne un modèle, démarre `Precise camera placement`, puis place le PNJ avec `Enter` ou le clic gauche.
 
 > [!TIP]
-> `F10` ne fait rien ? Respire : vérifie d'abord le dossier `Scripts`, les quatre fichiers à la racine du jeu et le mode Histoire. Ensuite, suis la [procédure détaillée](#installation) ou le [dépannage](#troubleshooting).
+> `F10` ne fait rien ? Respire : vérifie d'abord le dossier `Scripts`, les quatre fichiers requis à la racine du jeu et le mode Histoire. Ensuite, suis la [procédure détaillée](#installation) ou le [dépannage](#troubleshooting).
 
 ### English: your installation mission
 
@@ -98,7 +103,7 @@ No expert knowledge needed: follow the steps in order and tick them off one at a
 |---|---|---|
 | [Microsoft .NET Framework 4.8 Runtime](https://dotnet.microsoft.com/en-us/download/dotnet-framework/net48) | Lets Windows run .NET mods. | Install it normally in Windows. |
 | [Script Hook V](https://www.dev-c.com/gtav/scripthookv/) | Loads GTA scripts; also take the supplied Enhanced `xinput1_4.dll`. | GTA's main folder. |
-| [NIBScriptHookVDotNet for GTA Enhanced](https://www.patreon.com/posts/nibmods-menu-and-22783974) | Loads our mod's .NET scripts. | GTA's main folder. |
+| [NIBScriptHookVDotNet for GTA Enhanced](https://www.patreon.com/posts/nibmods-menu-and-22783974) | Loads the mod through API v2. The v3 DLL is optional for `GTA.UI.CustomSprite`; the native HUD remains available without it. | GTA's main folder. |
 
 When NIB offers a choice, select the **GTA V Enhanced** version. ScriptHook/NIB files belong next to the game executable, **not** inside `Scripts`.
 
@@ -131,9 +136,9 @@ Create a folder named exactly `Scripts` if it is missing. This is the only subfo
 
 #### 4. Copy the files to the right place
 
-The archive contains `DonJCustomNpcPlacer.ENdll`, `manifest.json`, the optional `DonJCustomNpcPlacer.pdb`, and `INSTALLATION_SIMPLE.txt`.
+The archive contains `DonJCustomNpcPlacer.ENdll`, `manifest.json`, the optional `DonJCustomNpcPlacer.pdb`, the required three PNG files under `Assets\Justice`, and `INSTALLATION_SIMPLE.txt`.
 
-Copy only `DonJCustomNpcPlacer.ENdll` and `manifest.json` into `Scripts`. Then rename `manifest.json` to **`DonJCustomNpcPlacer.manifest.json`**. You may also copy the `.pdb` for clearer logs. Keep `INSTALLATION_SIMPLE.txt` outside `Scripts`, and never copy the whole archive folder.
+Copy `DonJCustomNpcPlacer.ENdll`, the complete `Assets\Justice` directory, and `manifest.json` into `Scripts`. Then rename `manifest.json` to **`DonJCustomNpcPlacer.manifest.json`**. You may also copy the `.pdb` for clearer logs. Keep `INSTALLATION_SIMPLE.txt` outside `Scripts`, and never copy the whole archive folder.
 
 Your finished installation should look like this:
 
@@ -144,10 +149,15 @@ Grand Theft Auto V Enhanced\
 ├── xinput1_4.dll
 ├── NIBScriptHookVDotNet.asi
 ├── NIBScriptHookVDotNet2.dll
+├── NIBScriptHookVDotNet3.dll              (optional, major 3 or newer)
 └── Scripts\
     ├── DonJCustomNpcPlacer.ENdll
     ├── DonJCustomNpcPlacer.manifest.json
-    └── DonJCustomNpcPlacer.pdb             (optional)
+    ├── DonJCustomNpcPlacer.pdb             (optional)
+    └── Assets\Justice\
+        ├── immatriculation.png
+        ├── tenue.png
+        └── mandat.png
 ```
 
 #### 5. Launch and test the mod
@@ -157,7 +167,7 @@ Grand Theft Auto V Enhanced\
 3. For a first test, choose `Placement type: NPC`, select a model, start `Precise camera placement`, then place the NPC with `Enter` or left click.
 
 > [!TIP]
-> Nothing happens when you press `F10`? Take a breath: first check the `Scripts` folder, the four files in GTA's main folder, and Story Mode. Then follow the [detailed installation guide](#installation) or [troubleshooting guide](#troubleshooting).
+> Nothing happens when you press `F10`? Take a breath: first check the `Scripts` folder, the four required files in GTA's main folder, and Story Mode. Then follow the [detailed installation guide](#installation) or [troubleshooting guide](#troubleshooting).
 
 ## Table of Contents
 
@@ -225,6 +235,7 @@ Grand Theft Auto V Enhanced\
         <li><strong>Configurable NPCs</strong> with weapons, health, armor, behaviors, and respawn.</li>
         <li><strong>Phone contacts</strong>: Cartel with <code>C</code>, Ballas with <code>R</code>, high-security escort with <code>L</code>.</li>
         <li><strong>Terminator mode</strong>: T-800 first-person HUD, red/night/thermal vision, resistance, and heavy melee impacts.</li>
+        <li><strong>Advanced Justice</strong>: evidence-based cases, custody, and persistent plate/outfit recognition with local search warrants.</li>
         <li><strong>Collectible cash</strong> with several amounts for rewarding zones and missions.</li>
         <li><strong>Persistent scenes</strong> with automatic respawn and XML saves.</li>
       </ul>
@@ -524,11 +535,54 @@ To leave the mode, open the `F10` menu again and select `Mode Terminator`. The m
 
 ### Advanced Justice
 
+<p align="center">
+  <img src="Github%20images/justice-dossier.png" alt="Menu Justice avancée affichant le dossier judiciaire, le mandat actif, les infractions et la peine du personnage" width="100%">
+</p>
+
+<p align="center"><em>Un véritable dossier judiciaire par protagoniste, directement consultable depuis F10.</em></p>
+
+**Justice avancée** transforme les poursuites du mode Histoire en un système cohérent et persistant. Les infractions doivent être prouvées, les témoins comptent, les sanctions s'accumulent dans un dossier propre à chaque héros et une fuite peut laisser derrière elle un mandat capable de reconnaître plus tard le véhicule, la plaque ou la tenue du joueur.
+
+| Pilier | Comportement en jeu |
+|---|---|
+| **Enquête fondée sur les preuves** | Une victime, un témoin crédible, un policier ou un signal GTA corrélé doit confirmer l'acte. Le niveau de recherche seul n'invente jamais une infraction. |
+| **Trois dossiers indépendants** | Michael, Franklin et Trevor conservent séparément leurs affaires, amendes, peines, mandats, condamnations et récidive. |
+| **Mandat et reconnaissance persistants** | Après une fuite, la police peut mémoriser plaque, véhicule, couleurs, tenue et apparence, puis rechercher progressivement le joueur dans une zone locale limitée. |
+| **Arrestation et détention jouables** | Amende, Mission Row ou Bolingbroke selon la gravité. Le joueur reste mortel; les combats entre détenus sont tolérés, mais attaquer un garde déclenche une riposte locale avec au moins deux étoiles. Une mort causée par ce garde renvoie en cellule et ajoute exactement 60 secondes. |
+| **Mort policière et reprise sûre** | Une mort policière prouvée conduit au site de détention sous un masque continu, sans passage jouable à l'hôpital et sans emprisonner le mauvais protagoniste. |
+| **Persistance résistante aux crashs** | XML principal, backup et journal transactionnel empêchent les doubles débits, doubles peines et reprises ambiguës après un crash ou un changement de héros. |
+
+> [!TIP]
+> Active et consulte le système dans `F10` → `JUSTICE`. Les détails d'architecture sont dans la [documentation développeur](docs/documentation-developpeur.md), et les scénarios de contrôle en jeu dans la [validation manuelle Justice](docs/validation-justice-manuelle.md).
+
+#### Du mandat à l'identification
+
+<p align="center">
+  <img src="Github%20images/justice-mandat-actif.png" alt="Notification Justice indiquant une poursuite perdue tandis que le mandat reste actif" width="100%">
+</p>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="Github%20images/justice-zone-recherche.png" alt="Carte de Los Santos montrant la zone locale de recherche liée au mandat Justice" width="100%"><br>
+      <sub>Le mandat crée une zone de recherche locale, bornée dans le temps et dans l'espace.</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="Github%20images/justice-identification-police.png" alt="Joueur identifié par la police dans la zone de recherche avec un niveau de recherche de quatre étoiles" width="100%"><br>
+      <sub>Un observateur crédible peut identifier progressivement le joueur et réactiver le niveau mémorisé.</sub>
+    </td>
+  </tr>
+</table>
+
 **Advanced Justice** is an optional story-mode legal system. It is disabled by default and remembers each protagonist's choice. The `Justice du héros joué` row in the dedicated `F10` category always enables or disables only the protagonist currently being played and names that protagonist in its value.
 
 Justice keeps three independent character profiles: **Michael**, **Franklin**, and **Trevor** each retain their own enable/disable choice, active case, criminal record, recidivism, debt, and custody state. The `Personnage` row in `F10` cycles between files with Left/Right and explicitly marks the selection as `JOUÉ` or `CONSULTATION`; it does not redirect the activation toggle. `Payer la dette` can debit only when the selected file is the currently played canonical character and now uses the same double-confirmation safety as the other destructive actions. `Réinitialiser ce personnage` names the captured target profile and explicitly covers its record, case, recidivism, debt, and custody data. A detained active hero can be reset only through a durable release-and-restore transaction; an inactive profile or a conflicting release, payment, backup-repair, profile-switch, or reset transaction is never overwritten. If either copy of the reset precommit fails, the intent remains pending and no inventory, custody, or profile effect is applied until both the primary XML and `.bak` carry it.
 
 Its central rule is evidence: an illegal act starts as a provisional incident and is discarded silently unless a credible victim, civilian witness, police observer, or correlated GTA report confirms that specific act. Losing the only witness before the report means no Justice charge. A wanted-level change by itself never invents a crime.
+
+Justice also includes a persistent police-recognition layer. After a genuine escape in which GTA naturally loses the wanted level, the module records the last usable vehicle identity (model, normalized plate, and primary/secondary paint), the protagonist's outfit and visible appearance, and a **local warrant** centered on the last known position. The local warrant is a temporary search zone, not a new criminal charge: its radius and lifetime increase with the remembered wanted level. A police officer or civilian witness with a credible view must progressively identify the player inside that zone whenever the current wanted level is below the warrant's remembered floor, including while GTA still shows fewer non-zero stars. Civilian reports include an additional delay; the system does not instantly reacquire the player merely for entering the radius. Each observer's progress is tied to its handle, model, and native memory address, so a handle recycled by GTA starts with zero exposure and no inherited civilian report timer. If neither the stored nor current observer exposes a native address, only the exact same live `Ped` wrapper may retain that progress. Wanted reads fail closed to the last reliable level: an unavailable getter never fabricates a loss of stars or opens recognition on the assumption that the player is at zero.
+
+Recognition remains identity-sensitive. The same model, plate, and paint can identify a reported vehicle; repainting that same plated vehicle neutralizes its visual report, while changing to another plate no longer matches it. A vehicle without a usable plate requires both the same model and paint. Reported outfits use the ped model, clothing components, textures, palettes, and props; changing clothes, visible appearance, or wearing a face mask progressively reduces recognition risk but does not grant unconditional immunity. Body recognition is fail-closed: without valid persisted appearance evidence and a valid current appearance signature, the player body contributes no exposure and only independently proven vehicle evidence may still identify them. The compact top-right HUD uses the plate, outfit, and local-warrant icons to show active reports and the zone timer.
 
 The bounded queues protect the most important facts first: homicide and other serious victim incidents cannot be evicted by minor pending events. Witness collection reserves priority for the victim of a possible homicide, then living police observers, then other living credible witnesses, so a crowd or nearby corpses cannot hide decisive evidence.
 
@@ -536,7 +590,7 @@ Persistent GTA damage flags are edge-triggered through a bounded victim/attacker
 
 Pending incidents are resolved in two phases: the mod first collects and qualifies every result in reusable bounded buffers, then resolves conflicts before mutating the active case or displaying anything. A correlated violent offence therefore replaces the provisional dangerous-shooting entry without modifying the incident list while it is being traversed.
 
-Confirming an ordinary crime never writes, raises, or maintains the player's wanted level. GTA remains the sole authority for stars produced by crimes; Justice only observes those changes as possible evidence and preserves its own case or warrant. The deliberate exception is a confirmed prison escape, which applies a three-star minimum.
+Confirming an ordinary crime never writes, raises, or maintains the player's wanted level. GTA remains the sole authority for stars initially produced by crimes; Justice only observes those changes as possible evidence and preserves its own case or warrant. The two explicit follow-up mutations are a confirmed prison escape, which applies a three-star minimum, and a later identity match from persisted recognition evidence, which can restore only the wanted minimum remembered from that earlier pursuit.
 
 Once an incident is confirmed, the offence, warrant, or escape notice uses GTA's native top banner instead of a permanent Justice window. Only the detention belonging to the protagonist actually being played keeps a discreet single-line status at the top-left, such as `BOLINGBROKE · 08:18`; switching to either other hero hides that line and exposes the new hero's own independent Justice profile. The complete detail remains available in `F10`. Confirmed charges build an active case and may create a warrant. Prior convictions remain in a separate record and progressively increase sanctions, while the recidivism index slowly decreases after long periods of clean free-roam gameplay.
 
@@ -546,24 +600,26 @@ Possible outcomes are:
 
 - a fine with immediate release for the lightest cases;
 - detention at Mission Row for short sentences;
-- detention in Bolingbroke for serious cases, with a strict maximum of 10 gameplay minutes;
+- detention in Bolingbroke for serious cases, with a strict maximum of 10 gameplay minutes for the judicial base sentence; guard-caused custody deaths may add full one-minute extensions beyond that base cap;
 - a persistent warrant if the player escapes the police without being captured.
 
 Fines have no gameplay balance ceiling: confirmed charges continue accumulating their full dollar value. Arithmetic and XML validation use a purely technical saturation limit of **$1,000,000,000,000** (`10^12`) to prevent overflow or corrupt data; this is not a reachable gameplay cap intended to reduce a sentence.
 
-The sentence scale is one third of the former scale. Non-zero base sentences are now 20 seconds for vehicle destruction; 30 seconds for simple assault or hit-and-run; 40 seconds for evading police, accessory to assaulting an officer, or carjacking; 60 seconds for resisting arrest; 80 seconds for aggravated assault; 120 seconds for assaulting an officer; 140 seconds for accessory to murdering an officer; 160 seconds for manslaughter; 240 seconds for murdering a civilian; 300 seconds for escape; and 360 seconds for murdering an officer. Modifiers and recidivism use a five-second quantum, and the accumulated sentence always saturates at 600 seconds.
+The sentence scale is one third of the former scale. Non-zero base sentences are now 20 seconds for vehicle destruction; 30 seconds for simple assault or hit-and-run; 40 seconds for evading police, accessory to assaulting an officer, or carjacking; 60 seconds for resisting arrest; 80 seconds for aggravated assault; 120 seconds for assaulting an officer; 140 seconds for accessory to murdering an officer; 160 seconds for manslaughter; 240 seconds for murdering a civilian; 300 seconds for escape; and 360 seconds for murdering an officer. Modifiers and recidivism use a five-second quantum, and the accumulated judicial base sentence always saturates at 600 seconds. Custody guard penalties are stored and served separately.
 
 Mission Row is used below 300 seconds and Bolingbroke from 300 through 600 seconds. When a proven unpaid fine must be converted instead of debited, the rate is **$150 per second**, rounded to five seconds, with a minimum addition of 10 seconds and a maximum addition of 100 seconds. The site and global sentence caps still apply after conversion.
 
-During detention, the inventory is safely snapshotted before confiscation and restored to the same protagonist only after an exact verification of weapons, ammunition, components, tints, clips, and selected weapon. Once confiscation is verified, the player may fight and defend themselves with bare hands; weapon selection, reload, and the weapon wheel remain blocked. If confiscation cannot be proved, the stricter non-destructive control lock stays active. Fighting, assaulting or killing a guard or inmate never triggers a custom disciplinary charge, extra sentence, invincibility window, forced taser order, black fade, or return to the prison entrance or cell. Guards, inmates, police and the player are left to GTA's natural combat and wanted behavior. An incomplete restoration remains persisted and recoverable; script shutdown merges back the snapshot without calling `RemoveAll`, so an abort cannot destroy a partially restored loadout. The DLC-weapon enumeration uses one reusable 312-byte unmanaged structure required by `GET_DLC_WEAPON_DATA`; if allocation or native decoding fails, the inventory is left untouched and only weapon controls are locked.
+During detention, the inventory is safely snapshotted before confiscation and restored to the same protagonist only after an exact verification of weapons, ammunition, components, tints, clips, and selected weapon. Once confiscation is verified, the player may fight and defend themselves with bare hands; weapon selection, reload, and the weapon wheel remain blocked. If confiscation cannot be proved, the stricter non-destructive control lock stays active. Inmate-on-inmate and player-on-inmate fights remain ordinary GTA events and are ignored by Justice guards. Damaging an owned custody guard starts a local retaliation episode: the current wanted level is raised only to a minimum of two stars, never lowered, ambient police remain suppressed outside the prison, and the living owned guards explicitly fight the player without a global relationship change or per-frame task spam. The response ends on death, legal release, or escape. No disciplinary charge, forced taser sequence, or playable invincibility window is introduced. An incomplete restoration remains persisted and recoverable; script shutdown merges back the snapshot without calling `RemoveAll`, so an abort cannot destroy a partially restored loadout. The DLC-weapon enumeration uses one reusable 312-byte unmanaged structure required by `GET_DLC_WEAPON_DATA`; if allocation or native decoding fails, the inventory is left untouched and only weapon controls are locked.
 
 Capture and payment are also tied to the proven canonical slot of the active Michael, Franklin, or Trevor profile. A custom Iron Man or other transformed ped may reuse the last canonical slot observed in the same session, including after an initial capture death or a custody death, but only when the persisted death latch, active profile, and last canonical identity all prove the same hero. If that proven custom respawn still exposes no cash slot, the fine is converted to detention without touching any protagonist's bank balance, and the transfer continues instead of waiting forever. An unknown identity can never adopt another profile merely because one protagonist becomes available after death. In that case the capture waits safely or returns to a warrant, without disarming or charging another protagonist. Cash writes persist one of three explicit outcomes: succeeded, rejected, or unknown. A rejected write converts the fine to detention; only a genuinely ambiguous write uses the bounded at-most-once reconciliation policy. Fine debits, voluntary payments, and escape confiscation use persisted, resumable intents so a crash cannot debit twice or remove weapons before the recovery state exists. Any fine paid voluntarily before capture is subtracted from the conviction balance during the capture precommit; a partial or complete payment can therefore never make the otherwise valid judgment XML fail.
 
-Time pauses during loading, missions, cinematics, death, pause, and the character-change transition itself. Once another protagonist is playable, a stable inactive profile in the `Incarcerated` phase continues serving its sentence in gameplay time without showing its HUD or applying its prison scene, police suppression, inventory, or controls to the current hero. During each uninterrupted active-gameplay interval, every profile keeps its own millisecond remainder; there is no UTC or offline catch-up. If an off-screen sentence reaches zero, release and inventory restoration wait until that exact protagonist is played again. A death while detained is the only ordinary prison event that returns the same protagonist to the correct Mission Row or Bolingbroke cell; the operation is idempotent and adds no time or custody effect. The former prison activities, cyan cylinders, `E` interaction, scenario tasks, cooldowns, and sentence reductions have been removed. Bolingbroke's authorized volume follows a fixed eight-point perimeter around the complete prison enclosure rather than its central yard or one oversized rectangle; its outside corners no longer extend custody beyond the walls. Staying outside that perimeter for six continuous seconds counts as one escape, keeps the remaining debt and sentence, confiscates the stored inventory, and applies a minimum of three wanted stars.
+When a proven police pursuit death creates its exact `PoliceCapture` DeathFront, Justice fades out immediately while the ped is still dead and keeps that mask across GTA's respawn. The runtime verifies the real faded/fading state on every pending tick and reissues the fade if GTA reopens the screen. The first compatible living ped is held at the sentence-appropriate custody site before the primary/backup WAL confirmation finishes; this physical holding does not judge, debit, confiscate, or clear the pending front. The screen returns only after position, collision, mobility, and mortality have all been verified. Once both persistence copies confirm the front, the normal capture continues exactly once. A real protagonist switch releases the screen without ever moving or charging the incoming hero. At the confirmed arrest boundary, before inventory removal or custody teleport, a separate durable recognition command clears that profile's plate, outfit/appearance, and local-warrant evidence. The same reset also applies when a fully paid arrest requires no cell, so all three HUD icons disappear after every confirmed arrest or police-death capture.
+
+Time pauses during loading, missions, cinematics, death, pause, and the character-change transition itself. Once another protagonist is playable, a stable inactive profile in the `Incarcerated` phase continues serving its total remaining time in gameplay without showing its HUD or applying its prison scene, police suppression, inventory, or controls to the current hero. During each uninterrupted active-gameplay interval, every profile keeps its own millisecond remainder; there is no UTC or offline catch-up. If an off-screen sentence reaches zero, release and inventory restoration wait until that exact protagonist is played again. Any custody death returns the same protagonist to the correct Mission Row or Bolingbroke cell. If, and only if, an owned guard kills the player during an active guard-retaliation episode, the crash-safe DeathFront adds exactly 60 seconds once; another inmate, a third party, suicide, or an old damage trace adds nothing. Guard extensions are served before the base sentence, survive escape/recapture, and are cleared by legal release, amnesty, or profile reset. The former prison activities, cyan cylinders, `E` interaction, scenario tasks, cooldowns, and sentence reductions have been removed. Bolingbroke's authorized volume follows a fixed eight-point perimeter around the complete prison enclosure rather than its central yard or one oversized rectangle; its outside corners no longer extend custody beyond the walls. Staying outside that perimeter for six continuous seconds counts as one escape, keeps the remaining debt and total time, confiscates the stored inventory, and applies a minimum of three wanted stars.
 
 Legal release durably precommits both the release and one wanted-clear attempt in the primary XML and its backup before touching GTA. The attempt is deliberately **at most once**: after the hero regains control, a rejected or ambiguous result is logged but never retried later, because a late retry could erase stars earned by a new crime. Reloading an unacknowledged release therefore finishes only the XML acknowledgement, inventory, and location stages that remain safe to repeat.
 
-Prison guards and inmates are spawned with GTA's non-temporary events enabled and neutral initial relationship groups. The scene controller does not force a reaction after misconduct. It also yields to living peds while they are fighting, fleeing, stunned, or ragdolled, then waits for at least ten seconds of calm before any bounded navmesh return to a post or allowed area. A dead prison ped keeps its scene slot until the detention scene is torn down; it is not immediately replaced in front of the player.
+Prison guards and inmates are spawned with GTA's non-temporary events enabled and neutral initial relationship groups. The scene controller ignores inmate fights, but a proven hit on an owned guard activates only the bounded local guard response described above. It yields to living peds while they are fighting, fleeing, stunned, or ragdolled, then waits for at least ten seconds of calm before any bounded navmesh return to a post or allowed area. A dead prison ped keeps its scene slot until the detention scene is torn down; it is not immediately replaced in front of the player. The player is explicitly mortal throughout playable custody and after every exit; temporary teleport protection is released and verified as false before the screen is restored.
 
 Justice state remains a bounded XML 2.0 file. Its 16 MiB ceiling is sized for all three profiles at the documented limits (20 visible convictions and up to 512 consolidated charge summaries each), while still rejecting oversized or abusive files.
 
@@ -587,7 +643,25 @@ The Justice state is independent from scene saves and stores the three character
 DonJEnemySpawnerSaves\_justice_state.xml
 ```
 
+Police-recognition evidence is deliberately stored outside both scene saves and the judicial XML, with independent Michael, Franklin, and Trevor records. Its normal writable location is:
+
+```text
+Scripts\DonJJusticeRecognition\JusticeRecognition.xml
+```
+
+Its recoverable backup is `JusticeRecognition.xml.bak`, and runtime diagnostics are written beside it as `JusticeRecognition.log`. The main store also examines `JusticeRecognition.xml.tmp`, `.bak.tmp`, `.rollback`, and `.bak.rollback`; the newest valid variant is republished as an identical primary/backup pair. If all six are unreadable, every existing variant is moved into `JusticeRecognition.xml.corrupt-quarantine` and a fresh redundant pair is created. The same resolved directory contains the durable critical-command journal `JusticeRecognition.critical-intents.xml` and its identical `.bak`. Capture and explicit profile/global-clear commands return durable success only after both journal copies contain their stable command ID; amnesty and profile-reset paths do not make their Justice transaction terminal until that registration succeeds. Pending command IDs are loaded and replayed after a restart. A command is acknowledged and removed only after both `JusticeRecognition.xml` and its backup contain the requested clear, then both journal copies are republished without that command; any failed stage leaves it pending for an idempotent retry. A targeted capture or clear whose canonical profile is already absent is treated as idempotently satisfied only after that absence has itself been republished to both main-store copies, then its journal command is acknowledged without creating an empty profile. If all journal variants are unreadable, the existing primary, backup, `.tmp`, `.bak.tmp`, `.rollback`, and `.bak.rollback` files are moved out of every load path into `JusticeRecognition.critical-intents.xml.corrupt-quarantine`. A fresh identical primary/backup pair is created, then the current Justice intent is registered again before amnesty or reset may become terminal. If the preferred runtime data directory cannot be created, resolution falls back to `%LOCALAPPDATA%\DonJEnemySpawner\JusticeRecognition`, then to a `DonJJusticeRecognition` directory beside the assembly only as a final compatibility fallback. The official package still requires all three HUD assets at these exact installed paths:
+
+```text
+Scripts\Assets\Justice\immatriculation.png
+Scripts\Assets\Justice\tenue.png
+Scripts\Assets\Justice\mandat.png
+```
+
+The package and deployment validators reject an absent, unexpected, or hash-mismatched Justice asset. The runtime keeps a text fallback only as crash protection; that fallback does not make an incomplete installation valid.
+
 After the one-time upgrade reset, the ON/OFF row is always a reversible preference, not an amnesty. OFF pauses new Justice detection and ON resumes it without deleting the new case, sentence, fine, warrant, record, or recidivism and without clearing GTA's wanted level. The action may be temporarily unavailable only while a critical persistence or recovery boundary is still completing.
+
+The same toggle pauses the recognition layer without erasing plates, outfits, appearance evidence, or the local warrant. OFF removes the recognition blip and clears only in-memory observer progress; ON resumes the current protagonist's persisted recognition state. It never clears GTA's wanted level. Recognition data is removed only by an explicit profile/global reset or after a confirmed capture according to the Justice integration.
 
 `tools\repair-justice-state.ps1` remains only as a historical offline tool for one former v1 incident. It is not part of the current ON/OFF flow or the sentence-policy upgrade and must not be used to bypass the automatic, recovery-aware reset.
 
@@ -818,6 +892,7 @@ The current local installation has been validated with this exact stack:
 | ScriptHookV | `3889.0.1158.13` |
 | Enhanced ASI loader | `xinput1_4.dll` (`1.0.0.2`) |
 | NIBScriptHookVDotNet API v2 | `2.11.6` |
+| Optional NIBScriptHookVDotNet HUD provider | `NIBScriptHookVDotNet3.dll`, major `3` or newer when installed |
 
 The game folder is the folder where this file is located:
 
@@ -846,14 +921,24 @@ NIBScriptHookVDotNet.asi
 NIBScriptHookVDotNet2.dll
 ```
 
+`NIBScriptHookVDotNet3.dll` major 3 or newer is optional. When installed, it can
+provide the Justice `GTA.UI.CustomSprite` renderer; without it, the supported
+native P/T/M HUD fallback is used.
+
 Useful links:
 
 | Required file | Where to download it | Where to put it |
 |---|---|---|
 | `ScriptHookV.dll` `3889.0.1158.13` and Enhanced loader `xinput1_4.dll` | [Official Script Hook V - Alexander Blade](https://www.dev-c.com/gtav/scripthookv/) | In the main game folder |
-| `NIBScriptHookVDotNet.asi` and `NIBScriptHookVDotNet2.dll` `2.11.6` | [NIBMods Menu and .Net plugins - GTA Legacy and Enhanced - JulioNIB](https://www.patreon.com/posts/nibmods-menu-and-22783974) | In the main game folder |
+| `NIBScriptHookVDotNet.asi`, `NIBScriptHookVDotNet2.dll` `2.11.6`, and optionally `NIBScriptHookVDotNet3.dll` major 3 or newer | [NIBMods Menu and .Net plugins - GTA Legacy and Enhanced - JulioNIB](https://www.patreon.com/posts/nibmods-menu-and-22783974) | In the main game folder |
 
 For NIBScriptHookVDotNet, make sure you choose the **GTA Enhanced** version when it is offered.
+
+The assembly is still compiled against and runs all gameplay through API v2. The
+v3 DLL is not referenced by the project and is never bundled with this mod. If it
+is installed, packaging and deployment validate its reflected
+`GTA.UI.CustomSprite` contract strictly. If it is absent, packaging and deployment
+remain valid and the native P/T/M HUD fallback is used.
 
 Once this part is done, your main game folder should look like this:
 
@@ -864,6 +949,7 @@ Grand Theft Auto V Enhanced
   xinput1_4.dll
   NIBScriptHookVDotNet.asi
   NIBScriptHookVDotNet2.dll
+  NIBScriptHookVDotNet3.dll  (optional HUD provider)
   Scripts
 ```
 
@@ -887,17 +973,27 @@ DonJCustomNpcPlacer-game-ready
 5. Open `manifest.json` and confirm that `manifestVersion` is `2`, `sourceDirty` is `false`,
    `scriptApi.major` is `2`, `scriptApi.abiContract.sha256` contains
    64 hexadecimal characters, and `commit` matches the latest commit shown on
-   the `main` branch.
+   the `main` branch. `files.justiceAssets.{immatriculation,outfit,warrant}` must
+   name exactly the three Justice PNG paths and provide each size and SHA-256.
+   `hudRenderer` must set `optional=true`, `fallback=native`, `minimumMajor=3`,
+   `typeName=GTA.UI.CustomSprite`, and `contractVersion=1`. `available` says
+   whether a compatible provider was validated and, when true, its actual
+   assembly name and version are recorded.
 6. The verified package contains:
 
 ```text
 DonJCustomNpcPlacer.ENdll
 DonJCustomNpcPlacer.pdb
+Assets\
+  Justice\
+    immatriculation.png
+    tenue.png
+    mandat.png
 INSTALLATION_SIMPLE.txt
 manifest.json
 ```
 
-7. Copy `DonJCustomNpcPlacer.ENdll` and, optionally, `DonJCustomNpcPlacer.pdb` into:
+7. Copy `DonJCustomNpcPlacer.ENdll`, the complete `Assets\Justice` folder, and, optionally, `DonJCustomNpcPlacer.pdb` into:
 
 ```text
 Grand Theft Auto V Enhanced\Scripts
@@ -919,7 +1015,7 @@ The stable name lets the runtime diagnostic compare the loaded `.ENdll` with the
 
 > [!IMPORTANT]
 > Do not copy the package folder or `INSTALLATION_SIMPLE.txt` into `Scripts`.
-> Copy the `.ENdll`, the renamed manifest, and the optional matching `.pdb` from the same verified package.
+> Copy the `.ENdll`, the complete `Assets\Justice` tree, the renamed manifest, and the optional matching `.pdb` from the same verified package. The three Justice PNG files are mandatory even though the PDB remains optional.
 
 The package's `INSTALLATION_SIMPLE.txt` file also contains these steps in a simple text version. The repository keeps [the guide template](Mode-pour-jeu-ici/INSTALLATION_SIMPLE.txt), but no release binary is maintained manually there.
 
@@ -934,6 +1030,7 @@ Grand Theft Auto V Enhanced\ScriptHookV.dll
 Grand Theft Auto V Enhanced\xinput1_4.dll
 Grand Theft Auto V Enhanced\NIBScriptHookVDotNet.asi
 Grand Theft Auto V Enhanced\NIBScriptHookVDotNet2.dll
+Grand Theft Auto V Enhanced\NIBScriptHookVDotNet3.dll  (optional HUD provider)
 ```
 
 In the `Scripts` folder, you must have:
@@ -941,10 +1038,17 @@ In the `Scripts` folder, you must have:
 ```text
 Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.ENdll
 Grand Theft Auto V Enhanced\Scripts\DonJCustomNpcPlacer.manifest.json
+Grand Theft Auto V Enhanced\Scripts\Assets\Justice\immatriculation.png
+Grand Theft Auto V Enhanced\Scripts\Assets\Justice\tenue.png
+Grand Theft Auto V Enhanced\Scripts\Assets\Justice\mandat.png
 ```
 
-The manifest is part of the verified installation. It lets the runtime diagnostic
-confirm the exact commit and SHA-256 of the loaded mod.
+The manifest is part of the verified installation. It records the exact commit,
+the SHA-256 of the loaded mod, and the sizes and SHA-256 hashes of exactly these
+three required Justice assets. Its `hudRenderer` contract declares an optional
+native fallback plus the fixed `GTA.UI.CustomSprite` contract. When a v3 provider
+is present, its real assembly identity and version are recorded after strict
+validation; the provider itself is never packaged.
 
 The following matching file is optional, but you can leave it:
 
@@ -996,7 +1100,9 @@ Check in this order:
 5. The Enhanced loader `xinput1_4.dll` is in the main game folder.
 6. `NIBScriptHookVDotNet.asi` is in the main game folder.
 7. `NIBScriptHookVDotNet2.dll` is in the main game folder.
-8. No old mod file is still present in `Scripts`.
+8. If `NIBScriptHookVDotNet3.dll` is installed, it is major 3 or newer and exposes `GTA.UI.CustomSprite`; otherwise the native HUD fallback is expected.
+9. All three PNG files are present under `Scripts\Assets\Justice`.
+10. No old mod file is still present in `Scripts`.
 
 Old files to delete if they exist:
 
@@ -1011,7 +1117,8 @@ Scripts\DonJEnemySpawner.pdb
 
 ### Updating the Mod
 
-1. Close GTA V Enhanced and its loaders.
+1. Close GTA V Enhanced and its loaders. The deployer refuses to modify `Scripts`
+   while `GTA5_Enhanced`, `GTA5`, or `PlayGTAV` is running and never stops them itself.
 2. Download and extract `DonJCustomNpcPlacer-game-ready` from the latest
    successful `Safety` run triggered by a `push` to `main`, then confirm its
    manifest commit matches the current `main` commit.
@@ -1021,17 +1128,21 @@ Scripts\DonJEnemySpawner.pdb
 4. Copy the verified `DonJCustomNpcPlacer.ENdll` into `Scripts`, replacing the
    file with the same name. Do not delete the installed `.ENdll` before the new
    package has been extracted and validated.
-5. Copy the matching `DonJCustomNpcPlacer.pdb` if you want debug symbols.
-6. Copy the package's `manifest.json` into `Scripts` and replace the installed
+5. Copy the package's complete `Assets\Justice` directory into `Scripts`,
+   replacing all three Justice PNG files as one verified set.
+6. Copy the matching `DonJCustomNpcPlacer.pdb` if you want debug symbols.
+7. Copy the package's `manifest.json` into `Scripts` and replace the installed
    `DonJCustomNpcPlacer.manifest.json` while keeping that stable installed name.
-7. Recalculate the installed `.ENdll` SHA-256 and compare it with the manifest
-   again. Only after this succeeds, remove the four old aliases listed above,
+8. Recalculate the installed `.ENdll` and Justice-asset SHA-256 hashes and compare
+   them with the manifest again. Only after this succeeds, remove the four old aliases listed above,
    including `DonJCustomNpcPlacer.dll` and `DonJEnemySpawner.*`.
-8. Restart the game in story mode and press `F10`.
+9. Restart the game in story mode and press `F10`.
 
 When updating from a source checkout, prefer `tools\deploy-game-ready.ps1`; it
 validates every referenced NIB member against the API installed with GTA before
-it replaces the ENdll/PDB/manifest triplet transactionally.
+it replaces the ENdll, PDB, manifest, and the three Justice assets transactionally.
+It also checks that the game/script-host processes are stopped before the first
+directory creation, staging file, backup, replacement, or alias cleanup.
 
 ---
 
@@ -1044,9 +1155,13 @@ it replaces the ENdll/PDB/manifest triplet transactionally.
 Scripts\DonJCustomNpcPlacer.ENdll
 Scripts\DonJCustomNpcPlacer.pdb
 Scripts\DonJCustomNpcPlacer.manifest.json
+Scripts\Assets\Justice\immatriculation.png
+Scripts\Assets\Justice\tenue.png
+Scripts\Assets\Justice\mandat.png
 ```
 
-3. Saves can be deleted separately if you do not want to keep them.
+3. Scene/Justice saves and `Scripts\DonJJusticeRecognition` can be deleted
+   separately if you do not want to keep them.
 
 ---
 
@@ -1068,7 +1183,7 @@ The custom **DonJ Obsidian console** opens without covering the whole game world
 
 The seven categories are **NPC**, **Vehicles**, **Objects**, **Interiors**, **Scene**, **Advanced Justice**, and **Tools**. NPC is selected when the console first opens, and each category remembers its last selected row. Placement controls appear at the top of compatible categories; save/load actions are grouped under Scene; Advanced Justice contains the Michael/Franklin/Trevor selector, case and record views, voluntary payment, and protected profile reset; Terminator mode and cleanup actions are grouped under Tools.
 
-The monogram, icons, frames, and decorative elements are drawn directly by the mod. The console does not require an extra PNG, YTD, OIV, RPF, or Scaleform file.
+The Obsidian-console monogram, icons, frames, and decorative elements are drawn directly by the mod, so that console itself does not require an extra PNG, YTD, OIV, RPF, or Scaleform file. The separate police-recognition HUD is the deliberate exception and requires the three verified files under `Scripts\Assets\Justice`.
 
 ---
 
@@ -1221,6 +1336,7 @@ Windows x64
 Story mode / solo
 ScriptHookV 3889.0.1158.13 with xinput1_4.dll
 NIBScriptHookVDotNet API v2 2.11.6
+NIBScriptHookVDotNet3.dll major 3 or newer (optional reflected HUD provider)
 .NET Framework 4.8
 ```
 
@@ -1238,6 +1354,7 @@ Not guaranteed for:
 - RageMP;
 - older non-Enhanced versions;
 - installations without NIBScriptHookVDotNet2;
+- incompatible installed NIBScriptHookVDotNet3 HUD providers (absence uses the native fallback);
 - pirated or modified versions of the game.
 
 ---
@@ -1310,7 +1427,15 @@ dotnet build GTA5modDEV.sln -c Release `
   /p:GtaRoot="D:\Jeux\Grand Theft Auto V Enhanced"
 ```
 
-The deployment first creates and verifies a package, stages the new files inside the destination volume, checks their hashes, and only then replaces and re-reads the active `.ENdll`, PDB, and `DonJCustomNpcPlacer.manifest.json`. Legacy aliases are moved only after that verified triplet exists. If an alias is locked or any earlier validation/replacement fails, moved aliases and the previous active files are rolled back in reverse order instead of being deleted first.
+The deployment first refuses to continue while `GTA5_Enhanced`, `GTA5`, or
+`PlayGTAV` is active, without terminating any process. It then creates and verifies
+a package, stages the new files inside the destination volume, checks their hashes,
+and only then replaces and re-reads the active `.ENdll`, PDB,
+`DonJCustomNpcPlacer.manifest.json`, and the three files under `Assets\Justice`.
+Legacy aliases are moved only after that complete verified set exists. If an alias
+is locked or any earlier validation/replacement fails, moved aliases, the previous
+active files, and the previous Justice assets are rolled back in reverse order
+instead of being deleted first.
 
 To create a local package without deploying it:
 
@@ -1334,6 +1459,8 @@ Check that:
 - `DonJCustomNpcPlacer.ENdll` is in the `Scripts` folder;
 - `NIBScriptHookVDotNet.asi` is installed;
 - `NIBScriptHookVDotNet2.dll` is installed;
+- if `NIBScriptHookVDotNet3.dll` is installed, it is major 3 or newer and compatible;
+- all three files under `Scripts\Assets\Justice` match the manifest;
 - `ScriptHookV.dll` is compatible with your game version;
 - no old `DonJCustomNpcPlacer.dll` or `DonJEnemySpawner.*` alias is still present.
 
@@ -1349,7 +1476,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\collect-bug-logs.ps1
 
 Reports are created in `bug-reports\YYYYMMDD-HHMMSS-title`. This folder stays local and is ignored by Git to avoid sending personal logs to GitHub.
 
-The runtime logger first tries stable locations under the live `Scripts` folder and LocalAppData. The collector also inspects the .NET LocalAppData assembly shadow-copy cache so that a last legacy `DonJCustomNpcPlacer.log` is not missed after a crash.
+The runtime logger first tries stable locations under the live `Scripts` folder and LocalAppData. The collector takes `Scripts\DonJJusticeRecognition\JusticeRecognition.log` explicitly and also inspects the .NET LocalAppData assembly shadow-copy cache so that a last legacy `DonJCustomNpcPlacer.log` is not missed after a crash.
 
 Check the following logs:
 
@@ -1357,6 +1484,7 @@ Check the following logs:
 Grand Theft Auto V Enhanced\NIBScriptHookVDotNet.log
 Grand Theft Auto V Enhanced\ScriptHookV.log
 Grand Theft Auto V Enhanced\Scripts\*.log
+Grand Theft Auto V Enhanced\Scripts\DonJJusticeRecognition\JusticeRecognition.log
 ```
 
 If you use other mods, also check their possible logs.
@@ -1393,7 +1521,7 @@ To report a problem, open a GitHub issue with:
 
 - your GTA V Enhanced version;
 - your ScriptHookV version;
-- your NIBScriptHookVDotNet version;
+- your NIBScriptHookVDotNet v2 and v3 provider versions;
 - a precise description of the bug;
 - reproduction steps;
 - useful log files;
@@ -1405,6 +1533,7 @@ Useful logs:
 NIBScriptHookVDotNet.log
 ScriptHookV.log
 Scripts\*.log
+Scripts\DonJJusticeRecognition\JusticeRecognition.log
 menyooLog.txt
 ```
 
