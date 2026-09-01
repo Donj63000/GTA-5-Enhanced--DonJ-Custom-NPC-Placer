@@ -30,6 +30,9 @@ public sealed class JusticePreJudgmentHoldingTests
         string move = ReadMethod(
             custodySource,
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer");
+        string moveWithFallback = ReadMethod(
+            custodySource,
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback");
 
         AssertDoesNotContain(holding, "JusticeMarkStateDirty");
         AssertDoesNotContain(holding, "JusticeFlushStateNow");
@@ -50,12 +53,20 @@ public sealed class JusticePreJudgmentHoldingTests
             "IsJusticePreJudgmentHoldingGroundReady(safeTarget)",
             "SetEntityCoordsNoOffsetSafe(player, safeTarget)",
             "JusticeNativeHasCollisionLoadedAroundEntity");
+        AssertOrdered(
+            moveWithFallback,
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
+            "JusticeCustodyTransferTimeoutMs",
+            "TryJusticeEmergencyTeleport(",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(");
 
         AssertOrdered(
             holding,
             "ReassertJusticeCustodyRespawnTransferMask()",
-            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
             "IsInsideJusticeCustodyLayout(layout, player.Position)",
+            "CompleteJusticePreJudgmentHoldingStreamingProtection(player)",
+            "EnsureJusticePlayerIsMortal(player)",
             "EnsureJusticePlayerMobilityCore(player)",
             "TryRestoreJusticeCustodyRespawnTransferMask()");
     }
@@ -364,16 +375,26 @@ public sealed class JusticePreJudgmentHoldingTests
         player.Position = new GTA.Math.Vector3(1760.0f, 2700.0f, 45.0f);
         int fadeOutInside = CountNative(GTA.Native.Hash.DO_SCREEN_FADE_OUT);
         int fadeInInside = CountNative(GTA.Native.Hash.DO_SCREEN_FADE_IN);
-        Invoke(script, "UpdateJusticeCustodyRespawnTransferMask", player);
-        Invoke(
-            script,
-            "UpdateJusticePoliceDeathPreJudgmentHolding",
-            player,
-            2000);
-        Assert.AreEqual(fadeOutInside, CountNative(GTA.Native.Hash.DO_SCREEN_FADE_OUT));
-        Assert.AreEqual(fadeInInside, CountNative(GTA.Native.Hash.DO_SCREEN_FADE_IN));
+        for (int tick = 0; tick < 24; tick++)
+        {
+            Invoke(script, "UpdateJusticeCustodyRespawnTransferMask", player);
+            Invoke(
+                script,
+                "UpdateJusticePoliceDeathPreJudgmentHolding",
+                player,
+                2000 + (tick * 250));
+        }
+        Assert.AreEqual(
+            fadeOutInside,
+            CountNative(GTA.Native.Hash.DO_SCREEN_FADE_OUT),
+            "Je ne remasque jamais le détenu tant que son maintien vérifié reste valide.");
+        Assert.AreEqual(
+            fadeInInside,
+            CountNative(GTA.Native.Hash.DO_SCREEN_FADE_IN),
+            "Je ne relance jamais la restitution après le premier maintien vérifié.");
         Assert.AreEqual(1760.0f, player.Position.X, 0.001f);
         Assert.AreEqual(2700.0f, player.Position.Y, 0.001f);
+        Assert.IsFalse(player.IsInvincible);
 
         // Je simule le précommit Capture : le latch brut est consommé, mais le
         // transfert normal n'a pas encore été vérifié.

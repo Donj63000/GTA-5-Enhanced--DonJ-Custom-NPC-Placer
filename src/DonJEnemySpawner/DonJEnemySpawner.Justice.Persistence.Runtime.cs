@@ -3200,7 +3200,8 @@ public sealed partial class DonJEnemySpawner
             source.DisciplineIntent,
             source.InventorySnapshot,
             source.HasActivityCooldownContainer,
-            source.Cooldowns);
+            source.Cooldowns,
+            source.GuardRetaliationActive);
     }
 
     private bool TryCreateJusticeFinancialWalRecoveryCandidate(

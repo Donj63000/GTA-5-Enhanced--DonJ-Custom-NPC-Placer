@@ -246,7 +246,8 @@ internal sealed class JusticeCustodyPersistenceSnapshot
         JusticeDisciplinePersistenceSnapshot disciplineIntent,
         JusticeInventoryPersistenceSnapshot inventorySnapshot,
         bool hasActivityCooldownContainer,
-        IEnumerable<JusticeActivityCooldownPersistenceSnapshot> cooldowns)
+        IEnumerable<JusticeActivityCooldownPersistenceSnapshot> cooldowns,
+        bool guardRetaliationActive = false)
     {
         Active = active;
         Site = site;
@@ -263,7 +264,9 @@ internal sealed class JusticeCustodyPersistenceSnapshot
         WaitingForRespawn = waitingForRespawn;
         DeathRebindPending = deathRebindPending;
         PlayerStateStored = playerStateStored;
-        StoredInvincible = playerStateStored && storedInvincible;
+        // Je garde le paramètre pour relire les snapshots 2.0 historiques, mais
+        // aucune nouvelle écriture ne doit pouvoir ressusciter cette protection.
+        StoredInvincible = false;
         StoredFrozen = playerStateStored && storedFrozen;
         StoredCanRagdoll = !playerStateStored || storedCanRagdoll;
         PlayerModelHash = playerModelHash;
@@ -276,6 +279,7 @@ internal sealed class JusticeCustodyPersistenceSnapshot
         DisciplineIntent = disciplineIntent;
         InventorySnapshot = inventorySnapshot;
         HasActivityCooldownContainer = hasActivityCooldownContainer;
+        GuardRetaliationActive = active && guardRetaliationActive;
 
         List<JusticeActivityCooldownPersistenceSnapshot> copy =
             new List<JusticeActivityCooldownPersistenceSnapshot>();
@@ -327,6 +331,7 @@ internal sealed class JusticeCustodyPersistenceSnapshot
     internal JusticeInventoryPersistenceSnapshot InventorySnapshot { get; }
     internal bool HasActivityCooldownContainer { get; }
     internal IReadOnlyList<JusticeActivityCooldownPersistenceSnapshot> Cooldowns => _cooldowns;
+    internal bool GuardRetaliationActive { get; }
 }
 
 public sealed partial class DonJEnemySpawner
@@ -371,7 +376,8 @@ public sealed partial class DonJEnemySpawner
             null,
             CaptureJusticeInventoryPersistenceSnapshot(),
             false,
-            new JusticeActivityCooldownPersistenceSnapshot[0]);
+            new JusticeActivityCooldownPersistenceSnapshot[0],
+            _justiceCustodyGuardRetaliationActive);
     }
 
     private JusticeCustodyPersistenceSnapshot CaptureLoadedJusticeCustodyPersistenceSnapshot(
@@ -409,7 +415,8 @@ public sealed partial class DonJEnemySpawner
             null,
             CaptureJusticeInventoryPersistenceSnapshot(),
             false,
-            new JusticeActivityCooldownPersistenceSnapshot[0]);
+            new JusticeActivityCooldownPersistenceSnapshot[0],
+            _justiceCustodyGuardRetaliationActive);
     }
 
     private JusticeFineDebitPersistenceSnapshot CaptureJusticeFineDebitPersistenceSnapshot()
@@ -528,7 +535,8 @@ public sealed partial class DonJEnemySpawner
             source.DisciplineIntent,
             source.InventorySnapshot,
             source.HasActivityCooldownContainer,
-            source.Cooldowns);
+            source.Cooldowns,
+            source.GuardRetaliationActive);
     }
 
     private static JusticeCustodyPersistenceSnapshot
@@ -570,7 +578,8 @@ public sealed partial class DonJEnemySpawner
             source.DisciplineIntent,
             source.InventorySnapshot,
             source.HasActivityCooldownContainer,
-            source.Cooldowns);
+            source.Cooldowns,
+            source.GuardRetaliationActive);
     }
 
     private static JusticeCustodyPersistenceSnapshot
@@ -614,7 +623,8 @@ public sealed partial class DonJEnemySpawner
             source.DisciplineIntent,
             source.InventorySnapshot,
             source.HasActivityCooldownContainer,
-            source.Cooldowns);
+            source.Cooldowns,
+            false);
     }
 
     private bool RestoreJusticeCustodyPersistenceSnapshot(
@@ -662,6 +672,8 @@ public sealed partial class DonJEnemySpawner
         _justiceLegalReleaseWantedClearAttempted =
             snapshot.LegalReleaseWantedClearAttempted;
         _justiceAmnestyWantedClearAttempted = snapshot.AmnestyWantedClearAttempted;
+        _justiceCustodyGuardRetaliationActive =
+            snapshot.Active && snapshot.GuardRetaliationActive;
 
         _justiceFineDebitIntent = RestoreJusticeFineDebitIntent(snapshot.FineDebitIntent);
         _justiceVoluntaryFinePaymentIntent =
@@ -685,7 +697,8 @@ public sealed partial class DonJEnemySpawner
 
         bool resumeCustody = snapshot.Active && _justiceCaseState != null &&
             _justiceCaseState.Phase != JusticePhase.Captured &&
-            _justiceCaseState.SentenceSeconds > 0;
+            (_justiceCaseState.SentenceSeconds > 0 ||
+             _justiceCaseState.CustodyGuardPenaltySeconds > 0L);
         _justiceCustodyRuntimeActive = resumeCustody;
         _justiceCustodyResumePending = resumeCustody;
         return true;
@@ -865,6 +878,10 @@ public sealed partial class DonJEnemySpawner
             writer,
             "amnestyWantedClearAttempted",
             snapshot.AmnestyWantedClearAttempted);
+        WriteJusticePersistenceAttribute(
+            writer,
+            "guardRetaliationActive",
+            snapshot.GuardRetaliationActive);
 
         WriteJusticeFineDebitPersistenceXml(writer, snapshot.FineDebitIntent);
         WriteJusticeVoluntaryPaymentPersistenceXml(writer, snapshot.VoluntaryPaymentIntent);

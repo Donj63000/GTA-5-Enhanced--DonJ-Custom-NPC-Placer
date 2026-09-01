@@ -3,7 +3,9 @@ obj/
 .vs/
 TestResults/
 bug-reports/
-artifacts/game-ready/
+/artifacts/
+/Pré Insall Mod/
+/fix-player-immortality.patch
 AGENTS.md
 mod.zip
 src.zip

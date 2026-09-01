@@ -311,7 +311,9 @@ public class StubRuntimeBehaviorTests
         Assert.IsFalse(player.FreezePosition);
         Assert.IsFalse(GetPrivateField<bool>(script, "_justiceCustodyStoredFrozen"));
         Assert.IsTrue(GetPrivateField<bool>(script, "_justiceStateDirty"));
-        Assert.IsTrue(player.IsInvincible, "Le correctif de mobilité ne doit pas altérer l'invincibilité.");
+        Assert.IsFalse(
+            player.IsInvincible,
+            "Le détenu doit rester mortel pendant toute réparation de mobilité.");
         Assert.IsFalse(player.CanRagdoll, "Le correctif de mobilité ne doit pas altérer le ragdoll.");
 
         Assert.IsTrue((bool)ensureMobility.Invoke(script, new object[] { player }));

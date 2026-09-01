@@ -184,6 +184,107 @@ function Get-ScriptApiReferenceMetadata {
     }
 }
 
+function Get-HudRendererProviderMetadata {
+    param(
+        [string]$Directory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
+        return $null
+    }
+
+    $directoryFullPath = Get-NormalizedFullPath -Path $Directory
+    $runtimePath = Join-Path $directoryFullPath "NIBScriptHookVDotNet3.dll"
+    if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+        return $null
+    }
+
+    $assemblyName = [System.Reflection.AssemblyName]::GetAssemblyName($runtimePath)
+    if ($assemblyName.Name -ne "NIBScriptHookVDotNet3" -or
+        $null -eq $assemblyName.Version -or
+        $assemblyName.Version.Major -lt 3) {
+        throw "Provider HUD present mais incompatible: NIBScriptHookVDotNet3 majeure 3 ou superieure attendue."
+    }
+
+    if ($PSVersionTable.PSEdition -eq "Desktop") {
+        # Je précharge les types graphiques avant l'inspection reflection-only du
+        # provider optionnel réellement présent dans les dépendances du package.
+        [void][System.Reflection.Assembly]::ReflectionOnlyLoad(
+            "System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a")
+        $assembly = [System.Reflection.Assembly]::ReflectionOnlyLoad(
+            [System.IO.File]::ReadAllBytes($runtimePath))
+    }
+    else {
+        $assembly = [System.Reflection.Assembly]::Load(
+            [System.IO.File]::ReadAllBytes($runtimePath))
+    }
+
+    $spriteType = $assembly.GetType("GTA.UI.CustomSprite", $false)
+    if ($null -eq $spriteType) {
+        throw "Provider HUD present mais type GTA.UI.CustomSprite absent."
+    }
+
+    $positionProperty = $spriteType.GetProperty(
+        "Position",
+        [System.Reflection.BindingFlags]"Public,Instance")
+    $sizeProperty = $spriteType.GetProperty(
+        "Size",
+        [System.Reflection.BindingFlags]"Public,Instance")
+    $colorProperty = $spriteType.GetProperty(
+        "Color",
+        [System.Reflection.BindingFlags]"Public,Instance")
+    $centeredProperty = $spriteType.GetProperty(
+        "Centered",
+        [System.Reflection.BindingFlags]"Public,Instance")
+    if ($null -eq $positionProperty -or
+        -not $positionProperty.CanWrite -or
+        $positionProperty.PropertyType.FullName -ne "System.Drawing.PointF" -or
+        $null -eq $sizeProperty -or
+        -not $sizeProperty.CanWrite -or
+        $sizeProperty.PropertyType.FullName -ne "System.Drawing.SizeF" -or
+        $null -eq $colorProperty -or
+        -not $colorProperty.CanWrite -or
+        $colorProperty.PropertyType.FullName -ne "System.Drawing.Color" -or
+        $null -eq $centeredProperty -or
+        -not $centeredProperty.CanWrite -or
+        $centeredProperty.PropertyType.FullName -ne "System.Boolean") {
+        throw "Provider HUD present mais propriétés CustomSprite incompatibles."
+    }
+
+    $compatibleConstructor = $false
+    foreach ($constructor in $spriteType.GetConstructors(
+        [System.Reflection.BindingFlags]"Public,NonPublic,Instance")) {
+        $parameters = @($constructor.GetParameters())
+        if ($parameters.Count -eq 3 -and
+            $parameters[0].ParameterType.FullName -eq "System.String" -and
+            $parameters[1].ParameterType.FullName -eq "System.Drawing.SizeF" -and
+            $parameters[2].ParameterType.FullName -eq "System.Drawing.PointF") {
+            $compatibleConstructor = $true
+            break
+        }
+    }
+
+    $compatibleDraw = $false
+    foreach ($method in $spriteType.GetMethods(
+        [System.Reflection.BindingFlags]"Public,Instance")) {
+        if ($method.Name -eq "Draw" -and @($method.GetParameters()).Count -eq 0) {
+            $compatibleDraw = $true
+            break
+        }
+    }
+
+    if (-not $compatibleConstructor -or -not $compatibleDraw) {
+        throw "Provider HUD present mais CustomSprite doit fournir .ctor(string, SizeF, PointF) et Draw()."
+    }
+
+    return [pscustomobject]@{
+        AssemblyName = $assemblyName.Name
+        Version = $assemblyName.Version.ToString()
+        Major = $assemblyName.Version.Major
+        TypeName = $spriteType.FullName
+    }
+}
+
 function Get-JusticeAssemblyMetadata {
     param(
         [Parameter(Mandatory = $true)]
@@ -209,7 +310,8 @@ function Get-JusticeAssemblyMetadata {
         "JusticeRepository",
         "JusticeWriteAheadLog",
         "JusticeXmlPersistenceCodec",
-        "JusticeWorldSnapshot"
+        "JusticeWorldSnapshot",
+        "DonJ.JusticeRecognition.DonJJusticeRecognitionScript"
     )
 
     if ($PSVersionTable.PSEdition -eq "Desktop") {
@@ -350,6 +452,53 @@ $buildEndll = Join-Path $buildFullPath "DonJCustomNpcPlacer.ENdll"
 $buildPdb = Join-Path $buildFullPath "DonJCustomNpcPlacer.pdb"
 $installationGuide = Join-Path $repositoryFullPath "Mode-pour-jeu-ici\INSTALLATION_SIMPLE.txt"
 
+$justiceAssetDefinitions = @(
+    [pscustomobject]@{
+        Key = "immatriculation"
+        RelativeName = "Assets/Justice/immatriculation.png"
+    },
+    [pscustomobject]@{
+        Key = "outfit"
+        RelativeName = "Assets/Justice/tenue.png"
+    },
+    [pscustomobject]@{
+        Key = "warrant"
+        RelativeName = "Assets/Justice/mandat.png"
+    }
+)
+
+$justiceAssets = @(
+    foreach ($definition in $justiceAssetDefinitions) {
+        $sourcePath = Join-Path `
+            (Join-Path $repositoryFullPath "src\DonJEnemySpawner") `
+            $definition.RelativeName
+        $buildPath = Join-Path $buildFullPath $definition.RelativeName
+
+        foreach ($requiredAsset in @($sourcePath, $buildPath)) {
+            if (-not (Test-Path -LiteralPath $requiredAsset -PathType Leaf) -or
+                (Get-Item -LiteralPath $requiredAsset).Length -le 0) {
+                throw "Asset Justice requis introuvable ou vide: $requiredAsset"
+            }
+        }
+
+        $sourceHash = Get-Sha256 -Path $sourcePath
+        $buildHash = Get-Sha256 -Path $buildPath
+        if ($sourceHash -ne $buildHash) {
+            throw "L'asset Justice de build ne correspond pas a la source: $($definition.RelativeName)"
+        }
+
+        [pscustomobject]@{
+            Key = $definition.Key
+            RelativeName = $definition.RelativeName
+            SourcePath = $sourcePath
+            BuildPath = $buildPath
+            SourceHash = $sourceHash
+            BuildHash = $buildHash
+            Length = (Get-Item -LiteralPath $buildPath).Length
+        }
+    }
+)
+
 foreach ($requiredFile in @($buildEndll, $buildPdb, $installationGuide)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Fichier requis introuvable pour le package: $requiredFile"
@@ -393,6 +542,8 @@ if (-not [string]::IsNullOrWhiteSpace($DependencyDirectory)) {
 $assemblyMetadata = Get-JusticeAssemblyMetadata `
     -BinaryPath $buildEndll `
     -DependencyDirectories $dependencyDirectories
+$hudRendererProvider = Get-HudRendererProviderMetadata `
+    -Directory $DependencyDirectory
 
 if ($assemblyMetadata.JusticeSchemaVersion -ne 2) {
     throw "Version de schema Justice incompatible: 2 attendue, $($assemblyMetadata.JusticeSchemaVersion) detectee."
@@ -454,10 +605,32 @@ try {
     $packageEndll = Join-Path $stagingDirectory "DonJCustomNpcPlacer.ENdll"
     $packagePdb = Join-Path $stagingDirectory "DonJCustomNpcPlacer.pdb"
     $packageGuide = Join-Path $stagingDirectory "INSTALLATION_SIMPLE.txt"
+    $packageJusticeDirectory = Join-Path $stagingDirectory "Assets\Justice"
 
+    New-Item -ItemType Directory -Path $packageJusticeDirectory | Out-Null
     Copy-Item -LiteralPath $buildEndll -Destination $packageEndll
     Copy-Item -LiteralPath $buildPdb -Destination $packagePdb
     Copy-Item -LiteralPath $installationGuide -Destination $packageGuide
+
+    $packagedJusticeAssetEntries = [ordered]@{}
+    foreach ($justiceAsset in $justiceAssets) {
+        $packageAssetPath = Join-Path $stagingDirectory $justiceAsset.RelativeName
+        Copy-Item -LiteralPath $justiceAsset.BuildPath -Destination $packageAssetPath
+
+        $packageAssetHash = Get-Sha256 -Path $packageAssetPath
+        $packageAssetLength = (Get-Item -LiteralPath $packageAssetPath).Length
+        if ($packageAssetHash -ne $justiceAsset.SourceHash -or
+            $packageAssetHash -ne $justiceAsset.BuildHash -or
+            $packageAssetLength -ne $justiceAsset.Length) {
+            throw "L'asset Justice package ne correspond pas a la source et au build: $($justiceAsset.RelativeName)"
+        }
+
+        $packagedJusticeAssetEntries[$justiceAsset.Key] = [ordered]@{
+            name = $justiceAsset.RelativeName
+            sizeBytes = $packageAssetLength
+            sha256 = $packageAssetHash
+        }
+    }
 
     $buildEndllHash = Get-Sha256 -Path $buildEndll
     $packageEndllHash = Get-Sha256 -Path $packageEndll
@@ -503,6 +676,16 @@ try {
                 sha256 = $abiContract.Sha256
             }
         }
+        hudRenderer = [ordered]@{
+            optional = $true
+            fallback = "native"
+            available = $null -ne $hudRendererProvider
+            assemblyName = if ($null -eq $hudRendererProvider) { $null } else { $hudRendererProvider.AssemblyName }
+            version = if ($null -eq $hudRendererProvider) { $null } else { $hudRendererProvider.Version }
+            minimumMajor = 3
+            typeName = "GTA.UI.CustomSprite"
+            contractVersion = 1
+        }
         expectedTypes = $assemblyMetadata.ExpectedTypes
         files = [ordered]@{
             binary = [ordered]@{
@@ -520,10 +703,11 @@ try {
                 sizeBytes = (Get-Item -LiteralPath $packageGuide).Length
                 sha256 = Get-Sha256 -Path $packageGuide
             }
+            justiceAssets = $packagedJusticeAssetEntries
         }
     }
 
-    $manifestJson = $manifest | ConvertTo-Json -Depth 6
+    $manifestJson = $manifest | ConvertTo-Json -Depth 8
     [System.IO.File]::WriteAllText(
         (Join-Path $stagingDirectory "manifest.json"),
         $manifestJson,
@@ -540,6 +724,15 @@ try {
         if ((Get-Sha256 -Path (Join-Path $outputFullPath "DonJCustomNpcPlacer.ENdll")) -ne $buildEndllHash -or
             (Get-Sha256 -Path (Join-Path $outputFullPath "DonJCustomNpcPlacer.pdb")) -ne $buildPdbHash) {
             throw "Le package final ne correspond plus aux fichiers de build apres publication locale."
+        }
+
+        foreach ($justiceAsset in $justiceAssets) {
+            $finalAssetPath = Join-Path $outputFullPath $justiceAsset.RelativeName
+            if (-not (Test-Path -LiteralPath $finalAssetPath -PathType Leaf) -or
+                (Get-Sha256 -Path $finalAssetPath) -ne $justiceAsset.SourceHash -or
+                (Get-Item -LiteralPath $finalAssetPath).Length -ne $justiceAsset.Length) {
+                throw "L'asset Justice final ne correspond plus a la source validee: $($justiceAsset.RelativeName)"
+            }
         }
     }
     catch {

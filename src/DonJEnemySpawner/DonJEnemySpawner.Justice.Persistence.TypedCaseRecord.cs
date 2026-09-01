@@ -171,6 +171,7 @@ internal sealed class JusticeCasePersistenceDto
         long voluntaryFinePaid,
         long fineInDispute,
         int sentenceSeconds,
+        long custodyGuardPenaltySeconds,
         bool hasWarrant,
         bool escapeWantedMinimumPending,
         bool escapeWantedMinimumAttempted,
@@ -193,6 +194,7 @@ internal sealed class JusticeCasePersistenceDto
         VoluntaryFinePaid = voluntaryFinePaid;
         FineInDispute = fineInDispute;
         SentenceSeconds = sentenceSeconds;
+        CustodyGuardPenaltySeconds = Math.Max(0L, custodyGuardPenaltySeconds);
         HasWarrant = hasWarrant;
         EscapeWantedMinimumPending = escapeWantedMinimumPending;
         EscapeWantedMinimumAttempted = escapeWantedMinimumAttempted;
@@ -225,6 +227,8 @@ internal sealed class JusticeCasePersistenceDto
     internal long FineInDispute { get; }
 
     internal int SentenceSeconds { get; }
+
+    internal long CustodyGuardPenaltySeconds { get; }
 
     internal bool HasWarrant { get; }
 
@@ -541,6 +545,7 @@ public sealed partial class DonJEnemySpawner
             state.VoluntaryFinePaid,
             state.FineInDispute,
             state.SentenceSeconds,
+            state.CustodyGuardPenaltySeconds,
             state.HasWarrant,
             state.EscapeWantedMinimumPending,
             state.EscapeWantedMinimumAttempted,
@@ -707,6 +712,9 @@ public sealed partial class DonJEnemySpawner
             "fineInDispute",
             Math.Max(0L, state.FineInDispute).ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString("sentenceSeconds", state.SentenceSeconds.ToString(CultureInfo.InvariantCulture));
+        writer.WriteAttributeString(
+            "custodyGuardPenaltySeconds",
+            state.CustodyGuardPenaltySeconds.ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString("hasWarrant", state.HasWarrant ? "true" : "false");
         writer.WriteAttributeString(
             "escapeWantedMinimumPending",

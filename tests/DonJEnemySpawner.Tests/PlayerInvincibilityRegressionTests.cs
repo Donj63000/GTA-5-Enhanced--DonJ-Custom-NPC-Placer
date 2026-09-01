@@ -34,6 +34,11 @@ public sealed class PlayerInvincibilityRegressionTests
         StringAssert.Contains(start, "TryAcquirePlayerInvincibility(");
         StringAssert.Contains(start, "PlayerInvincibilityOwner.Placement");
         StringAssert.Contains(start, "StopPlacementMode(true)");
+        AssertOrdered(
+            start,
+            "if (IsJusticeTemporaryPlayerProtectionForbidden())",
+            "return;",
+            "TryAcquirePlayerInvincibility(");
         StringAssert.Contains(stop, "TryRestorePlacementPlayerState()");
         Assert.IsFalse(
             stop.Contains("if (!_placementMode)"),
@@ -58,17 +63,119 @@ public sealed class PlayerInvincibilityRegressionTests
     }
 
     [TestMethod]
-    public void JusticeCustody_MisconductNeverAcquiresInvincibility()
+    public void JusticeCustody_GuardResponseNeverUsesDisciplineInvincibility()
     {
         string source = ReadSource("DonJEnemySpawner.Justice.Custody.cs");
+        string protectionSource = ReadSource(
+            "DonJEnemySpawner.PlayerProtection.cs");
 
         Assert.IsFalse(source.Contains("BeginJusticeCustodyDiscipline"));
         Assert.IsFalse(source.Contains("TryRestoreJusticeDisciplineInvincibility"));
         Assert.IsFalse(source.Contains("PlayerInvincibilityOwner.JusticeDiscipline"));
-        Assert.IsFalse(source.Contains("TASK_COMBAT_PED"));
+        StringAssert.Contains(
+            protectionSource,
+            "ReleaseJusticePreJudgmentInvincibilityAsMortal");
+        StringAssert.Contains(
+            protectionSource,
+            "EnsureJusticePlayerIsMortal");
+    }
+
+    [TestMethod]
+    public void Terminator_IsStoppedAndCannotReapplyDuringJusticeCustody()
+    {
+        string custodySource = ReadSource("DonJEnemySpawner.Justice.Custody.cs");
+        string terminatorSource = ReadSource("DonJEnemySpawner.TerminatorMode.cs");
+        string custodyStart = ExtractMethodBody(
+            custodySource,
+            "JusticeBeginCustodyTransfer");
+        string protectionForbidden = ExtractMethodBody(
+            custodySource,
+            "IsJusticeTemporaryPlayerProtectionForbidden");
+        string enable = ExtractMethodBody(terminatorSource, "EnableTerminatorMode");
+        string update = ExtractMethodBody(terminatorSource, "UpdateTerminatorMode");
+
+        AssertOrdered(
+            custodyStart,
+            "if (HasTerminatorRuntimeState())",
+            "DisableTerminatorMode(false)",
+            "EnsureJusticeCustodyEpisodeId()");
+        AssertOrdered(
+            enable,
+            "if (IsJusticeTemporaryPlayerProtectionForbidden())",
+            "return;",
+            "_terminatorModeEnabled = true");
+        AssertOrdered(
+            update,
+            "if (IsJusticeTemporaryPlayerProtectionForbidden())",
+            "DisableTerminatorMode(false)",
+            "return;",
+            "ApplyTerminatorModeToPlayer(player, false)");
+        StringAssert.Contains(
+            protectionForbidden,
+            "_justiceLegalReleaseFinalizationPending");
+        StringAssert.Contains(protectionForbidden, "_justiceAmnestyPending");
+        StringAssert.Contains(
+            protectionForbidden,
+            "_justiceActiveProfileResetPending");
     }
 
 #if DONJ_STUB_API
+    [TestMethod]
+    public void PlacementCannotAcquireInvincibilityAfterCustodyHasStarted()
+    {
+        StubRuntime.Reset();
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        Ped player = Game.Player.Character;
+        player.Handle = 79;
+        player.IsInvincible = false;
+        SetField(
+            script,
+            "_justiceCaseState",
+            new JusticeCaseState
+            {
+                Enabled = true,
+                Phase = JusticePhase.Incarcerated,
+                SentenceSeconds = 120
+            });
+
+        InvokeInstance(script, "StartPlacementMode");
+
+        Assert.IsFalse(player.IsInvincible);
+        Assert.IsFalse(GetField<bool>(script, "_placementMode"));
+        Assert.IsFalse(GetField<bool>(script, "_placementPlayerStateStored"));
+        Assert.AreEqual(
+            0,
+            Convert.ToInt32(GetField<object>(script, "_playerInvincibilityOwners")));
+    }
+
+    [DataTestMethod]
+    [DataRow("_justiceLegalReleaseFinalizationPending")]
+    [DataRow("_justiceAmnestyPending")]
+    [DataRow("_justiceActiveProfileResetPending")]
+    public void PlacementCannotAcquireInvincibilityDuringJusticeFinalization(
+        string pendingField)
+    {
+        StubRuntime.Reset();
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        Ped player = Game.Player.Character;
+        player.Handle = 80;
+        player.IsDead = false;
+        player.IsInvincible = false;
+        SetField(script, pendingField, true);
+
+        Assert.IsTrue((bool)InvokeInstance(
+            script,
+            "IsJusticeTemporaryPlayerProtectionForbidden"));
+        InvokeInstance(script, "StartPlacementMode");
+
+        Assert.IsFalse(player.IsInvincible);
+        Assert.IsFalse(GetField<bool>(script, "_placementMode"));
+        Assert.IsFalse(GetField<bool>(script, "_placementPlayerStateStored"));
+        Assert.AreEqual(
+            0,
+            Convert.ToInt32(GetField<object>(script, "_playerInvincibilityOwners")));
+    }
+
     [DataTestMethod]
     [DataRow(false)]
     [DataRow(true)]
@@ -193,6 +300,61 @@ public sealed class PlayerInvincibilityRegressionTests
 
         Assert.IsTrue(Release(script, player, justice, false, true));
         Assert.IsFalse(player.IsInvincible);
+    }
+
+    [TestMethod]
+    public void JusticeHoldingRelease_NormalizesAFormerTrueBaselineToMortal()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        Ped player = new Ped
+        {
+            Handle = 75,
+            IsInvincible = true
+        };
+        object justice = GetOwner("JusticePreJudgmentHolding");
+
+        bool baseline;
+        Assert.IsTrue(Acquire(script, player, justice, out baseline));
+        Assert.IsTrue(baseline);
+        Assert.IsTrue(player.IsInvincible);
+
+        Assert.IsTrue((bool)InvokeInstance(
+            script,
+            "ReleaseJusticePreJudgmentInvincibilityAsMortal",
+            player));
+
+        Assert.IsFalse(player.IsInvincible);
+        Assert.IsFalse(GetField<bool>(script, "_playerInvincibilityBaselineCaptured"));
+        Assert.IsFalse(GetField<bool>(script, "_playerInvincibilityRestorePending"));
+        Assert.AreEqual(
+            0,
+            Convert.ToInt32(GetField<object>(script, "_playerInvincibilityOwners")));
+    }
+
+    [TestMethod]
+    public void JusticeShutdown_NormalizesTheSharedRestoreBaselineToFalse()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        Ped player = new Ped
+        {
+            Handle = 76,
+            IsInvincible = true
+        };
+        object justice = GetOwner("JusticePreJudgmentHolding");
+
+        bool baseline;
+        Assert.IsTrue(Acquire(script, player, justice, out baseline));
+        Assert.IsTrue(baseline);
+
+        InvokeInstance(
+            script,
+            "PrepareJusticePlayerMortalityForShutdown",
+            player);
+        InvokeInstance(script, "ShutdownPlayerInvincibilityProtection");
+
+        Assert.IsFalse(player.IsInvincible);
+        Assert.IsFalse(GetField<bool>(script, "_playerInvincibilityBaselineCaptured"));
+        Assert.IsFalse(GetField<bool>(script, "_playerInvincibilityRestorePending"));
     }
 
     [TestMethod]
@@ -330,6 +492,13 @@ public sealed class PlayerInvincibilityRegressionTests
         FieldInfo field = ScriptType.GetField(fieldName, PrivateInstance);
         Assert.IsNotNull(field, "Champ privé introuvable: " + fieldName);
         return (T)field.GetValue(target);
+    }
+
+    private static void SetField(object target, string fieldName, object value)
+    {
+        FieldInfo field = ScriptType.GetField(fieldName, PrivateInstance);
+        Assert.IsNotNull(field, "Champ privé introuvable: " + fieldName);
+        field.SetValue(target, value);
     }
 
     private static void AssertOrdered(string source, params string[] markers)

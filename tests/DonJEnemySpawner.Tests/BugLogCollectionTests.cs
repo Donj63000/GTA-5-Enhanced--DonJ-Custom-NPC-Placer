@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 [TestClass]
@@ -35,6 +36,7 @@ public class BugLogCollectionTests
         StringAssert.Contains(script, "DirectStorageFix.log");
         StringAssert.Contains(script, "menyooLog.txt");
         StringAssert.Contains(script, "MapEditor.log");
+        StringAssert.Contains(script, "DonJJusticeRecognition\\JusticeRecognition.log");
         StringAssert.Contains(script, "Get-WinEvent");
         StringAssert.Contains(script, "GTA5_Enhanced");
         StringAssert.Contains(script, ".NET Runtime");
@@ -56,6 +58,9 @@ public class BugLogCollectionTests
             File.WriteAllText(Path.Combine(fakeGtaRoot, "NIBScriptHookVDotNet.log"), "NIB log test");
             File.WriteAllText(Path.Combine(fakeGtaRoot, "ScriptHookV.log"), "ScriptHookV log test");
             File.WriteAllText(Path.Combine(scriptsRoot, "DonJCustomNpcPlacer.log"), "runtime mod log test");
+            string recognitionRoot = Path.Combine(scriptsRoot, "DonJJusticeRecognition");
+            Directory.CreateDirectory(recognitionRoot);
+            File.WriteAllText(Path.Combine(recognitionRoot, "JusticeRecognition.log"), "recognition log test");
 
             RunCollector(title, fakeGtaRoot);
 
@@ -72,10 +77,24 @@ public class BugLogCollectionTests
             StringAssert.Contains(manifest, "NIBScriptHookVDotNet.log");
             StringAssert.Contains(manifest, "ScriptHookV.log");
             StringAssert.Contains(manifest, "DonJCustomNpcPlacer.log");
+            StringAssert.Contains(manifest, "JusticeRecognition.log");
 
             string[] copiedLogs = Directory.GetFiles(Path.Combine(reportRoot, "raw-logs"), "*", SearchOption.TopDirectoryOnly);
             Assert.IsTrue(copiedLogs.Any(path => Path.GetFileName(path).Contains("NIBScriptHookVDotNet.log")));
             Assert.IsTrue(copiedLogs.Any(path => Path.GetFileName(path).Contains("DonJCustomNpcPlacer.log")));
+            string[] recognitionCopies = copiedLogs
+                .Where(path => Path.GetFileName(path).EndsWith("JusticeRecognition.log", StringComparison.Ordinal))
+                .ToArray();
+            Assert.IsTrue(recognitionCopies.Length >= 1, "Le journal Recognition imbrique doit etre collecte.");
+            Assert.IsTrue(
+                recognitionCopies.All(path => Path.GetFileName(path).Length <= 96),
+                "Chaque nom collecte doit rester sous la limite sure.");
+
+            // Je sélectionne la source injectée par le test : une installation GTA
+            // réelle peut légitimement fournir un second journal du même module.
+            string recognitionCopy = recognitionCopies.Single(
+                path => File.ReadAllText(path) == "recognition log test");
+            Assert.AreEqual("recognition log test", File.ReadAllText(recognitionCopy), "Le journal imbrique ne doit pas etre ecrase.");
         }
         finally
         {
@@ -217,9 +236,15 @@ public class BugLogCollectionTests
         return "\"" + value.Replace("\"", "\\\"") + "\"";
     }
 
-    private static string GetRepositoryRoot()
+    private static string GetRepositoryRoot([CallerFilePath] string sourceFilePath = "")
     {
-        DirectoryInfo directory = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+        // Je pars du fichier source pour que ce test reste valable lorsque MSBuild
+        // place tous les binaires dans un ArtifactsPath extérieur au dépôt.
+        string sourceDirectory = Path.GetDirectoryName(sourceFilePath);
+        DirectoryInfo directory = new DirectoryInfo(
+            string.IsNullOrWhiteSpace(sourceDirectory)
+                ? AppDomain.CurrentDomain.BaseDirectory
+                : sourceDirectory);
 
         while (directory != null)
         {

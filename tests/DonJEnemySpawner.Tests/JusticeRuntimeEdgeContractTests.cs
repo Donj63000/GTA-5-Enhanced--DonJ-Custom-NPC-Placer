@@ -451,7 +451,7 @@ public sealed class JusticeRuntimeEdgeContractTests
     }
 
     [TestMethod]
-    public void CustodyTransientState_RetriesEachSetterWithoutDisciplineInvincibility()
+    public void CustodyTransientState_RestoresMobilityButAlwaysNormalizesInvincibilityToFalse()
     {
         string source = ReadSource("DonJEnemySpawner.Justice.Custody.cs");
         string restore = ExtractMethodBody(source, "RestoreJusticeCustodyPlayerTransientState");
@@ -459,14 +459,15 @@ public sealed class JusticeRuntimeEdgeContractTests
 
         AssertOrdered(
             restore,
-            "player.IsInvincible = _justiceCustodyStoredInvincible",
+            "_justiceCustodyStoredInvincible = false",
+            "EnsureJusticePlayerIsMortal(player)",
             "player.FreezePosition = _justiceCustodyStoredFrozen",
             "player.CanRagdoll = _justiceCustodyStoredCanRagdoll",
             "return restored;");
         Assert.AreEqual(
-            3,
+            2,
             Regex.Matches(restore, @"catch\s*\{").Count,
-            "Chaque propriété temporaire doit conserver son propre chemin de retry.");
+            "Le gel et le ragdoll conservent chacun leur chemin de retry; la mortalité passe par le gestionnaire central.");
         AssertOrdered(
             amnesty,
             "RestoreJusticeCustodyPlayerTransientState(player)",

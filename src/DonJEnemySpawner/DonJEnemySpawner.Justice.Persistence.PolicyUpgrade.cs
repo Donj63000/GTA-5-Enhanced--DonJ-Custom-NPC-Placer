@@ -949,6 +949,7 @@ public sealed partial class DonJEnemySpawner
             state.Charges.Count == 0 && state.ActiveScore == 0 &&
             state.FineDue == 0L && state.VoluntaryFinePaid == 0L &&
             state.FineInDispute == 0L && state.SentenceSeconds == 0 &&
+            state.CustodyGuardPenaltySeconds == 0L &&
             !state.HasWarrant && !state.EscapeWantedMinimumPending &&
             !state.EscapeWantedMinimumAttempted &&
             string.IsNullOrWhiteSpace(state.WantedEpisodeId) &&

@@ -617,6 +617,11 @@ internal sealed class JusticeCaseState
 
     internal int SentenceSeconds { get; set; }
 
+    // Je conserve hors du plafond légal la prolongation infligée lorsqu'un
+    // garde tue le détenu. Elle reste ainsi cumulable et rejouable sans
+    // modifier le calcul des condamnations ordinaires.
+    internal long CustodyGuardPenaltySeconds { get; set; }
+
     internal bool HasWarrant { get; set; }
 
     // Je porte dans le dossier le petit WAL du minimum d'étoiles propre à
@@ -744,6 +749,7 @@ internal sealed class JusticeCaseState
         VoluntaryFinePaid = 0L;
         FineInDispute = 0L;
         SentenceSeconds = 0;
+        CustodyGuardPenaltySeconds = 0L;
         HasWarrant = false;
         EscapeWantedMinimumPending = false;
         EscapeWantedMinimumAttempted = false;

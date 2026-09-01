@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $reportsRoot = Join-Path $repoRoot "bug-reports"
 
-function ConvertTo-SafeFileName {
+function ConvertTo-SafeFileNameComponent {
     param([string]$Value)
 
     $safe = if ([string]::IsNullOrWhiteSpace($Value)) { "bug-report" } else { $Value.Trim() }
@@ -28,11 +28,76 @@ function ConvertTo-SafeFileName {
         return "bug-report"
     }
 
+    return $safe
+}
+
+function ConvertTo-SafeFileName {
+    param([string]$Value)
+
+    $safe = ConvertTo-SafeFileNameComponent $Value
+
     if ($safe.Length -gt 72) {
         return $safe.Substring(0, 72).Trim("-._")
     }
 
     return $safe
+}
+
+function Get-StableShortHash {
+    param([string]$Value)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+        $digest = $sha256.ComputeHash($bytes)
+        return ([System.BitConverter]::ToString($digest) -replace "-", "").Substring(0, 12).ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function ConvertTo-SafeLogTargetName {
+    param(
+        [string]$SourceRootLabel,
+        [System.IO.FileInfo]$File
+    )
+
+    # Je garde le chemin complet sous la limite Windows classique même quand le
+    # titre du rapport utilise ses 72 caractères autorisés.
+    $maximumLength = 96
+    $safeLabel = ConvertTo-SafeFileNameComponent $SourceRootLabel
+    $safeLeafName = ConvertTo-SafeFileNameComponent $File.Name
+    $sourceHash = Get-StableShortHash $File.FullName
+    $minimumPrefix = "log-$sourceHash`__"
+    $leafBudget = $maximumLength - $minimumPrefix.Length
+
+    if ($safeLeafName.Length -gt $leafBudget) {
+        # Je ne compacte qu'un nom de log exceptionnellement long et je conserve
+        # toujours son extension ainsi qu'une empreinte qui évite les collisions.
+        $extension = [System.IO.Path]::GetExtension($safeLeafName)
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($safeLeafName)
+        $leafMarker = "~" + $sourceHash.Substring(0, 8)
+        $stemBudget = $leafBudget - $extension.Length - $leafMarker.Length
+
+        if ($stemBudget -gt 0) {
+            $safeLeafName = $stem.Substring(0, [Math]::Min($stem.Length, $stemBudget)).Trim("-._") + $leafMarker + $extension
+        }
+        else {
+            $safeLeafName = $safeLeafName.Substring($safeLeafName.Length - $leafBudget)
+        }
+    }
+
+    $fixedSuffix = "-$sourceHash`__" + $safeLeafName
+    $labelBudget = $maximumLength - $fixedSuffix.Length
+    $safeLabel = $safeLabel.Substring(0, [Math]::Min($safeLabel.Length, $labelBudget)).Trim("-._")
+
+    if ([string]::IsNullOrWhiteSpace($safeLabel)) {
+        $safeLabel = "log"
+    }
+
+    return $safeLabel + $fixedSuffix
 }
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -104,7 +169,7 @@ function Copy-LogFile {
 
     $checkedSources.Add($File.FullName)
 
-    $targetName = ConvertTo-SafeFileName ($SourceRootLabel + "__" + $File.Name)
+    $targetName = ConvertTo-SafeLogTargetName -SourceRootLabel $SourceRootLabel -File $File
     $targetPath = Join-Path $rawLogsRoot $targetName
     $copiedMode = "full"
 
@@ -183,6 +248,18 @@ function Collect-GtaRootLogs {
     if (Test-Path -LiteralPath $scriptsPath) {
         Get-ChildItem -LiteralPath $scriptsPath -File -Filter "*.log" -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-LogFile -File $_ -SourceRootLabel ($label + "__Scripts") }
+
+        # Je collecte aussi le journal séparé du module de reconnaissance, sans
+        # parcourir récursivement les dossiers appartenant aux autres mods.
+        $recognitionLog = Join-Path $scriptsPath "DonJJusticeRecognition\JusticeRecognition.log"
+        if (Test-Path -LiteralPath $recognitionLog -PathType Leaf) {
+            Copy-LogFile `
+                -File (Get-Item -LiteralPath $recognitionLog) `
+                -SourceRootLabel ($label + "__Scripts__DonJJusticeRecognition")
+        }
+        else {
+            $checkedSources.Add($recognitionLog)
+        }
     }
     else {
         $checkedSources.Add($scriptsPath)

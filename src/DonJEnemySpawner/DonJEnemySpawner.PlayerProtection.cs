@@ -23,9 +23,10 @@ public sealed partial class DonJEnemySpawner
      * - seul le dernier à sortir le restaure ;
      * - une restauration qui échoue reste en attente et est retentée au tick.
      *
-     * Je ne force donc jamais arbitrairement IsInvincible à false. Si un autre
-     * mod avait déjà rendu le joueur invincible avant DonJ, sa valeur true est
-     * conservée après la fin de nos protections.
+     * Je ne force donc jamais arbitrairement IsInvincible à false. La seule
+     * exception est une détention Justice : son contrat de gameplay impose un
+     * joueur mortel, y compris après la libération. Dans ce cas je normalise la
+     * baseline partagée avant de libérer le dernier propriétaire.
      */
     private PlayerInvincibilityOwner _playerInvincibilityOwners;
     private Ped _playerInvincibilityPed;
@@ -174,6 +175,83 @@ public sealed partial class DonJEnemySpawner
     private bool IsPlayerInvincibilityRecoveryPending()
     {
         return _playerInvincibilityRestorePending;
+    }
+
+    private bool EnsureJusticePlayerIsMortal(Ped player)
+    {
+        if (!IsExistingPlayerEntity(player))
+        {
+            return false;
+        }
+
+        if (_playerInvincibilityOwners != PlayerInvincibilityOwner.None)
+        {
+            // Je ne retire jamais de force un propriétaire encore actif. Le
+            // transfert Justice attend d'abord la fin du placement ou du masque
+            // de streaming, puis rappelle cette vérification avant le FadeIn.
+            return false;
+        }
+
+        if (_playerInvincibilityBaselineCaptured ||
+            _playerInvincibilityRestorePending)
+        {
+            // Je remplace explicitement une ancienne baseline true : après une
+            // arrestation elle ne doit plus pouvoir renaître au tick suivant.
+            _playerInvincibilityBaseline = false;
+            if (!TryRestoreSharedPlayerInvincibility(player))
+            {
+                return false;
+            }
+        }
+
+        return TryWritePlayerInvincibility(player, false);
+    }
+
+    private bool ReleaseJusticePreJudgmentInvincibilityAsMortal(Ped player)
+    {
+        if (_playerInvincibilityBaselineCaptured ||
+            _playerInvincibilityRestorePending ||
+            HasPlayerInvincibilityOwner(
+                PlayerInvincibilityOwner.JusticePreJudgmentHolding))
+        {
+            _playerInvincibilityBaseline = false;
+        }
+
+        if (!TryReleasePlayerInvincibility(
+                player,
+                PlayerInvincibilityOwner.JusticePreJudgmentHolding,
+                false,
+                true))
+        {
+            return false;
+        }
+
+        return EnsureJusticePlayerIsMortal(player);
+    }
+
+    private void PrepareJusticePlayerMortalityForShutdown(Ped player)
+    {
+        // Justice est arrêté avant le gestionnaire partagé. Je fige donc sa
+        // baseline à false maintenant afin que le nettoyage global exécuté juste
+        // après ne puisse pas restaurer l'immortalité observée avant la prison.
+        if (_playerInvincibilityBaselineCaptured ||
+            _playerInvincibilityRestorePending ||
+            HasPlayerInvincibilityOwner(
+                PlayerInvincibilityOwner.JusticePreJudgmentHolding))
+        {
+            _playerInvincibilityBaseline = false;
+        }
+
+        TryReleasePlayerInvincibility(
+            player,
+            PlayerInvincibilityOwner.JusticePreJudgmentHolding,
+            false,
+            true);
+
+        if (_playerInvincibilityOwners == PlayerInvincibilityOwner.None)
+        {
+            EnsureJusticePlayerIsMortal(player);
+        }
     }
 
     private void MaintainPlayerInvincibilityProtection()

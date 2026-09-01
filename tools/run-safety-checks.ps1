@@ -142,6 +142,20 @@ function Get-ScriptApiReferenceMetadata {
     }
 }
 
+$hudStubProject = Join-Path $repoRoot "tools\Stubs\NIBScriptHookVDotNet3\NIBScriptHookVDotNet3.csproj"
+$hudStubOutput = Join-Path $runRoot "stub-hud-api"
+New-Item -ItemType Directory -Force -Path $hudStubOutput | Out-Null
+Invoke-LoggedCommand `
+    -StepName "build-stub-hud-api" `
+    -FilePath "dotnet" `
+    -Arguments @("build", $hudStubProject, "-c", "Release", "-o", $hudStubOutput)
+
+$hudStubAssembly = Join-Path $hudStubOutput "NIBScriptHookVDotNet3.dll"
+Copy-Item `
+    -LiteralPath $hudStubAssembly `
+    -Destination (Join-Path $temporaryGtaRoot "NIBScriptHookVDotNet3.dll") `
+    -Force
+
 if ($UseStubApi) {
     $stubProject = Join-Path $repoRoot "tools\Stubs\NIBScriptHookVDotNet2\NIBScriptHookVDotNet2.csproj"
     $stubOutput = Join-Path $runRoot "stub-api"
@@ -221,7 +235,10 @@ Copy-Item `
 $implicitDeploymentNames = @(
     "DonJCustomNpcPlacer.ENdll",
     "DonJCustomNpcPlacer.pdb",
-    "DonJCustomNpcPlacer.manifest.json"
+    "DonJCustomNpcPlacer.manifest.json",
+    "Assets\Justice\immatriculation.png",
+    "Assets\Justice\tenue.png",
+    "Assets\Justice\mandat.png"
 )
 foreach ($fileName in $implicitDeploymentNames) {
     $implicitDeployment = Join-Path $deployRoot $fileName
@@ -356,13 +373,22 @@ $expectedFiles = @(
     (Join-Path $packageRoot "DonJCustomNpcPlacer.ENdll"),
     (Join-Path $packageRoot "DonJCustomNpcPlacer.pdb"),
     (Join-Path $packageRoot "INSTALLATION_SIMPLE.txt"),
-    (Join-Path $packageRoot "manifest.json")
+    (Join-Path $packageRoot "manifest.json"),
+    (Join-Path $mainBin "Assets\Justice\immatriculation.png"),
+    (Join-Path $mainBin "Assets\Justice\tenue.png"),
+    (Join-Path $mainBin "Assets\Justice\mandat.png"),
+    (Join-Path $packageRoot "Assets\Justice\immatriculation.png"),
+    (Join-Path $packageRoot "Assets\Justice\tenue.png"),
+    (Join-Path $packageRoot "Assets\Justice\mandat.png")
 )
 if ($packageIsPublishable) {
     $expectedFiles += @(
         (Join-Path $deployRoot "DonJCustomNpcPlacer.ENdll"),
         (Join-Path $deployRoot "DonJCustomNpcPlacer.pdb"),
-        (Join-Path $deployRoot "DonJCustomNpcPlacer.manifest.json")
+        (Join-Path $deployRoot "DonJCustomNpcPlacer.manifest.json"),
+        (Join-Path $deployRoot "Assets\Justice\immatriculation.png"),
+        (Join-Path $deployRoot "Assets\Justice\tenue.png"),
+        (Join-Path $deployRoot "Assets\Justice\mandat.png")
     )
 }
 
@@ -383,6 +409,31 @@ if ($buildEndllHash -ne $packageEndllHash) {
 }
 if ($buildPdbHash -ne $packagePdbHash) {
     throw "Les SHA-256 build/package PDB ne correspondent pas."
+}
+
+$justiceAssetRelativePaths = @(
+    "Assets\Justice\immatriculation.png",
+    "Assets\Justice\tenue.png",
+    "Assets\Justice\mandat.png"
+)
+foreach ($relativeAssetPath in $justiceAssetRelativePaths) {
+    $sourceAssetPath = Join-Path (Join-Path $repoRoot "src\DonJEnemySpawner") $relativeAssetPath
+    $buildAssetPath = Join-Path $mainBin $relativeAssetPath
+    $packageAssetPath = Join-Path $packageRoot $relativeAssetPath
+    $sourceAssetHash = (Get-FileHash -LiteralPath $sourceAssetPath -Algorithm SHA256).Hash
+    $buildAssetHash = (Get-FileHash -LiteralPath $buildAssetPath -Algorithm SHA256).Hash
+    $packageAssetHash = (Get-FileHash -LiteralPath $packageAssetPath -Algorithm SHA256).Hash
+    if ($sourceAssetHash -ne $buildAssetHash -or $sourceAssetHash -ne $packageAssetHash) {
+        throw "Les SHA-256 source/build/package de l'asset Justice ne correspondent pas: $relativeAssetPath"
+    }
+
+    if ($packageIsPublishable) {
+        $deployedAssetPath = Join-Path $deployRoot $relativeAssetPath
+        $deployedAssetHash = (Get-FileHash -LiteralPath $deployedAssetPath -Algorithm SHA256).Hash
+        if ($packageAssetHash -ne $deployedAssetHash) {
+            throw "Les SHA-256 package/deploiement de l'asset Justice ne correspondent pas: $relativeAssetPath"
+        }
+    }
 }
 if ($packageIsPublishable) {
     $deployedEndllHash = (Get-FileHash -LiteralPath (Join-Path $deployRoot "DonJCustomNpcPlacer.ENdll") -Algorithm SHA256).Hash
@@ -416,6 +467,14 @@ if ($manifest.product -ne "DonJCustomNpcPlacer" -or
     [long]$manifest.files.binary.sizeBytes -le 0 -or
     ([string]$manifest.files.binary.sha256).ToUpperInvariant() -ne $packageEndllHash.ToUpperInvariant() -or
     ([string]$manifest.files.symbols.sha256).ToUpperInvariant() -ne $packagePdbHash.ToUpperInvariant() -or
+    -not [bool]$manifest.hudRenderer.optional -or
+    [string]$manifest.hudRenderer.fallback -ne "native" -or
+    [bool]$manifest.hudRenderer.available -or
+    -not [string]::IsNullOrWhiteSpace([string]$manifest.hudRenderer.assemblyName) -or
+    -not [string]::IsNullOrWhiteSpace([string]$manifest.hudRenderer.version) -or
+    [int]$manifest.hudRenderer.minimumMajor -ne 3 -or
+    [string]$manifest.hudRenderer.typeName -ne "GTA.UI.CustomSprite" -or
+    [int]$manifest.hudRenderer.contractVersion -ne 1 -or
     [string]$manifest.assemblyVersion -ne $assemblyVersion -or
     [string]$manifest.informationalVersion -ne $informationalVersion -or
     [int]$manifest.justiceSchemaVersion -ne 2 -or
@@ -431,12 +490,41 @@ if ($manifest.product -ne "DonJCustomNpcPlacer" -or
     throw "Le manifest du package ne correspond pas au binaire teste."
 }
 
+$manifestJusticeAssets = @(
+    [pscustomobject]@{
+        Entry = $manifest.files.justiceAssets.immatriculation
+        Name = "Assets/Justice/immatriculation.png"
+    },
+    [pscustomobject]@{
+        Entry = $manifest.files.justiceAssets.outfit
+        Name = "Assets/Justice/tenue.png"
+    },
+    [pscustomobject]@{
+        Entry = $manifest.files.justiceAssets.warrant
+        Name = "Assets/Justice/mandat.png"
+    }
+)
+foreach ($manifestAsset in $manifestJusticeAssets) {
+    $packageAssetPath = Join-Path $packageRoot $manifestAsset.Name
+    if ([string]$manifestAsset.Entry.name -ne $manifestAsset.Name -or
+        [long]$manifestAsset.Entry.sizeBytes -ne (Get-Item -LiteralPath $packageAssetPath).Length -or
+        ([string]$manifestAsset.Entry.sha256).ToUpperInvariant() -ne
+            (Get-FileHash -LiteralPath $packageAssetPath -Algorithm SHA256).Hash.ToUpperInvariant()) {
+        throw "Le manifest ne décrit pas exactement l'asset Justice: $($manifestAsset.Name)"
+    }
+}
+
+if (Test-Path -LiteralPath (Join-Path $packageRoot "NIBScriptHookVDotNet3.dll")) {
+    throw "Le package ne doit jamais embarquer NIBScriptHookVDotNet3.dll."
+}
+
 $requiredJusticeTypes = @(
     "DonJEnemySpawner",
     "JusticePolicy",
     "JusticeCaseState",
     "JusticePlayerProfileState",
-    "JusticeTransition"
+    "JusticeTransition",
+    "DonJ.JusticeRecognition.DonJJusticeRecognitionScript"
 )
 foreach ($typeName in $requiredJusticeTypes) {
     if (@($manifest.expectedTypes) -notcontains $typeName) {

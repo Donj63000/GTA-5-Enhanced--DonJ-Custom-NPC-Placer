@@ -147,6 +147,14 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
+        if (IsJusticeTemporaryPlayerProtectionForbidden())
+        {
+            // Je ne laisse pas la régénération Terminator contourner la mortalité
+            // imposée dès l'arrestation et pendant toute la détention.
+            ShowStatus("Mode Terminator indisponible pendant la détention.", 3000);
+            return;
+        }
+
         Ped player = Game.Player.Character;
 
         if (!Entity.Exists(player) || player.IsDead)
@@ -184,7 +192,7 @@ public sealed partial class DonJEnemySpawner
 
     private void DisableTerminatorMode(bool showStatus)
     {
-        bool wasEnabled = _terminatorModeEnabled || _terminatorModeApplied || _terminatorCameraStored || _terminatorVisionFilterApplied || _terminatorLowLightVisionApplied || _terminatorThermalVisionApplied;
+        bool wasEnabled = HasTerminatorRuntimeState();
 
         _terminatorModeEnabled = false;
 
@@ -209,10 +217,28 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
+    private bool HasTerminatorRuntimeState()
+    {
+        return _terminatorModeEnabled ||
+               _terminatorModeApplied ||
+               _terminatorCameraStored ||
+               _terminatorVisionFilterApplied ||
+               _terminatorLowLightVisionApplied ||
+               _terminatorThermalVisionApplied;
+    }
+
     private void UpdateTerminatorMode()
     {
         if (!_terminatorModeEnabled)
         {
+            return;
+        }
+
+        if (IsJusticeTemporaryPlayerProtectionForbidden())
+        {
+            // Je restaure les statistiques et la caméra avant que Justice ne
+            // photographie ou ne maintienne l'état jouable du détenu.
+            DisableTerminatorMode(false);
             return;
         }
 

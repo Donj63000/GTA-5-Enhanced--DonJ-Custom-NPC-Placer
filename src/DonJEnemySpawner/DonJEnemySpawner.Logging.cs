@@ -104,6 +104,41 @@ public sealed partial class DonJEnemySpawner
         return candidates;
     }
 
+    internal static string GetJusticeRecognitionRuntimeDirectorySafe()
+    {
+        // Je privilégie le vrai dossier Scripts du processus GTA afin que le
+        // shadow-copy éventuel de NIB ne détourne ni les logos ni le XML séparé.
+        string processScripts = GetProcessScriptsDirectorySafe();
+        if (!string.IsNullOrWhiteSpace(processScripts))
+        {
+            return processScripts;
+        }
+
+        string appDomainDirectory = AppDomain.CurrentDomain.BaseDirectory;
+        if (LooksLikeScriptsDirectory(appDomainDirectory))
+        {
+            return appDomainDirectory;
+        }
+        if (LooksLikeGtaRoot(appDomainDirectory))
+        {
+            return Path.Combine(appDomainDirectory, "Scripts");
+        }
+
+        string assemblyDirectory = GetAssemblyDirectorySafe();
+        if (LooksLikeScriptsDirectory(assemblyDirectory))
+        {
+            return assemblyDirectory;
+        }
+        if (LooksLikeGtaRoot(assemblyDirectory))
+        {
+            return Path.Combine(assemblyDirectory, "Scripts");
+        }
+
+        // Hors du processus GTA (tests, outils, réflexion), je reste à côté de
+        // l'assembly et je n'écris jamais par simple détection dans un jeu installé.
+        return assemblyDirectory;
+    }
+
     private static string GetLocalAppDataRuntimeLogDirectorySafe()
     {
         try

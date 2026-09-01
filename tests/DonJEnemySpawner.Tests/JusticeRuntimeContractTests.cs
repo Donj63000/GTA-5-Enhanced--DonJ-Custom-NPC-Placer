@@ -1199,6 +1199,76 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
+    public void RuntimeJustice_RecognitionIntentIsDurableBeforeAmnestyAndResetBecomeTerminal()
+    {
+        string repositoryRoot = GetRepositoryRoot();
+        string runtimeSource = ReadRuntimeSource();
+        string profilesSource = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.Justice.Profiles.cs"));
+        string profileResetSource = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.Justice.Persistence.ProfileReset.cs"));
+        string recognitionBridgeSource = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "DonJEnemySpawner",
+            "DonJEnemySpawner.Justice.Recognition.cs"));
+
+        string amnesty = ExecutableMethodBody(
+            runtimeSource,
+            "ResumeJusticeAmnestyTransaction");
+        AssertOrdered(
+            amnesty,
+            "TryApplyJusticeAmnestyWantedClear()",
+            "if (!ClearJusticeRecognitionProfile(",
+            "_justiceAmnestyPending = false",
+            "if (JusticeFlushStateNow())");
+
+        string wantedOnlyRepair = ExecutableMethodBody(
+            runtimeSource,
+            "ResumeJusticeWantedOnlyRepair");
+        AssertOrdered(
+            wantedOnlyRepair,
+            "TryApplyJusticeAmnestyWantedClear()",
+            "if (!ClearJusticeRecognitionProfile(",
+            "_justiceAmnestyPending = false",
+            "bool persisted = JusticeFlushStateNow()");
+
+        string activeReset = ExecutableMethodBody(
+            profilesSource,
+            "ResumeJusticeActiveProfileResetTransaction");
+        AssertOrdered(
+            activeReset,
+            "ReplaceJusticePlayerProfileWithEmptyState(slot)",
+            "if (!ClearJusticeRecognitionProfile(",
+            "JusticeMarkStateDirty()",
+            "if (!JusticeFlushStateNow())",
+            "_justiceActiveProfileResetPending = false");
+
+        string walReset = ExecutableMethodBody(
+            profileResetSource,
+            "TryResumePendingJusticeProfileResetWal");
+        AssertOrdered(
+            walReset,
+            "ApplyJusticeProfileResetWalResult(latest)",
+            "if (!ClearJusticeRecognitionProfile(",
+            "FinalizeJusticeWalTransactionsWhoseSnapshotIsDurable()",
+            "_justicePendingProfileResetWalRecord = null");
+
+        StringAssert.Contains(
+            recognitionBridgeSource,
+            "private bool ClearJusticeRecognitionProfile(");
+        StringAssert.Contains(
+            recognitionBridgeSource,
+            "return JusticeRecognitionBridge.ClearProfile(profileId, reason);");
+    }
+
+    [TestMethod]
     public void RuntimeJustice_PauseRejectsAnOpenCriticalBarrierAndAnActiveArrest()
     {
         object script = CreateJusticeHeadlessScript();
@@ -2254,7 +2324,7 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void CustodyMisconduct_DoesNotForceCombatInvincibilityOrPlayerTeleport()
+    public void CustodyMisconduct_CommandsOnlyOwnedGuardsWithoutInvincibilityOrPlayerTeleport()
     {
         string source = File.ReadAllText(Path.Combine(
             GetRepositoryRoot(),
@@ -2263,7 +2333,11 @@ public sealed class JusticeRuntimeContractTests
             "DonJEnemySpawner.Justice.Custody.cs"));
         string update = ExecutableMethodBody(source, "JusticeUpdateCustody");
 
-        Assert.IsFalse(source.Contains("Hash.TASK_COMBAT_PED"));
+        string retaliation = ExecutableMethodBody(
+            source,
+            "CommandJusticeCustodyGuardCombatIfDue");
+        StringAssert.Contains(retaliation, "Hash.TASK_COMBAT_PED");
+        StringAssert.Contains(retaliation, "JusticeCustodyGuardCombatRetryMs");
         Assert.IsFalse(source.Contains("PlayerInvincibilityOwner.JusticeDiscipline"));
         Assert.IsFalse(update.Contains("TeleportPlayerWithFadeSafe"));
         Assert.IsFalse(update.Contains("JusticeSignal.Restrained"));
@@ -2330,6 +2404,531 @@ public sealed class JusticeRuntimeContractTests
             0,
             GTA.StubRuntime.NativeCalls.Count(call =>
                 call.Hash == (ulong)GTA.Native.Hash.DO_SCREEN_FADE_OUT));
+#endif
+    }
+
+    [TestMethod]
+    public void CustodyGuardRetaliation_PreservesHigherWantedAndCadencesOwnedGuardOrders()
+    {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped player = GTA.Game.Player.Character;
+        player.Handle = 821;
+        player.Model = new GTA.Model("player_zero");
+        player.IsDead = false;
+
+        object script = CreateJusticeHeadlessScript();
+        JusticeCaseState state = GetFieldValue<JusticeCaseState>(
+            script,
+            "_justiceCaseState");
+        state.Enabled = true;
+        state.Phase = JusticePhase.Incarcerated;
+        state.SentenceSeconds = 120;
+        state.CustodyEpisodeId = "custody:guard-retaliation";
+        SetFieldValue(script, "_justiceCustodyRuntimeActive", true);
+        SetFieldValue(script, "_justiceActivePlayerProfileSlot", 0);
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
+        SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        SetFieldValue(
+            script,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => 0));
+
+        GTA.Ped guard = new GTA.Ped
+        {
+            Handle = 822,
+            Model = new GTA.Model("s_m_m_prisguard_01")
+        };
+        ((IList)GetFieldValue<object>(script, "_justiceCustodyGuards")).Add(guard);
+        Assert.AreEqual(
+            true,
+            InvokeInstance(script, "RememberJusticeCustodyPedOwnership", guard));
+
+        bool playerDamagesGuard = false;
+        GTA.StubRuntime.DamageHandler = (target, attacker) =>
+            playerDamagesGuard &&
+            ReferenceEquals(target, guard) &&
+            ReferenceEquals(attacker, player);
+        InvokeInstance(script, "SynchronizeJusticeDamagePair", guard, player);
+
+        GTA.Game.Player.WantedLevel = 4;
+        playerDamagesGuard = true;
+        InvokeInstance(script, "UpdateJusticeCustodyGuardRetaliation", player, 1000);
+        Assert.AreEqual(4, GTA.Game.Player.WantedLevel);
+        Assert.IsTrue(GetFieldValue<bool>(
+            script,
+            "_justiceCustodyGuardRetaliationActive"));
+        Assert.AreEqual(
+            1,
+            GTA.StubRuntime.NativeCalls.Count(call =>
+                call.Hash == (ulong)GTA.Native.Hash.TASK_COMBAT_PED));
+
+        InvokeInstance(script, "UpdateJusticeCustodyGuardRetaliation", player, 1175);
+        Assert.AreEqual(
+            1,
+            GTA.StubRuntime.NativeCalls.Count(call =>
+                call.Hash == (ulong)GTA.Native.Hash.TASK_COMBAT_PED),
+            "La cadence de scan ne doit pas renvoyer la tâche de combat.");
+
+        InvokeInstance(
+            script,
+            "ResetJusticeCustodyGuardRetaliation",
+            player,
+            false,
+            false);
+        playerDamagesGuard = false;
+        InvokeInstance(script, "UpdateJusticeCustodyGuardRetaliation", player, 3000);
+        GTA.Game.Player.WantedLevel = 0;
+        playerDamagesGuard = true;
+        InvokeInstance(script, "UpdateJusticeCustodyGuardRetaliation", player, 3175);
+        Assert.AreEqual(2, GTA.Game.Player.WantedLevel);
+        GTA.StubRuntime.DamageHandler = null;
+#endif
+    }
+
+    [TestMethod]
+    public void CustodyGuardRetaliation_OneShotKilledGuardStillTriggersTwoStars()
+    {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped player = GTA.Game.Player.Character;
+        player.Handle = 823;
+        player.Model = new GTA.Model("player_zero");
+        player.IsDead = false;
+
+        object script = CreateJusticeHeadlessScript();
+        JusticeCaseState state = GetFieldValue<JusticeCaseState>(
+            script,
+            "_justiceCaseState");
+        state.Enabled = true;
+        state.Phase = JusticePhase.Incarcerated;
+        state.SentenceSeconds = 120;
+        state.CustodyEpisodeId = "custody:one-shot-guard";
+        SetFieldValue(script, "_justiceCustodyRuntimeActive", true);
+        SetFieldValue(script, "_justiceActivePlayerProfileSlot", 0);
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
+        SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        SetFieldValue(
+            script,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => 0));
+
+        GTA.Ped guard = new GTA.Ped
+        {
+            Handle = 824,
+            Model = new GTA.Model("s_m_m_prisguard_01"),
+            IsDead = false
+        };
+        ((IList)GetFieldValue<object>(script, "_justiceCustodyGuards")).Add(guard);
+        Assert.AreEqual(
+            true,
+            InvokeInstance(script, "RememberJusticeCustodyPedOwnership", guard));
+
+        bool playerDamagesGuard = false;
+        GTA.StubRuntime.DamageHandler = (target, attacker) =>
+            playerDamagesGuard &&
+            ReferenceEquals(target, guard) &&
+            ReferenceEquals(attacker, player);
+        try
+        {
+            SetFieldValue(script, "_justiceMonotonicTimeMs", 1000L);
+            InvokeInstance(
+                script,
+                "UpdateJusticeCustodyGuardRetaliation",
+                player,
+                1000);
+
+            // Je simule le one-shot après ce scan : au passage suivant, le front
+            // existe encore mais le garde est déjà déclaré mort par GTA.
+            playerDamagesGuard = true;
+            guard.IsDead = true;
+            GTA.Game.Player.WantedLevel = 0;
+            SetFieldValue(script, "_justiceMonotonicTimeMs", 1175L);
+            InvokeInstance(
+                script,
+                "UpdateJusticeCustodyGuardRetaliation",
+                player,
+                1175);
+
+            Assert.IsTrue(GetFieldValue<bool>(
+                script,
+                "_justiceCustodyGuardRetaliationActive"));
+            Assert.AreEqual(2, GTA.Game.Player.WantedLevel);
+            Assert.AreEqual(
+                0,
+                GTA.StubRuntime.NativeCalls.Count(call =>
+                    call.Hash == (ulong)GTA.Native.Hash.TASK_COMBAT_PED),
+                "Je n'envoie jamais une tâche de combat au garde déjà mort.");
+            Assert.AreEqual(
+                1,
+                GTA.StubRuntime.NativeCalls.Count(call =>
+                    call.Hash ==
+                        (ulong)GTA.Native.Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY),
+                "Le front joueur vers le garde mort doit être consommé une fois.");
+        }
+        finally
+        {
+            GTA.StubRuntime.DamageHandler = null;
+        }
+#endif
+    }
+
+    [TestMethod]
+    public void CustodyGuardDeathAttribution_SimultaneousAttackActivatesRetaliationAndPenalty()
+    {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped player = GTA.Game.Player.Character;
+        player.Handle = 833;
+        player.Model = new GTA.Model("player_zero");
+        player.IsDead = false;
+
+        object script = CreateJusticeHeadlessScript();
+        JusticeCaseState state = GetFieldValue<JusticeCaseState>(
+            script,
+            "_justiceCaseState");
+        state.Enabled = true;
+        state.Phase = JusticePhase.Incarcerated;
+        state.SentenceSeconds = 120;
+        state.CustodyEpisodeId = "custody:simultaneous-lethal-fronts";
+        SetFieldValue(script, "_justiceCustodyRuntimeActive", true);
+        SetFieldValue(script, "_justiceActivePlayerProfileSlot", 0);
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
+        SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+
+        GTA.Ped guard = new GTA.Ped
+        {
+            Handle = 834,
+            Model = new GTA.Model("s_m_m_prisguard_01")
+        };
+        ((IList)GetFieldValue<object>(script, "_justiceCustodyGuards")).Add(guard);
+        Assert.AreEqual(
+            true,
+            InvokeInstance(script, "RememberJusticeCustodyPedOwnership", guard));
+        int generation = (int)InvokeInstance(
+            script,
+            "GetJusticeEntityGeneration",
+            guard);
+
+        bool simultaneousDamage = false;
+        GTA.StubRuntime.DamageHandler = (target, attacker) =>
+            simultaneousDamage &&
+            ((ReferenceEquals(target, guard) &&
+              ReferenceEquals(attacker, player)) ||
+             (ReferenceEquals(target, player) &&
+              ReferenceEquals(attacker, guard)));
+        GTA.StubRuntime.KillerHandler = _ => guard;
+        try
+        {
+            SetFieldValue(script, "_justiceMonotonicTimeMs", 1000L);
+            InvokeInstance(script, "SynchronizeJusticeDamagePair", guard, player);
+            InvokeInstance(script, "SynchronizeJusticeDamagePair", player, guard);
+            SetFieldValue(script, "_justiceNextCustodyGuardRetaliationScanAt", 1175);
+
+            // Je simule les deux fronts entre deux scans : l'agression doit être
+            // armée avant que le coup fatal du garde soit attribué.
+            simultaneousDamage = true;
+            player.IsDead = true;
+            SetFieldValue(script, "_justiceMonotonicTimeMs", 1100L);
+            InvokeInstance(
+                script,
+                "UpdateJusticeCustodyGuardRetaliation",
+                player,
+                1100);
+
+            Assert.IsTrue(GetFieldValue<bool>(
+                script,
+                "_justiceCustodyGuardRetaliationActive"));
+            Assert.IsTrue(GetFieldValue<bool>(
+                script,
+                "_justiceCustodyGuardDeathCauseEvaluated"));
+            Assert.IsTrue(GetFieldValue<bool>(
+                script,
+                "_justiceCustodyGuardDeathPenaltyPending"));
+            Assert.AreEqual(2, GTA.Game.Player.WantedLevel);
+            Assert.AreEqual(
+                guard.Handle,
+                GetFieldValue<int>(
+                    script,
+                    "_justiceCustodyLastDamagingGuardHandle"));
+            Assert.AreEqual(
+                generation,
+                GetFieldValue<int>(
+                    script,
+                    "_justiceCustodyLastDamagingGuardGeneration"));
+            Assert.AreEqual(
+                2,
+                GTA.StubRuntime.NativeCalls.Count(call =>
+                    call.Hash ==
+                        (ulong)GTA.Native.Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY),
+                "Les deux fronts simultanés doivent être consommés une seule fois.");
+            Assert.AreEqual(
+                0,
+                GTA.StubRuntime.NativeCalls.Count(call =>
+                    call.Hash == (ulong)GTA.Native.Hash.TASK_COMBAT_PED),
+                "Je n'envoie aucune tâche de combat après la mort du joueur.");
+        }
+        finally
+        {
+            GTA.StubRuntime.DamageHandler = null;
+            GTA.StubRuntime.KillerHandler = null;
+        }
+#endif
+    }
+
+    [TestMethod]
+    public void CustodyGuardDeathAttribution_CapturesLethalFrontBetweenCadencedScans()
+    {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped player = GTA.Game.Player.Character;
+        player.Handle = 825;
+        player.Model = new GTA.Model("player_zero");
+        player.IsDead = false;
+
+        object script = CreateJusticeHeadlessScript();
+        JusticeCaseState state = GetFieldValue<JusticeCaseState>(
+            script,
+            "_justiceCaseState");
+        state.Enabled = true;
+        state.Phase = JusticePhase.Incarcerated;
+        state.SentenceSeconds = 120;
+        state.CustodyEpisodeId = "custody:lethal-between-scans";
+        SetFieldValue(script, "_justiceCustodyRuntimeActive", true);
+        SetFieldValue(script, "_justiceActivePlayerProfileSlot", 0);
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
+        SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+
+        GTA.Ped guard = new GTA.Ped
+        {
+            Handle = 826,
+            Model = new GTA.Model("s_m_m_prisguard_01")
+        };
+        ((IList)GetFieldValue<object>(script, "_justiceCustodyGuards")).Add(guard);
+        Assert.AreEqual(
+            true,
+            InvokeInstance(script, "RememberJusticeCustodyPedOwnership", guard));
+        int generation = (int)InvokeInstance(
+            script,
+            "GetJusticeEntityGeneration",
+            guard);
+
+        bool guardDamagesPlayer = false;
+        GTA.StubRuntime.DamageHandler = (target, attacker) =>
+            guardDamagesPlayer &&
+            ReferenceEquals(target, player) &&
+            ReferenceEquals(attacker, guard);
+        GTA.StubRuntime.KillerHandler = _ => null;
+        try
+        {
+            SetFieldValue(script, "_justiceMonotonicTimeMs", 1000L);
+            InvokeInstance(script, "SynchronizeJusticeDamagePair", player, guard);
+            SetFieldValue(script, "_justiceCustodyGuardRetaliationActive", true);
+            SetFieldValue(script, "_justiceNextCustodyGuardRetaliationScanAt", 1175);
+
+            // Je place le coup fatal après le scan à 1000 ms, mais avant celui
+            // qui était prévu à 1175 ms : le tick de mort doit le voir lui-même.
+            guardDamagesPlayer = true;
+            player.IsDead = true;
+            SetFieldValue(script, "_justiceMonotonicTimeMs", 1100L);
+            InvokeInstance(
+                script,
+                "UpdateJusticeCustodyGuardRetaliation",
+                player,
+                1100);
+
+            Assert.IsTrue(GetFieldValue<bool>(
+                script,
+                "_justiceCustodyGuardDeathCauseEvaluated"));
+            Assert.IsTrue(GetFieldValue<bool>(
+                script,
+                "_justiceCustodyGuardDeathPenaltyPending"));
+            Assert.AreEqual(
+                guard.Handle,
+                GetFieldValue<int>(
+                    script,
+                    "_justiceCustodyLastDamagingGuardHandle"));
+            Assert.AreEqual(
+                generation,
+                GetFieldValue<int>(
+                    script,
+                    "_justiceCustodyLastDamagingGuardGeneration"));
+            Assert.AreEqual(
+                1,
+                GTA.StubRuntime.NativeCalls.Count(call =>
+                    call.Hash ==
+                        (ulong)GTA.Native.Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY),
+                "Le front létal du joueur doit être consommé dans le passage de mort.");
+        }
+        finally
+        {
+            GTA.StubRuntime.DamageHandler = null;
+            GTA.StubRuntime.KillerHandler = null;
+        }
+#endif
+    }
+
+    [TestMethod]
+    public void CustodyGuardDeathAttribution_ValidThirdPartyOverridesLethalGuardFront()
+    {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped player = GTA.Game.Player.Character;
+        player.Handle = 827;
+        player.Model = new GTA.Model("player_zero");
+        player.IsDead = false;
+
+        object script = CreateJusticeHeadlessScript();
+        JusticeCaseState state = GetFieldValue<JusticeCaseState>(
+            script,
+            "_justiceCaseState");
+        state.Enabled = true;
+        state.Phase = JusticePhase.Incarcerated;
+        state.SentenceSeconds = 120;
+        state.CustodyEpisodeId = "custody:third-party-killer";
+        SetFieldValue(script, "_justiceCustodyRuntimeActive", true);
+        SetFieldValue(script, "_justiceActivePlayerProfileSlot", 0);
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
+        SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+
+        GTA.Ped guard = new GTA.Ped
+        {
+            Handle = 828,
+            Model = new GTA.Model("s_m_m_prisguard_01")
+        };
+        GTA.Ped thirdParty = new GTA.Ped
+        {
+            Handle = 829,
+            Model = new GTA.Model("s_m_y_prisoner_01")
+        };
+        ((IList)GetFieldValue<object>(script, "_justiceCustodyGuards")).Add(guard);
+        Assert.AreEqual(
+            true,
+            InvokeInstance(script, "RememberJusticeCustodyPedOwnership", guard));
+
+        bool guardDamagesPlayer = false;
+        GTA.StubRuntime.DamageHandler = (target, attacker) =>
+            guardDamagesPlayer &&
+            ReferenceEquals(target, player) &&
+            ReferenceEquals(attacker, guard);
+        GTA.StubRuntime.KillerHandler = _ => thirdParty;
+        try
+        {
+            SetFieldValue(script, "_justiceMonotonicTimeMs", 2000L);
+            InvokeInstance(script, "SynchronizeJusticeDamagePair", player, guard);
+            SetFieldValue(script, "_justiceCustodyGuardRetaliationActive", true);
+            SetFieldValue(script, "_justiceNextCustodyGuardRetaliationScanAt", 2175);
+
+            guardDamagesPlayer = true;
+            player.IsDead = true;
+            SetFieldValue(script, "_justiceMonotonicTimeMs", 2100L);
+            InvokeInstance(
+                script,
+                "UpdateJusticeCustodyGuardRetaliation",
+                player,
+                2100);
+
+            Assert.AreEqual(
+                guard.Handle,
+                GetFieldValue<int>(
+                    script,
+                    "_justiceCustodyLastDamagingGuardHandle"),
+                "Le front garde doit être consommé même si le tueur exact est tiers.");
+            Assert.IsTrue(GetFieldValue<bool>(
+                script,
+                "_justiceCustodyGuardDeathCauseEvaluated"));
+            Assert.IsFalse(
+                GetFieldValue<bool>(
+                    script,
+                    "_justiceCustodyGuardDeathPenaltyPending"),
+                "Un tueur tiers valide doit toujours interdire la minute supplémentaire.");
+        }
+        finally
+        {
+            GTA.StubRuntime.DamageHandler = null;
+            GTA.StubRuntime.KillerHandler = null;
+        }
+#endif
+    }
+
+    [TestMethod]
+    public void CustodyGuardDeathAttribution_RejectsThirdPartiesStaleProofAndReusedHandles()
+    {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped player = GTA.Game.Player.Character;
+        player.Handle = 831;
+        player.Model = new GTA.Model("player_zero");
+        player.IsDead = true;
+
+        object script = CreateJusticeHeadlessScript();
+        GTA.Ped guard = new GTA.Ped
+        {
+            Handle = 832,
+            Model = new GTA.Model("s_m_m_prisguard_01")
+        };
+        ((IList)GetFieldValue<object>(script, "_justiceCustodyGuards")).Add(guard);
+        Assert.AreEqual(
+            true,
+            InvokeInstance(script, "RememberJusticeCustodyPedOwnership", guard));
+        int generation = (int)InvokeInstance(
+            script,
+            "GetJusticeEntityGeneration",
+            guard);
+
+        SetFieldValue(script, "_justiceMonotonicTimeMs", 10000L);
+        SetFieldValue(script, "_justiceCustodyLastDamagingGuardHandle", guard.Handle);
+        SetFieldValue(script, "_justiceCustodyLastDamagingGuardGeneration", generation);
+        SetFieldValue(script, "_justiceCustodyLastGuardDamageAtMs", 4001L);
+        GTA.StubRuntime.KillerHandler = _ => null;
+        Assert.AreEqual(
+            true,
+            InvokeInstance(script, "IsJusticeCustodyDeathCausedByOwnedGuard", player));
+
+        SetFieldValue(script, "_justiceCustodyLastGuardDamageAtMs", 4000L);
+        Assert.AreEqual(
+            false,
+            InvokeInstance(script, "IsJusticeCustodyDeathCausedByOwnedGuard", player),
+            "Une preuve vieille d'exactement six secondes doit être exclue.");
+
+        GTA.Ped inmate = new GTA.Ped
+        {
+            Handle = 833,
+            Model = new GTA.Model("s_m_y_prisoner_01")
+        };
+        GTA.StubRuntime.KillerHandler = _ => inmate;
+        SetFieldValue(script, "_justiceCustodyLastGuardDamageAtMs", 9999L);
+        Assert.AreEqual(
+            false,
+            InvokeInstance(script, "IsJusticeCustodyDeathCausedByOwnedGuard", player),
+            "Un tueur tiers valide interdit toujours le fallback récent.");
+
+        GTA.StubRuntime.KillerHandler = _ => guard;
+        Assert.AreEqual(
+            true,
+            InvokeInstance(script, "IsJusticeCustodyDeathCausedByOwnedGuard", player));
+
+        GTA.Ped reusedHandle = new GTA.Ped
+        {
+            Handle = guard.Handle,
+            Model = new GTA.Model("s_m_y_prisoner_01")
+        };
+        GTA.StubRuntime.KillerHandler = _ => reusedHandle;
+        Assert.AreEqual(
+            false,
+            InvokeInstance(script, "IsJusticeCustodyDeathCausedByOwnedGuard", player),
+            "Un handle recyclé avec une nouvelle génération ne doit pas être attribué au garde.");
+        GTA.StubRuntime.KillerHandler = null;
 #endif
     }
 
@@ -2623,7 +3222,7 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void CustodyPeds_KeepNaturalEventsEnabledAndNoForcedRetaliationPath()
+    public void CustodyPeds_KeepNaturalEventsEnabledAndRetaliationTargetsOwnedGuardsOnly()
     {
         string source = File.ReadAllText(Path.Combine(
             GetRepositoryRoot(),
@@ -2635,7 +3234,11 @@ public sealed class JusticeRuntimeContractTests
         StringAssert.Contains(
             creation,
             "JusticeNativeSetBlockingOfNonTemporaryEvents, ped.Handle, false");
-        Assert.IsFalse(source.Contains("Hash.TASK_COMBAT_PED"));
+        string retaliation = ExecutableMethodBody(
+            source,
+            "UpdateJusticeCustodyGuardRetaliation");
+        StringAssert.Contains(retaliation, "_justiceCustodyGuards");
+        Assert.IsFalse(retaliation.Contains("_justiceCustodyInmates"));
         Assert.IsFalse(source.Contains("TryGetJusticeCustodyMisconduct"));
     }
 
@@ -2685,7 +3288,10 @@ public sealed class JusticeRuntimeContractTests
             "DonJEnemySpawner",
             "DonJEnemySpawner.Justice.Custody.cs"));
         string transfer = ExecutableMethodBody(custodySource, "CompleteJusticeCustodyTransfer");
-        string emergency = ExecutableMethodBody(custodySource, "TryJusticeEmergencyTeleport");
+        string emergency = ExecutableMethodBodyContaining(
+            custodySource,
+            "TryJusticeEmergencyTeleport",
+            "SetEntityCoordsNoOffsetSafe(");
 
         AssertOrdered(
             transfer,
@@ -3052,6 +3658,21 @@ public sealed class JusticeRuntimeContractTests
         state.Phase = JusticePhase.AtLarge;
 
         Assert.IsFalse((bool)InvokeInstance(script, "HasJusticeCustodyRecoveryState"));
+        SetFieldValue(
+            script,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => 0));
+        SetFieldValue(
+            script,
+            "_justicePlayerMortalityVerificationOverride",
+            new Func<int, bool>(slot => false));
+        Assert.IsFalse(
+            (bool)InvokeInstance(script, "JusticeAmnestyCustody"),
+            "L'amnistie doit rester ouverte si la mortalité n'est pas prouvée.");
+        SetFieldValue(
+            script,
+            "_justicePlayerMortalityVerificationOverride",
+            new Func<int, bool>(slot => true));
         Assert.IsTrue(
             (bool)InvokeInstance(script, "JusticeAmnestyCustody"),
             "Un dossier en jeu libre ne possède aucun inventaire de détenu à restaurer.");
@@ -3093,7 +3714,7 @@ public sealed class JusticeRuntimeContractTests
             "ObserveJusticeCustodyDeathDuringSuspension");
         AssertOrdered(
             suspendedDeath,
-            "TryPersistJusticeCustodyDeathFrontToWal(player)",
+            "TryPersistJusticeCustodyDeathFrontToWal(",
             "ArmJusticeCustodyDeathFailClosedState(");
         string armDeathFailClosed = ExecutableMethodBody(
             source,
@@ -3353,8 +3974,8 @@ public sealed class JusticeRuntimeContractTests
             "CanMaskJusticeCustodyRespawnOrigin(player)",
             "GetJusticeCustodySiteForSentence(",
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
-            "EnsureJusticeCustodyPlayerMobility(player)",
             "CompleteJusticePreJudgmentHoldingStreamingProtection(player)",
+            "EnsureJusticeCustodyPlayerMobility(player)",
             "_justiceCustodyPersistenceOutageHoldingEstablished = true",
             "TryRestoreJusticeCustodyRespawnTransferMask()");
         Assert.IsFalse(outageHolding.Contains("TeleportPlayerWithFadeSafe("));
@@ -3475,6 +4096,9 @@ public sealed class JusticeRuntimeContractTests
         Assert.IsTrue(GetFieldValue<bool>(
             script,
             "_justiceCustodyRespawnMaskNeedsRearm"));
+        // Je reproduis la réouverture de l'écran par GTA entre WASTED et le ped
+        // vivant : le runtime doit constater l'état réel et renvoyer le fondu.
+        GTA.StubRuntime.ScreenFadedOut = false;
         int fadeOutBeforeSecondRespawn = GTA.StubRuntime.NativeCalls.Count(call =>
             call.Hash == (ulong)GTA.Native.Hash.DO_SCREEN_FADE_OUT);
         player.IsDead = false;
@@ -3647,7 +4271,7 @@ public sealed class JusticeRuntimeContractTests
             "inventoryPreparation != JusticeInventoryPreparationResult.Ready",
             "TeleportPlayerWithFadeSafe(player");
         Assert.IsFalse(source.Contains("PlayerInvincibilityOwner.JusticeDiscipline"));
-        Assert.IsFalse(source.Contains("Hash.TASK_COMBAT_PED"));
+        StringAssert.Contains(source, "CommandJusticeCustodyGuardCombatIfDue");
     }
 
     [TestMethod]
@@ -4226,12 +4850,14 @@ public sealed class JusticeRuntimeContractTests
             new[]
             {
                 "JusticeEnabled", "JusticeProfile", "JusticeStatus", "JusticeLastCrime", "JusticeSeverity",
-                "JusticeWarrant", "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticeFineDispute",
+                "JusticeWarrant", "JusticeRecognitionStatus", "JusticeRecognitionPlate",
+                "JusticeRecognitionOutfit", "JusticeRecognitionWarrant", "JusticeRecognitionDistance",
+                "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticeFineDispute",
                 "JusticePayFine", "JusticeResolveFineDispute", "JusticeSentence", "JusticeRecidivism",
                 "JusticePoliceMode", "JusticeRecovery", "JusticeDiagnostic", "JusticeResetProfile"
             },
             justicePage.Cast<object>().Select(entry => GetMemberValue(entry, "Action").ToString()).ToArray());
-        Assert.AreEqual(18, justicePage.Count);
+        Assert.AreEqual(23, justicePage.Count);
         Assert.AreEqual(
             "Normal",
             GetMemberValue(
@@ -4634,6 +5260,7 @@ public sealed class JusticeRuntimeContractTests
         {
             InitializeEmptyCollectionField(script, field);
         }
+        InitializeJusticeDamagePairBaselineBuffer(script);
 
         // Je reproduis ici les valeurs des initialiseurs que
         // FormatterServices.GetUninitializedObject n'exécute pas.
@@ -5182,6 +5809,44 @@ public sealed class JusticeRuntimeContractTests
         return StripSourceComments(ExtractMethodBody(source, methodName));
     }
 
+    private static string ExecutableMethodBodyContaining(
+        string source,
+        string methodName,
+        string requiredFragment)
+    {
+        string marker = methodName + "(";
+        int searchAt = 0;
+        while (searchAt < source.Length)
+        {
+            int candidate = source.IndexOf(marker, searchAt, StringComparison.Ordinal);
+            if (candidate < 0)
+            {
+                break;
+            }
+
+            int lineStart = source.LastIndexOf('\n', candidate);
+            lineStart = lineStart < 0 ? 0 : lineStart + 1;
+            string declarationPrefix = source.Substring(
+                lineStart,
+                candidate - lineStart);
+            if (declarationPrefix.IndexOf("private ", StringComparison.Ordinal) >= 0)
+            {
+                string body = StripSourceComments(
+                    ExtractMethodBody(source.Substring(lineStart), methodName));
+                if (body.IndexOf(requiredFragment, StringComparison.Ordinal) >= 0)
+                {
+                    return body;
+                }
+            }
+            searchAt = candidate + marker.Length;
+        }
+
+        Assert.Fail(
+            "Surcharge source introuvable : " + methodName +
+            " contenant " + requiredFragment);
+        return string.Empty;
+    }
+
     private static string StripSourceComments(string source)
     {
         return Regex.Replace(
@@ -5275,6 +5940,19 @@ public sealed class JusticeRuntimeContractTests
         FieldInfo field = target.GetType().GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.IsNotNull(field, "Collection privée introuvable : " + fieldName);
         field.SetValue(target, Activator.CreateInstance(field.FieldType, true));
+    }
+
+    private static void InitializeJusticeDamagePairBaselineBuffer(object target)
+    {
+        IList buffer = GetFieldValue<IList>(target, "_justiceDamagePairBaselines");
+        Type itemType = GetNestedType("JusticeDamagePairBaseline");
+        int capacity = GetStaticFieldValue<int>("JusticeMaximumDamagePairBaselines");
+        while (buffer.Count < capacity)
+        {
+            // Je reproduis le préchauffage du tableau logique que le constructeur
+            // saute lorsque le harness utilise FormatterServices.
+            buffer.Add(Activator.CreateInstance(itemType, true));
+        }
     }
 
     private static void SetEnumField(object target, string fieldName, string value)

@@ -27,6 +27,7 @@ public sealed class JusticeTypedPersistenceDtoTests
         // worker ne conserve aucun alias vers le dossier, les charges ou le casier.
         sourceCase.Enabled = false;
         sourceCase.ActiveScore = 999;
+        sourceCase.CustodyGuardPenaltySeconds = 999L;
         sourceCase.WantedEpisodeId = "wanted:mutated";
         sourceCase.CompletedOperationIds.Clear();
         sourceCase.ProcessedIncidentIds.Add("incident:mutated");
@@ -222,6 +223,7 @@ public sealed class JusticeTypedPersistenceDtoTests
             VoluntaryFinePaid = 150L,
             FineInDispute = 50L,
             SentenceSeconds = 240,
+            CustodyGuardPenaltySeconds = 60L,
             HasWarrant = true,
             EscapeWantedMinimumPending = false,
             EscapeWantedMinimumAttempted = false,

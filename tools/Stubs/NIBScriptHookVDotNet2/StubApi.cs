@@ -54,6 +54,7 @@ namespace GTA
         public static Ped[] NearbyPeds { get; set; } = new Ped[0];
         public static Vehicle[] NearbyVehicles { get; set; } = new Vehicle[0];
         public static Vehicle[] AllVehicles { get; set; } = new Vehicle[0];
+        public static bool ScreenFadedOut { get; set; }
 
         public static IList<StubNativeInvocation> NativeCalls
         {
@@ -82,6 +83,7 @@ namespace GTA
             NearbyPeds = new Ped[0];
             NearbyVehicles = new Vehicle[0];
             AllVehicles = new Vehicle[0];
+            ScreenFadedOut = false;
             Game.GameTime = 0;
             Game.LastFrameTime = 0.016f;
             Game.ScreenResolution = new Size(1280, 720);
@@ -104,7 +106,32 @@ namespace GTA
             }
 
             Func<ulong, object[], object> handler = NativeCallHandler;
-            return handler == null ? null : handler(hash, safeArguments);
+            object handled = handler == null
+                ? null
+                : handler(hash, safeArguments);
+            if (handled != null)
+            {
+                return handled;
+            }
+
+            switch (hash)
+            {
+                case (ulong)Hash.DO_SCREEN_FADE_OUT:
+                    ScreenFadedOut = true;
+                    return null;
+                case (ulong)Hash.DO_SCREEN_FADE_IN:
+                    ScreenFadedOut = false;
+                    return null;
+                case (ulong)Hash.IS_SCREEN_FADED_OUT:
+                    return ScreenFadedOut;
+                case (ulong)Hash.IS_SCREEN_FADED_IN:
+                    return !ScreenFadedOut;
+                case (ulong)Hash.IS_SCREEN_FADING_OUT:
+                case (ulong)Hash.IS_SCREEN_FADING_IN:
+                    return false;
+                default:
+                    return null;
+            }
         }
     }
 
@@ -812,6 +839,10 @@ namespace GTA.Native
         IS_PLAYER_BEING_ARRESTED = 0x388A47C51ABDAC8E,
         IS_PLAYER_FREE_AIMING_AT_ENTITY = 0x3C06B5C839B38F7B,
         IS_PLAYER_TARGETTING_ENTITY = 0x7912F7FC4F6264B6,
+        IS_SCREEN_FADED_IN = 0x5A859503B0C08678,
+        IS_SCREEN_FADED_OUT = 0xB16FCE9DDC7BA182,
+        IS_SCREEN_FADING_IN = 0x5C544BC6C57AC575,
+        IS_SCREEN_FADING_OUT = 0x797AC7CB535BA28F,
         IS_VEHICLE_DRIVEABLE = 0x4C241E39B23DF959,
         IS_VEHICLE_SEAT_FREE = 0x22AC59A870E6A669,
         REQUEST_COLLISION_AT_COORD = 0x07503F7948F491A7,

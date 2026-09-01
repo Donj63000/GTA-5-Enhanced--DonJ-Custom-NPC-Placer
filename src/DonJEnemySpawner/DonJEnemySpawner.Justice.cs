@@ -345,6 +345,10 @@ public sealed partial class DonJEnemySpawner
 
     private void InitializeJusticeSystem()
     {
+        // Je garde la reconnaissance fermée tant que le profil Justice, sa
+        // préférence ON/OFF et les reprises transactionnelles ne sont pas sûrs.
+        InitializeJusticeRecognitionFailClosed();
+
         // Je laisse ce crochet désactivé au runtime ; les tests headless peuvent
         // l'injecter par réflexion sans que la build Release signale un champ non initialisé.
         _justiceWantedWriteOverride = null;
@@ -398,6 +402,7 @@ public sealed partial class DonJEnemySpawner
         _justiceWasDead = IsJusticePlayerDeadSafe(Game.Player.Character);
         _justiceNextCheckpointAtMs = JusticeStateCheckpointMs;
         _justiceInitialized = true;
+        BindAndSynchronizeJusticeRecognition();
 
         // La migration est désormais sauvegardée dans le nouveau snapshot.
         // Si le writer est temporairement indisponible, le dirty flag conservera
@@ -424,6 +429,10 @@ public sealed partial class DonJEnemySpawner
         {
             return;
         }
+
+        // Je synchronise à chaque tick le protagoniste canonique et les barrières
+        // critiques. Les appels vers le module ne partent que si l'état a changé.
+        SynchronizeJusticeRecognition();
 
         AdvanceJusticeMonotonicClock();
 
@@ -734,8 +743,21 @@ public sealed partial class DonJEnemySpawner
             (!_justicePursuitDeathObservedDuringSuspension ||
              IsJusticeCapturedAwaitingPrecommit()))
         {
-            if (BeginJusticeCapture(_justiceCaptureRetryDeath))
+            bool retryWasDeathCapture = _justiceCaptureRetryDeath;
+            if (BeginJusticeCapture(retryWasDeathCapture))
             {
+                if (retryWasDeathCapture &&
+                    _justicePursuitDeathObservedDuringSuspension &&
+                    IsJusticeCapturePrecommitConfirmedForCurrentEpisode() &&
+                    JusticeIsCustodyActive)
+                {
+                    // Je consomme le marqueur seulement après le précommit
+                    // redondant et l'armement réel du transfert. Le retry ne doit
+                    // pas laisser PendingDeathCapture survivre à la capture.
+                    ClearPendingJusticeDeathCapture();
+                    JusticeMarkStateDirty();
+                    JusticeFlushStateNow();
+                }
                 _justiceCaptureRetryPending = false;
                 _justiceCaptureRetryDeath = false;
             }
@@ -1633,6 +1655,10 @@ public sealed partial class DonJEnemySpawner
 
     private void ShutdownJusticeSystem()
     {
+        // Je détache le callback statique même après une initialisation partielle,
+        // afin qu'aucune ancienne instance du script principal ne reste référencée.
+        ShutdownJusticeRecognition();
+
         if (!_justiceInitialized)
         {
             return;
@@ -1876,6 +1902,7 @@ public sealed partial class DonJEnemySpawner
 
         _justiceEnabled = targetEnabled;
         _justiceCaseState.Enabled = targetEnabled;
+        SynchronizeJusticeRecognition(true);
 
         if (targetEnabled)
         {
@@ -2260,6 +2287,18 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
+        // Je rends d'abord l'intention de nettoyage reconnaissance rejouable.
+        // Le dossier Justice ne devient terminal qu'après cette preuve séparée.
+        if (!ClearJusticeRecognitionProfile(
+            _justiceActivePlayerProfileSlot,
+            "amnistie explicitement confirmée"))
+        {
+            ShowStatus(
+                "Amnistie préparée; journal de reconnaissance à reprendre…",
+                4200);
+            return false;
+        }
+
         _justiceAmnestyPending = false;
         _justiceAmnestyWantedClearAttempted = false;
         JusticeMarkStateDirty();
@@ -2286,6 +2325,16 @@ public sealed partial class DonJEnemySpawner
     {
         if (!TryApplyJusticeAmnestyWantedClear())
         {
+            return false;
+        }
+
+        if (!ClearJusticeRecognitionProfile(
+            _justiceActivePlayerProfileSlot,
+            "reprise confirmée de l'amnistie explicite"))
+        {
+            ShowStatus(
+                "Justice : nettoyage reconnaissance durable à reprendre.",
+                4200);
             return false;
         }
 
@@ -2341,6 +2390,8 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
+        SuppressJusticeRecognitionWantedLoss(
+            "amnistie judiciaire explicitement confirmée");
         JusticeWantedClearResult result = ClearJusticeWantedLevelOnceDetailed();
         if (result == JusticeWantedClearResult.Rejected)
         {
@@ -2375,7 +2426,7 @@ public sealed partial class DonJEnemySpawner
                (_justiceCaseState.Charges.Count > 0 ||
                 _justiceCaseState.ActiveScore > 0 ||
                 _justiceCaseState.FineDue > 0L ||
-                _justiceCaseState.SentenceSeconds > 0 ||
+                GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState) > 0L ||
                 _justiceCaseState.HasWarrant);
     }
 
@@ -2462,7 +2513,8 @@ public sealed partial class DonJEnemySpawner
         // remise en liberté immédiate au lieu d'un réveil au poste. Je ne
         // considère donc le dossier suffisant que s'il porte déjà une peine
         // privative de liberté.
-        if (HasActiveJusticeCase() && _justiceCaseState.SentenceSeconds > 0)
+        if (HasActiveJusticeCase() &&
+            GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState) > 0L)
         {
             return true;
         }
@@ -2522,7 +2574,8 @@ public sealed partial class DonJEnemySpawner
                     : source.Trim()) + ".");
         }
 
-        if (HasActiveJusticeCase() && _justiceCaseState.SentenceSeconds > 0)
+        if (HasActiveJusticeCase() &&
+            GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState) > 0L)
         {
             return true;
         }
@@ -4149,7 +4202,9 @@ public sealed partial class DonJEnemySpawner
 
         string notificationDetail = GetJusticeSeverityDisplay() + "  •  " +
                                     FormatJusticeMoney(_justiceCaseState.FineDue) + "  •  " +
-                                    FormatJusticeDuration(_justiceCaseState.SentenceSeconds);
+                                    FormatJusticeDuration(
+                                        GetJusticeCustodyTotalRemainingSeconds(
+                                            _justiceCaseState));
         ShowStatus(
             "Justice · " + charge.DisplayName + " · " + notificationDetail,
             JusticeNotificationMs);
@@ -4473,7 +4528,13 @@ public sealed partial class DonJEnemySpawner
 
     private void UpdateJusticeWarrantRecognition(Ped player)
     {
-        if (!_justiceCaseState.HasWarrant || _justiceLastWantedLevel > 0)
+        // Je conserve le mandat judiciaire durable dans le dossier, mais je ne
+        // lance pas son ancien scan informatif quand le module de mandat local
+        // observe déjà ce même protagoniste. Cela évite deux observations et
+        // une notification sans hausse wanted à côté de la vraie identification.
+        if (IsJusticeLocalWarrantRecognitionActive() ||
+            !_justiceCaseState.HasWarrant ||
+            _justiceLastWantedLevel > 0)
         {
             _justiceRecognitionCandidateHandle = 0;
             _justiceRecognitionCandidateGeneration = 0;
@@ -4541,11 +4602,26 @@ public sealed partial class DonJEnemySpawner
         _justiceNextWarrantScanAtMs =
             _justiceMonotonicTimeMs + JusticeWarrantRecognitionNotificationCooldownMs;
         ShowStatus(
-            "Justice : mandat reconnu par une patrouille. GTA gère seul la recherche.",
+            "Justice : mandat judiciaire actif repéré par une patrouille, sans hausse automatique.",
             3600);
         LogInfo(
             "Justice.Mandat",
-            "Mandat reconnu sans écriture du niveau wanted; GTA reste autoritaire.");
+            "Mandat judiciaire actif repéré sans écriture du niveau wanted; GTA reste autoritaire.");
+    }
+
+    private bool IsJusticeLocalWarrantRecognitionActive()
+    {
+        // Je qualifie uniquement l'état déjà synchronisé par Justice : le
+        // nouveau module doit être activé, non suspendu, lié au profil actif et
+        // confirmer une vraie zone locale non expirée. Hors zone, l'observation
+        // judiciaire historique reste disponible sans jamais écrire le wanted.
+        return _justiceRecognitionSynchronizedEnabled == true &&
+               _justiceRecognitionSynchronizedSuspended == false &&
+               IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot) &&
+               _justiceRecognitionSynchronizedProfileSlot ==
+                   _justiceActivePlayerProfileSlot &&
+               DonJ.JusticeRecognition.JusticeRecognitionBridge
+                   .HasActiveSearchZone();
     }
 
     private void UpdateJusticeEvadingPoliceCharge(Ped player)
@@ -4719,6 +4795,10 @@ public sealed partial class DonJEnemySpawner
         _justicePursuitActive = false;
         _justiceWantedEpisodeStartedAtMs = 0L;
         LogInfo("Justice.Capture", deathCapture ? "Capture apres mort en poursuite." : "Arrestation confirmee.");
+        SuppressJusticeRecognitionWantedLoss(
+            deathCapture
+                ? "capture judiciaire après mort"
+                : "arrestation judiciaire confirmée");
         ClearJusticeWantedLevelOnce();
         JusticeBeginCustodyTransfer(deathCapture);
     }
@@ -5595,6 +5675,8 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
+        SuppressJusticeRecognitionWantedLoss(
+            "reprise bornée d'une amnistie judiciaire");
         if (ClearJusticeWantedLevelOnce())
         {
             LogInfo("Justice.Amnistie", "Wanted GTA effacé lors de la reprise bornée.");
@@ -7206,6 +7288,10 @@ public sealed partial class DonJEnemySpawner
             "fineInDispute",
             Math.Max(0L, state.FineInDispute).ToString(CultureInfo.InvariantCulture));
         writer.WriteAttributeString("sentenceSeconds", state.SentenceSeconds.ToString(CultureInfo.InvariantCulture));
+        writer.WriteAttributeString(
+            "custodyGuardPenaltySeconds",
+            Math.Max(0L, state.CustodyGuardPenaltySeconds).ToString(
+                CultureInfo.InvariantCulture));
         writer.WriteAttributeString("hasWarrant", state.HasWarrant ? "true" : "false");
         writer.WriteAttributeString(
             "escapeWantedMinimumPending",
@@ -8381,6 +8467,7 @@ public sealed partial class DonJEnemySpawner
         long voluntaryFinePaid;
         long fineInDispute;
         int sentenceSeconds;
+        long custodyGuardPenaltySeconds;
         if (!TryReadJusticeBoolStrict(element, "enabled", false, out enabled) ||
             !TryReadJusticeIntStrict(
                 element,
@@ -8415,8 +8502,15 @@ public sealed partial class DonJEnemySpawner
                 "sentenceSeconds",
                 0,
                 0,
-                JusticePolicy.MaxActiveSentenceSeconds,
-                out sentenceSeconds) ||
+                 JusticePolicy.MaxActiveSentenceSeconds,
+                 out sentenceSeconds) ||
+            !TryReadJusticeLongStrict(
+                element,
+                "custodyGuardPenaltySeconds",
+                0L,
+                0L,
+                long.MaxValue,
+                out custodyGuardPenaltySeconds) ||
             !TryReadJusticeBoolStrict(element, "hasWarrant", false, out hasWarrant) ||
             !TryReadJusticeBoolStrict(
                 element,
@@ -8440,6 +8534,7 @@ public sealed partial class DonJEnemySpawner
             VoluntaryFinePaid = voluntaryFinePaid,
             FineInDispute = fineInDispute,
             SentenceSeconds = sentenceSeconds,
+            CustodyGuardPenaltySeconds = custodyGuardPenaltySeconds,
             HasWarrant = hasWarrant,
             EscapeWantedMinimumPending = escapeWantedMinimumPending,
             EscapeWantedMinimumAttempted = escapeWantedMinimumAttempted,
@@ -8807,7 +8902,7 @@ public sealed partial class DonJEnemySpawner
 
         bool hasDossier = state.Charges.Count > 0 || state.ActiveScore > 0 ||
                           state.FineDue > 0L || state.FineInDispute > 0L ||
-                          state.SentenceSeconds > 0;
+                          GetJusticeCustodyTotalRemainingSeconds(state) > 0L;
         bool custodyPhase = state.Phase == JusticePhase.Captured ||
                             state.Phase == JusticePhase.Transporting ||
                             state.Phase == JusticePhase.Incarcerated ||
@@ -8893,7 +8988,7 @@ public sealed partial class DonJEnemySpawner
     {
         return state != null &&
             (state.Charges.Count > 0 || state.ActiveScore > 0 || state.FineDue > 0L ||
-             state.SentenceSeconds > 0 || state.HasWarrant ||
+             GetJusticeCustodyTotalRemainingSeconds(state) > 0L || state.HasWarrant ||
              state.Phase != JusticePhase.AtLarge ||
              !string.IsNullOrWhiteSpace(state.WantedEpisodeId) ||
              !string.IsNullOrWhiteSpace(state.CustodyEpisodeId));
@@ -9432,7 +9527,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         if (_justiceFineDebitIntent == null &&
-            _justiceCaseState.SentenceSeconds > 0 &&
+            GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState) > 0L &&
             (_justiceCaseState.Phase == JusticePhase.Transporting ||
              _justiceCaseState.Phase == JusticePhase.Escaping))
         {
@@ -9766,7 +9861,8 @@ public sealed partial class DonJEnemySpawner
 
     private string GetJusticeSentenceDisplay()
     {
-        return FormatJusticeDuration(_justiceCaseState == null ? 0 : _justiceCaseState.SentenceSeconds);
+        return FormatJusticeDuration(
+            GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState));
     }
 
     private string GetJusticeRecidivismDisplay()
@@ -9781,11 +9877,11 @@ public sealed partial class DonJEnemySpawner
         return bounded.ToString("N0", CultureInfo.InvariantCulture).Replace(",", " ") + "$";
     }
 
-    private static string FormatJusticeDuration(int seconds)
+    private static string FormatJusticeDuration(long seconds)
     {
-        int bounded = Math.Max(0, Math.Min(JusticePolicy.MaxActiveSentenceSeconds, seconds));
-        int minutes = bounded / 60;
-        int remainingSeconds = bounded % 60;
+        long bounded = Math.Max(0L, seconds);
+        long minutes = bounded / 60L;
+        long remainingSeconds = bounded % 60L;
         return minutes.ToString(CultureInfo.InvariantCulture) + ":" +
                remainingSeconds.ToString("00", CultureInfo.InvariantCulture);
     }

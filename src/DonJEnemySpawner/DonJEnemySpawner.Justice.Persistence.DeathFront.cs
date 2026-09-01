@@ -10,6 +10,7 @@ public sealed partial class DonJEnemySpawner
     private const string JusticePoliceDeathFrontMode = "PoliceCapture";
     private const string JusticePoliceArrestFrontMode = "PoliceArrest";
     private const string JusticeCustodyDeathFrontMode = "CustodyRebind";
+    private const long JusticeDeathFrontGuardPenaltySeconds = 60L;
 
     private JusticeWalRecord _justicePendingDeathFrontWalRecord;
     private Dictionary<string, long> _justiceDeathFrontResultCandidates;
@@ -79,13 +80,20 @@ public sealed partial class DonJEnemySpawner
 
     private bool TryPersistJusticeCustodyDeathFrontToWal(Ped player)
     {
+        return TryPersistJusticeCustodyDeathFrontToWal(player, false);
+    }
+
+    private bool TryPersistJusticeCustodyDeathFrontToWal(
+        Ped player,
+        bool guardPenaltyRequired)
+    {
         int ownerSlot = IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot)
             ? _justiceActivePlayerProfileSlot
             : _justiceCustodyPlayerSlot;
         int playerModel = _justiceCustodyPlayerModelHash != 0
             ? _justiceCustodyPlayerModelHash
             : GetJusticePedModelHashSafe(player);
-        return TryPersistJusticeDeathFrontToWal(
+        return TryPersistJusticeDeathFrontToWalWithCustodyGuardPenalty(
             JusticeCustodyDeathFrontMode,
             ownerSlot,
             _justiceCaseState == null
@@ -93,7 +101,8 @@ public sealed partial class DonJEnemySpawner
                 : _justiceCaseState.CustodyEpisodeId,
             (int)_justiceCustodySite,
             _justiceCustodyPlayerSlot,
-            playerModel);
+            playerModel,
+            guardPenaltyRequired);
     }
 
     private bool TryPersistJusticeDeathFrontToWal(
@@ -103,6 +112,25 @@ public sealed partial class DonJEnemySpawner
         int custodySite,
         int playerSlot,
         int playerModel)
+    {
+        return TryPersistJusticeDeathFrontToWalWithCustodyGuardPenalty(
+            mode,
+            ownerSlot,
+            episodeId,
+            custodySite,
+            playerSlot,
+            playerModel,
+            false);
+    }
+
+    private bool TryPersistJusticeDeathFrontToWalWithCustodyGuardPenalty(
+        string mode,
+        int ownerSlot,
+        string episodeId,
+        int custodySite,
+        int playerSlot,
+        int playerModel,
+        bool guardPenaltyRequired)
     {
         if ((mode == JusticeCustodyDeathFrontMode &&
              string.IsNullOrWhiteSpace(episodeId)) ||
@@ -129,6 +157,15 @@ public sealed partial class DonJEnemySpawner
             string identityKey = owner == null
                 ? string.Empty
                 : CreateJusticeProfileIdentityKey(owner);
+            long custodyGuardPenaltyBefore = owner == null ||
+                owner.CaseState == null
+                    ? 0L
+                    : Math.Max(0L, owner.CaseState.CustodyGuardPenaltySeconds);
+            long custodyGuardPenaltyAfter = mode == JusticeCustodyDeathFrontMode &&
+                guardPenaltyRequired
+                    ? CalculateJusticeCustodyGuardPenaltyAfterDeath(
+                        custodyGuardPenaltyBefore)
+                    : custodyGuardPenaltyBefore;
             long createdAtUtcTicks = Math.Max(1L, DateTime.UtcNow.Ticks);
             if (mode == JusticePoliceArrestFrontMode &&
                 string.IsNullOrWhiteSpace(episodeId))
@@ -156,7 +193,7 @@ public sealed partial class DonJEnemySpawner
                     ? playerModel
                     : _justiceLastCanonicalPlayerModelHash;
             List<JusticePersistenceField> fields =
-                CreateJusticeDeathFrontWalFields(
+                CreateJusticeDeathFrontWalFieldsWithCustodyPenalty(
                     mode,
                     baseRevision,
                     profileGeneration,
@@ -166,7 +203,9 @@ public sealed partial class DonJEnemySpawner
                     playerSlot,
                     playerModel,
                     deathCanonicalSlot,
-                    deathCanonicalModel);
+                    deathCanonicalModel,
+                    custodyGuardPenaltyBefore,
+                    custodyGuardPenaltyAfter);
             prepared = new JusticeWalRecord(
                 "death-front:" +
                     ownerSlot.ToString(CultureInfo.InvariantCulture) + ":" +
@@ -197,6 +236,13 @@ public sealed partial class DonJEnemySpawner
             // Je ne mélange jamais deux morts dans la même transaction. Le front
             // déjà durable doit être repris avant d'en accepter un second.
             return false;
+        }
+
+        if (mode == JusticePoliceDeathFrontMode)
+        {
+            // Je masque l'origine hospitalière dès que le Prepared exact existe,
+            // sans attendre la disponibilité ni les rotations du repository.
+            ArmJusticePoliceDeathRespawnMaskForAcceptedFront(ownerSlot, playerModel);
         }
 
         InitializeJusticePersistenceServices();
@@ -232,6 +278,15 @@ public sealed partial class DonJEnemySpawner
         if (pending == null)
         {
             return true;
+        }
+        if (IsJusticeDeathFrontWalRecordExact(pending) && string.Equals(
+            ReadWalString(pending, "mode", string.Empty),
+            JusticePoliceDeathFrontMode,
+            StringComparison.Ordinal))
+        {
+            ArmJusticePoliceDeathRespawnMaskForAcceptedFront(
+                pending.ProfileSlot,
+                ReadWalInt(pending, "playerModel", 0));
         }
         InitializeJusticePersistenceServices();
         if (_justiceWriteAheadLog == null || _justiceRepository == null ||
@@ -334,6 +389,13 @@ public sealed partial class DonJEnemySpawner
             "profileGeneration",
             -1L);
         bool ownerIsActive = record.ProfileSlot == _justiceActivePlayerProfileSlot;
+        if (mode == JusticePoliceDeathFrontMode)
+        {
+            ArmJusticePoliceDeathRespawnMaskForAcceptedFront(
+                record.ProfileSlot,
+                playerModel);
+        }
+
         if (mode == JusticePoliceDeathFrontMode ||
             mode == JusticePoliceArrestFrontMode)
         {
@@ -432,6 +494,13 @@ public sealed partial class DonJEnemySpawner
                 throw new InvalidDataException(
                     "Le front de décès en détention ne correspond plus à sa peine.");
             }
+
+            // Je valide d'abord tout le propriétaire de détention. Un WAL périmé
+            // ne doit jamais modifier la prolongation en mémoire avant d'être
+            // rejeté pour site, épisode, slot ou modèle incompatible.
+            ApplyJusticeCustodyGuardPenaltyFromDeathFront(
+                owner.CaseState,
+                record);
             owner.CustodySnapshot =
                 CloneJusticeCustodyPersistenceSnapshotForDeathRebind(
                     custody,
@@ -484,7 +553,7 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
         if (owner.CaseState.Charges.Count > 0 &&
-            owner.CaseState.SentenceSeconds > 0)
+            GetJusticeCustodyTotalRemainingSeconds(owner.CaseState) > 0L)
         {
             return true;
         }
@@ -518,7 +587,7 @@ public sealed partial class DonJEnemySpawner
                 owner.RecordState);
         }
         return owner.CaseState.Charges.Count > 0 &&
-               owner.CaseState.SentenceSeconds > 0 &&
+               GetJusticeCustodyTotalRemainingSeconds(owner.CaseState) > 0L &&
                owner.CaseState.ProcessedIncidentIds.Contains(incidentId);
     }
 
@@ -889,7 +958,13 @@ public sealed partial class DonJEnemySpawner
                 ReadWalLong(record, "profileGeneration", -1L) ||
             !IsJusticeDeathFrontOwnerIdentityCompatible(
                 record,
-                owner.IdentityKey))
+                owner.IdentityKey) ||
+            (HasJusticeDeathFrontCustodyPenaltyFields(record) &&
+             (owner.CaseState == null ||
+              owner.CaseState.CustodyGuardPenaltySeconds != ReadWalLong(
+                  record,
+                  "custodyGuardPenaltyAfter",
+                  -1L))))
         {
             return false;
         }
@@ -941,6 +1016,15 @@ public sealed partial class DonJEnemySpawner
         JusticeWalRecord record)
     {
         if (owner == null || record == null)
+        {
+            return false;
+        }
+        if (HasJusticeDeathFrontCustodyPenaltyFields(record) &&
+            (owner.CaseState == null ||
+             owner.CaseState.CustodyGuardPenaltySeconds != ReadWalLong(
+                 record,
+                 "custodyGuardPenaltyAfter",
+                 -1L)))
         {
             return false;
         }
@@ -1135,7 +1219,36 @@ public sealed partial class DonJEnemySpawner
         int lastCanonicalSlot,
         int lastCanonicalModel)
     {
-        return new List<JusticePersistenceField>(11)
+        return CreateJusticeDeathFrontWalFieldsWithCustodyPenalty(
+            mode,
+            baseRevision,
+            profileGeneration,
+            identityKey,
+            episodeId,
+            custodySite,
+            playerSlot,
+            playerModel,
+            lastCanonicalSlot,
+            lastCanonicalModel,
+            0L,
+            0L);
+    }
+
+    private static List<JusticePersistenceField> CreateJusticeDeathFrontWalFieldsWithCustodyPenalty(
+        string mode,
+        long baseRevision,
+        long profileGeneration,
+        string identityKey,
+        string episodeId,
+        int custodySite,
+        int playerSlot,
+        int playerModel,
+        int lastCanonicalSlot,
+        int lastCanonicalModel,
+        long custodyGuardPenaltyBefore,
+        long custodyGuardPenaltyAfter)
+    {
+        return new List<JusticePersistenceField>(13)
         {
             new JusticePersistenceField("mode", mode),
             new JusticePersistenceField(
@@ -1162,6 +1275,12 @@ public sealed partial class DonJEnemySpawner
                 "lastCanonicalModel",
                 lastCanonicalModel.ToString(CultureInfo.InvariantCulture)),
             new JusticePersistenceField(
+                "custodyGuardPenaltyBefore",
+                custodyGuardPenaltyBefore.ToString(CultureInfo.InvariantCulture)),
+            new JusticePersistenceField(
+                "custodyGuardPenaltyAfter",
+                custodyGuardPenaltyAfter.ToString(CultureInfo.InvariantCulture)),
+            new JusticePersistenceField(
                 "schemaMajor",
                 JusticeXmlPersistenceCodec.SchemaMajor.ToString(
                     CultureInfo.InvariantCulture))
@@ -1170,25 +1289,41 @@ public sealed partial class DonJEnemySpawner
 
     private static bool IsJusticeDeathFrontWalRecordExact(JusticeWalRecord record)
     {
+        bool hasLegacyFields = HasExactJusticeWalFields(
+            record,
+            "mode",
+            "baseRevision",
+            "profileGeneration",
+            "identityKey",
+            "episodeId",
+            "custodySite",
+            "playerSlot",
+            "playerModel",
+            "lastCanonicalSlot",
+            "lastCanonicalModel",
+            "schemaMajor");
+        bool hasCustodyPenaltyFields = HasExactJusticeWalFields(
+            record,
+            "mode",
+            "baseRevision",
+            "profileGeneration",
+            "identityKey",
+            "episodeId",
+            "custodySite",
+            "playerSlot",
+            "playerModel",
+            "lastCanonicalSlot",
+            "lastCanonicalModel",
+            "custodyGuardPenaltyBefore",
+            "custodyGuardPenaltyAfter",
+            "schemaMajor");
         if (record == null ||
             !string.Equals(
                 record.OperationKind,
                 JusticeDeathFrontOperationKind,
                 StringComparison.Ordinal) ||
             !IsJusticeCanonicalProfileSlot(record.ProfileSlot) ||
-            !HasExactJusticeWalFields(
-                record,
-                "mode",
-                "baseRevision",
-                "profileGeneration",
-                "identityKey",
-                "episodeId",
-                "custodySite",
-                "playerSlot",
-                "playerModel",
-                "lastCanonicalSlot",
-                "lastCanonicalModel",
-                "schemaMajor"))
+            (!hasLegacyFields && !hasCustodyPenaltyFields))
         {
             return false;
         }
@@ -1222,6 +1357,93 @@ public sealed partial class DonJEnemySpawner
                 playerSlot == -1 || playerSlot == record.ProfileSlot) &&
                (ReadWalInt(record, "lastCanonicalSlot", -2) == -1 ||
                 ReadWalInt(record, "lastCanonicalSlot", -2) ==
-                    record.ProfileSlot);
+                    record.ProfileSlot) &&
+               (!hasCustodyPenaltyFields ||
+                IsJusticeDeathFrontCustodyPenaltyContractValid(record, mode));
+    }
+
+    private static bool HasJusticeDeathFrontCustodyPenaltyFields(
+        JusticeWalRecord record)
+    {
+        return record != null && HasExactJusticeWalFields(
+            record,
+            "mode",
+            "baseRevision",
+            "profileGeneration",
+            "identityKey",
+            "episodeId",
+            "custodySite",
+            "playerSlot",
+            "playerModel",
+            "lastCanonicalSlot",
+            "lastCanonicalModel",
+            "custodyGuardPenaltyBefore",
+            "custodyGuardPenaltyAfter",
+            "schemaMajor");
+    }
+
+    private static bool IsJusticeDeathFrontCustodyPenaltyContractValid(
+        JusticeWalRecord record,
+        string mode)
+    {
+        long before = ReadWalLong(record, "custodyGuardPenaltyBefore", -1L);
+        long after = ReadWalLong(record, "custodyGuardPenaltyAfter", -1L);
+        if (before < 0L || after < before)
+        {
+            return false;
+        }
+
+        if (mode != JusticeCustodyDeathFrontMode)
+        {
+            return after == before;
+        }
+
+        return after == before ||
+               after == CalculateJusticeCustodyGuardPenaltyAfterDeath(before);
+    }
+
+    private static void ApplyJusticeCustodyGuardPenaltyFromDeathFront(
+        JusticeCaseState state,
+        JusticeWalRecord record)
+    {
+        if (state == null)
+        {
+            throw new InvalidDataException(
+                "Le front de mort WAL ne possède plus son dossier Justice.");
+        }
+        if (!HasJusticeDeathFrontCustodyPenaltyFields(record))
+        {
+            // Un record historique à onze champs précède cette prolongation :
+            // je le rejoue sans inventer ni effacer de pénalité.
+            return;
+        }
+
+        long penaltyBefore = ReadWalLong(
+            record,
+            "custodyGuardPenaltyBefore",
+            -1L);
+        long penaltyAfter = ReadWalLong(
+            record,
+            "custodyGuardPenaltyAfter",
+            -1L);
+        long currentPenalty = state.CustodyGuardPenaltySeconds;
+        if ((currentPenalty != penaltyBefore && currentPenalty != penaltyAfter) ||
+            currentPenalty < 0L)
+        {
+            throw new InvalidDataException(
+                "Le front de mort WAL ne correspond plus à la prolongation de détention.");
+        }
+
+        // Je rejoue une cible absolue : une reprise après crash ne peut jamais
+        // ajouter deux fois la minute déjà figée dans le Prepared.
+        state.CustodyGuardPenaltySeconds = penaltyAfter;
+    }
+
+    private static long CalculateJusticeCustodyGuardPenaltyAfterDeath(long before)
+    {
+        long boundedBefore = Math.Max(0L, before);
+        return boundedBefore > long.MaxValue - JusticeDeathFrontGuardPenaltySeconds
+            ? long.MaxValue
+            : boundedBefore + JusticeDeathFrontGuardPenaltySeconds;
     }
 }

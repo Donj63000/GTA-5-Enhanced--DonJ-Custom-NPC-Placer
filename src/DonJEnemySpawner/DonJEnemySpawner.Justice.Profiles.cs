@@ -21,6 +21,7 @@ public sealed partial class DonJEnemySpawner
     private bool _justiceActiveProfileResetPending;
     private bool _justiceActiveProfileResetPrecommitRedundant;
     private Func<int> _justiceCanonicalPlayerSlotOverride;
+    private Func<int, bool> _justicePlayerMortalityVerificationOverride = null;
 
     internal int JusticeActivePlayerProfileSlot
     {
@@ -280,14 +281,28 @@ public sealed partial class DonJEnemySpawner
             JusticeMarkStateDirty();
         }
 
-        if (HasJusticeCustodyRecoveryState() && !JusticeAmnestyCustody())
+        int slot = _justiceActivePlayerProfileSlot;
+        if (!EnsureJusticeActiveProfileResetPlayerIsMortal(slot) ||
+            !JusticeAmnestyCustody())
         {
             return false;
         }
 
-        int slot = _justiceActivePlayerProfileSlot;
         if (!ReplaceJusticePlayerProfileWithEmptyState(slot))
         {
+            return false;
+        }
+
+        // Je journalise l'effacement du module séparé avant de publier le
+        // profil Justice terminal. Une coupure entre les deux XML reste ainsi
+        // rejouable sans ressusciter les anciens indices.
+        if (!ClearJusticeRecognitionProfile(
+            slot,
+            "réinitialisation explicite du profil confirmée"))
+        {
+            ShowStatus(
+                "Réinitialisation préparée; journal de reconnaissance à reprendre…",
+                4200);
             return false;
         }
 
@@ -461,7 +476,7 @@ public sealed partial class DonJEnemySpawner
     private string GetJusticeMenuSelectedSentenceDisplay()
     {
         JusticeCaseState state = GetJusticeMenuSelectedCaseState();
-        return FormatJusticeDuration(state == null ? 0 : state.SentenceSeconds);
+        return FormatJusticeDuration(GetJusticeCustodyTotalRemainingSeconds(state));
     }
 
     private string GetJusticeMenuSelectedRecidivismDisplay()
@@ -524,6 +539,13 @@ public sealed partial class DonJEnemySpawner
     {
         if (!IsJusticeCanonicalProfileSlot(slot))
         {
+            return false;
+        }
+
+        if (!EnsureJusticeActiveProfileResetPlayerIsMortal(slot))
+        {
+            // Je ne publie jamais le profil vide tant que le héros réellement
+            // propriétaire du reset conserve encore une protection résiduelle.
             return false;
         }
 
@@ -623,6 +645,80 @@ public sealed partial class DonJEnemySpawner
 
         int slot = GetCurrentSinglePlayerCashSlotSafe();
         return IsJusticeCanonicalProfileSlot(slot) ? slot : -1;
+    }
+
+    private bool IsJusticeActiveProfileResetContextSafe(int profileSlot)
+    {
+        return profileSlot == _justiceActivePlayerProfileSlot &&
+               !_justiceProfileSelectionPending &&
+               !_justiceProfileContextBlocked &&
+               !_justiceProfileSwitchPersistencePending &&
+               GetJusticeCanonicalPlayerSlotSafe() == profileSlot;
+    }
+
+    private bool IsJusticeActiveProfileResetPlayerIdentitySafe(int profileSlot)
+    {
+        if (!IsJusticeActiveProfileResetContextSafe(profileSlot))
+        {
+            return false;
+        }
+
+        try
+        {
+            Ped player = Game.Player.Character;
+            return Entity.Exists(player) && !player.IsDead &&
+                   GetJusticePedModelHashSafe(player) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool EnsureJusticeActiveProfileResetPlayerIsMortal(int profileSlot)
+    {
+        if (profileSlot != _justiceActivePlayerProfileSlot)
+        {
+            // Un WAL d'un autre profil reste une mutation de données pure : je ne
+            // touche jamais au ped actuellement joué pour acquitter ce reset.
+            return true;
+        }
+
+        if (!IsJusticeActiveProfileResetContextSafe(profileSlot))
+        {
+            return false;
+        }
+        if (_justicePlayerMortalityVerificationOverride != null)
+        {
+            // Je réserve ce point d'injection aux harness hors moteur. Le runtime
+            // réel laisse toujours ce delegate nul et passe par le ped GTA exact.
+            try
+            {
+                return _justicePlayerMortalityVerificationOverride(profileSlot);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        if (!IsJusticeActiveProfileResetPlayerIdentitySafe(profileSlot))
+        {
+            return false;
+        }
+
+        try
+        {
+            // Je termine aussi un éventuel masque Justice dont les indicateurs
+            // custody auraient été perdus; un autre propriétaire (placement)
+            // reste respecté et maintient le reset en attente.
+            return ReleaseJusticePreJudgmentInvincibilityAsMortal(
+                Game.Player.Character);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private bool IsJusticeRuntimeProfileContextCompatible()
@@ -900,6 +996,9 @@ public sealed partial class DonJEnemySpawner
         int targetSentenceSeconds = targetProfile.CaseState != null
             ? targetProfile.CaseState.SentenceSeconds
             : 0;
+        long targetCustodyGuardPenaltySeconds = targetProfile.CaseState != null
+            ? targetProfile.CaseState.CustodyGuardPenaltySeconds
+            : 0L;
         int targetInactiveCustodyLastTickAt =
             targetProfile.InactiveCustodyLastTickAt;
         int targetInactiveCustodyElapsedRemainderMs =
@@ -920,6 +1019,8 @@ public sealed partial class DonJEnemySpawner
             if (targetProfile.CaseState != null)
             {
                 targetProfile.CaseState.SentenceSeconds = targetSentenceSeconds;
+                targetProfile.CaseState.CustodyGuardPenaltySeconds =
+                    targetCustodyGuardPenaltySeconds;
             }
             targetProfile.InactiveCustodyLastTickAt =
                 targetInactiveCustodyLastTickAt;
@@ -1140,6 +1241,7 @@ public sealed partial class DonJEnemySpawner
         // réaffirme le WAL dans le primaire et le backup avant tout effet monde.
         _justiceActiveProfileResetPrecommitRedundant = false;
         _justiceDamageFrontPrimingPending = _justiceEnabled;
+        SynchronizeJusticeRecognition(true);
         return true;
     }
 
@@ -1239,22 +1341,26 @@ public sealed partial class DonJEnemySpawner
 
         int lastTickAt = profile.InactiveCustodyLastTickAt;
         int remainderMs = profile.InactiveCustodyElapsedRemainderMs;
-        int previousSentence = profile.CaseState.SentenceSeconds;
-        int nextSentence = AdvanceJusticeInactiveCustodySentenceClock(
-            previousSentence,
+        long previousTotal = GetJusticeCustodyTotalRemainingSeconds(
+            profile.CaseState);
+        long nextTotal = AdvanceJusticeInactiveCustodyTotalClock(
+            previousTotal,
             now,
             ref lastTickAt,
             ref remainderMs,
             suspended);
         profile.InactiveCustodyLastTickAt = lastTickAt;
         profile.InactiveCustodyElapsedRemainderMs = remainderMs;
-        if (nextSentence == previousSentence)
+        if (nextTotal == previousTotal)
         {
             return false;
         }
 
-        profile.CaseState.SentenceSeconds = nextSentence;
-        if (nextSentence <= 0)
+        long elapsedSeconds = previousTotal - nextTotal;
+        ConsumeJusticeCustodySentenceSeconds(
+            profile.CaseState,
+            (int)Math.Min(int.MaxValue, Math.Max(0L, elapsedSeconds)));
+        if (nextTotal <= 0L)
         {
             // Je conserve la phase et le snapshot : seule la reprise du bon héros
             // finalisera la libération et la restitution de son inventaire.
@@ -1272,7 +1378,7 @@ public sealed partial class DonJEnemySpawner
         return profile != null && profile.CanAdvanceCustodyInBackground &&
                profile.CaseState != null && profile.CaseState.Enabled &&
                profile.CaseState.Phase == JusticePhase.Incarcerated &&
-               profile.CaseState.SentenceSeconds > 0 &&
+               GetJusticeCustodyTotalRemainingSeconds(profile.CaseState) > 0L &&
                !profile.PendingDeathCapture &&
                !profile.PendingAmnestyWantedClear &&
                !profile.PendingLegalReleaseFinalization &&
@@ -1286,12 +1392,27 @@ public sealed partial class DonJEnemySpawner
         ref int elapsedRemainderMs,
         bool suspended)
     {
-        int boundedSentence = Math.Max(0, sentenceSeconds);
+        return (int)AdvanceJusticeInactiveCustodyTotalClock(
+            Math.Max(0, sentenceSeconds),
+            now,
+            ref lastTickAt,
+            ref elapsedRemainderMs,
+            suspended);
+    }
+
+    internal static long AdvanceJusticeInactiveCustodyTotalClock(
+        long remainingSeconds,
+        int now,
+        ref int lastTickAt,
+        ref int elapsedRemainderMs,
+        bool suspended)
+    {
+        long boundedSentence = Math.Max(0L, remainingSeconds);
         if (boundedSentence <= 0)
         {
             lastTickAt = 0;
             elapsedRemainderMs = 0;
-            return 0;
+            return 0L;
         }
         if (suspended)
         {
@@ -1318,7 +1439,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         elapsedRemainderMs %= 1000;
-        return Math.Max(0, boundedSentence - elapsedSeconds);
+        return Math.Max(0L, boundedSentence - elapsedSeconds);
     }
 
     private void ResetJusticeRuntimeFrontsForProfileChange()
@@ -1808,7 +1929,8 @@ public sealed partial class DonJEnemySpawner
     {
         if (caseState == null || custody == null || !caseState.Enabled ||
             caseState.Phase != JusticePhase.Incarcerated ||
-            caseState.SentenceSeconds <= 0 || pendingDeath || pendingAmnesty ||
+            GetJusticeCustodyTotalRemainingSeconds(caseState) <= 0L ||
+            pendingDeath || pendingAmnesty ||
             pendingLegalRelease || HasPendingJusticeProfileResetOperation(caseState))
         {
             return false;
@@ -1891,9 +2013,10 @@ public sealed partial class DonJEnemySpawner
             !IsLoadedJusticeCaseActive(caseState) &&
             caseState.Phase == JusticePhase.AtLarge;
         bool releaseWalCommitted = custodySiteValid &&
-            caseState.Enabled &&
-            caseState.Phase == JusticePhase.Incarcerated &&
-            caseState.SentenceSeconds == 0 && caseState.FineDue == 0L &&
+             caseState.Enabled &&
+             caseState.Phase == JusticePhase.Incarcerated &&
+             GetJusticeCustodyTotalRemainingSeconds(caseState) == 0L &&
+             caseState.FineDue == 0L &&
             !string.IsNullOrWhiteSpace(caseState.CustodyEpisodeId) &&
             caseState.CompletedOperationIds.Contains(
                 JusticePolicy.CreateOperationId(

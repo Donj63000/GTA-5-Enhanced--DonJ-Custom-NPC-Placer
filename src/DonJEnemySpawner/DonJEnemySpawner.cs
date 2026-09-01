@@ -400,6 +400,11 @@ private enum MainMenuAction
     JusticeLastCrime,
     JusticeSeverity,
     JusticeWarrant,
+    JusticeRecognitionStatus,
+    JusticeRecognitionPlate,
+    JusticeRecognitionOutfit,
+    JusticeRecognitionWarrant,
+    JusticeRecognitionDistance,
     JusticeCharges,
     JusticeRecord,
     JusticeFine,
@@ -1592,11 +1597,24 @@ private void ActivateMainMenuItem(List<MainMenuEntry> entries)
         case MainMenuAction.JusticeLastCrime:
         case MainMenuAction.JusticeSeverity:
         case MainMenuAction.JusticeWarrant:
+        case MainMenuAction.JusticeRecognitionStatus:
+        case MainMenuAction.JusticeRecognitionPlate:
+        case MainMenuAction.JusticeRecognitionOutfit:
+        case MainMenuAction.JusticeRecognitionWarrant:
+        case MainMenuAction.JusticeRecognitionDistance:
         case MainMenuAction.JusticeFine:
         case MainMenuAction.JusticeFineDispute:
         case MainMenuAction.JusticeSentence:
         case MainMenuAction.JusticeRecidivism:
-            ShowStatus("Les details Justice sont regroupes dans le panneau droit.", 2200);
+            ShowStatus(
+                entry.Action == MainMenuAction.JusticeRecognitionStatus ||
+                entry.Action == MainMenuAction.JusticeRecognitionPlate ||
+                entry.Action == MainMenuAction.JusticeRecognitionOutfit ||
+                entry.Action == MainMenuAction.JusticeRecognitionWarrant ||
+                entry.Action == MainMenuAction.JusticeRecognitionDistance
+                    ? "La reconnaissance concerne toujours le héros actuellement joué."
+                    : "Les details Justice sont regroupes dans le panneau droit.",
+                2600);
             break;
 
         case MainMenuAction.JusticePayFine:
@@ -7111,6 +7129,16 @@ private void DrawMenu()
     {
         if (_placementMode)
         {
+            return;
+        }
+
+        if (IsJusticeTemporaryPlayerProtectionForbidden())
+        {
+            // Je refuse la protection Placement dès l'arrestation ou le maintien :
+            // elle ne doit jamais recréer une invincibilité dans la cellule.
+            ShowStatus(
+                "Placement indisponible pendant une arrestation ou une détention.",
+                3500);
             return;
         }
 

@@ -28,7 +28,7 @@ public sealed class JusticeCustodyDeathFailClosedTests
         string observed = ReadMethod(source, "ObserveJusticeCustodyDeath");
         AssertOrdered(
             observed,
-            "TryPersistJusticeCustodyDeathFrontToWal(player)",
+            "TryPersistJusticeCustodyDeathFrontToWal(",
             "ArmJusticeCustodyDeathFailClosedState(player, now)",
             "ResetJusticeCustodyClock(now)");
 
@@ -37,7 +37,7 @@ public sealed class JusticeCustodyDeathFailClosedTests
             "ObserveJusticeCustodyDeathDuringSuspension");
         AssertOrdered(
             suspended,
-            "TryPersistJusticeCustodyDeathFrontToWal(player)",
+            "TryPersistJusticeCustodyDeathFrontToWal(",
             "ArmJusticeCustodyDeathFailClosedState(");
 
         string arm = ReadMethod(

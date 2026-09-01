@@ -48,7 +48,9 @@ public class SafetySimulationTests
             script,
             "Justice",
             "JusticeEnabled", "JusticeProfile", "JusticeStatus", "JusticeLastCrime", "JusticeSeverity",
-            "JusticeWarrant", "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticeFineDispute",
+            "JusticeWarrant", "JusticeRecognitionStatus", "JusticeRecognitionPlate",
+            "JusticeRecognitionOutfit", "JusticeRecognitionWarrant", "JusticeRecognitionDistance",
+            "JusticeCharges", "JusticeRecord", "JusticeFine", "JusticeFineDispute",
             "JusticePayFine", "JusticeResolveFineDispute", "JusticeSentence", "JusticeRecidivism",
             "JusticePoliceMode", "JusticeRecovery", "JusticeDiagnostic", "JusticeResetProfile");
         AssertCategoryActions(

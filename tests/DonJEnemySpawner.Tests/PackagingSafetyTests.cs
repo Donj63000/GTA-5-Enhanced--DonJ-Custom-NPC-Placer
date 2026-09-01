@@ -24,8 +24,18 @@ public class PackagingSafetyTests
         "JusticeRepository",
         "JusticeWriteAheadLog",
         "JusticeXmlPersistenceCodec",
-        "JusticeWorldSnapshot"
+        "JusticeWorldSnapshot",
+        "DonJ.JusticeRecognition.DonJJusticeRecognitionScript"
     };
+
+    private static readonly string[] JusticeAssetRelativePaths =
+    {
+        "Assets/Justice/immatriculation.png",
+        "Assets/Justice/tenue.png",
+        "Assets/Justice/mandat.png"
+    };
+
+    private static readonly object HudStubBuildSync = new object();
 
     [TestMethod]
     public void GameReadyPackage_CopiesTheTestedBuildAndPublishesVerifiableMetadata()
@@ -56,6 +66,46 @@ public class PackagingSafetyTests
             Assert.AreEqual(new FileInfo(packageEndll).Length, manifest.Files.Binary.SizeBytes);
             Assert.AreEqual(HashFile(packagePdb), manifest.Files.Symbols.Sha256);
             Assert.AreEqual(new FileInfo(packagePdb).Length, manifest.Files.Symbols.SizeBytes);
+
+            PackageFile[] manifestAssets =
+            {
+                manifest.Files.JusticeAssets.Immatriculation,
+                manifest.Files.JusticeAssets.Outfit,
+                manifest.Files.JusticeAssets.Warrant
+            };
+            for (int index = 0; index < JusticeAssetRelativePaths.Length; index++)
+            {
+                string relativePath = JusticeAssetRelativePaths[index];
+                string sourceAsset = Path.Combine(
+                    GetRepositoryRoot(),
+                    "src",
+                    "DonJEnemySpawner",
+                    relativePath.Replace('/', Path.DirectorySeparatorChar));
+                string buildAsset = Path.Combine(
+                    buildDirectory,
+                    relativePath.Replace('/', Path.DirectorySeparatorChar));
+                string packageAsset = Path.Combine(
+                    packageDirectory,
+                    relativePath.Replace('/', Path.DirectorySeparatorChar));
+                Assert.AreEqual(HashFile(sourceAsset), HashFile(buildAsset));
+                Assert.AreEqual(HashFile(sourceAsset), HashFile(packageAsset));
+                Assert.AreEqual(relativePath, manifestAssets[index].Name);
+                Assert.AreEqual(HashFile(packageAsset), manifestAssets[index].Sha256);
+                Assert.AreEqual(new FileInfo(packageAsset).Length, manifestAssets[index].SizeBytes);
+            }
+
+            Assert.IsNotNull(manifest.HudRenderer);
+            Assert.IsTrue(manifest.HudRenderer.Optional);
+            Assert.AreEqual("native", manifest.HudRenderer.Fallback);
+            Assert.IsTrue(manifest.HudRenderer.Available);
+            Assert.AreEqual("NIBScriptHookVDotNet3", manifest.HudRenderer.AssemblyName);
+            Assert.AreEqual("3.9.0.0", manifest.HudRenderer.Version);
+            Assert.AreEqual(3, manifest.HudRenderer.MinimumMajor);
+            Assert.AreEqual("GTA.UI.CustomSprite", manifest.HudRenderer.TypeName);
+            Assert.AreEqual(1, manifest.HudRenderer.ContractVersion);
+            Assert.IsFalse(
+                File.Exists(Path.Combine(packageDirectory, "NIBScriptHookVDotNet3.dll")),
+                "Je déclare le provider HUD détecté sans jamais le redistribuer.");
 
             AssemblyName assemblyName = AssemblyName.GetAssemblyName(packageEndll);
             FileVersionInfo versionInfo = FileVersionInfo.GetVersionInfo(packageEndll);
@@ -100,10 +150,13 @@ public class PackagingSafetyTests
                     "DonJCustomNpcPlacer.ENdll",
                     "DonJCustomNpcPlacer.pdb",
                     "INSTALLATION_SIMPLE.txt",
-                    "manifest.json"
+                    "manifest.json",
+                    "Assets/Justice/immatriculation.png",
+                    "Assets/Justice/tenue.png",
+                    "Assets/Justice/mandat.png"
                 },
-                Directory.GetFiles(packageDirectory)
-                    .Select(Path.GetFileName)
+                Directory.GetFiles(packageDirectory, "*", SearchOption.AllDirectories)
+                    .Select(path => path.Substring(packageDirectory.Length + 1).Replace('\\', '/'))
                     .ToArray());
         });
     }
@@ -119,6 +172,7 @@ public class PackagingSafetyTests
             File.WriteAllText(Path.Combine(repositoryRoot, "GTA5modDEV.sln"), string.Empty);
             string guidePath = Path.Combine(guideDirectory, "INSTALLATION_SIMPLE.txt");
             File.WriteAllText(guidePath, "guide propre");
+            CopyJusticeAssetsToRepositoryFixture(repositoryRoot);
 
             AssertGitSuccess(repositoryRoot, "init", "--quiet");
 
@@ -173,6 +227,18 @@ public class PackagingSafetyTests
             "Stubs",
             "NIBScriptHookVDotNet2",
             "NIBScriptHookVDotNet2.csproj"));
+        string hudStubProject = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "tools",
+            "Stubs",
+            "NIBScriptHookVDotNet3",
+            "NIBScriptHookVDotNet3.csproj"));
+        string hudStubSource = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "tools",
+            "Stubs",
+            "NIBScriptHookVDotNet3",
+            "StubHudApi.cs"));
         string packageScript = File.ReadAllText(GetPackageScriptPath());
         string deployScript = File.ReadAllText(GetDeployScriptPath());
         string safetyScript = File.ReadAllText(Path.Combine(
@@ -183,6 +249,10 @@ public class PackagingSafetyTests
 
         StringAssert.Contains(stubProject, "<AssemblyVersion>2.11.6.0</AssemblyVersion>");
         StringAssert.Contains(stubProject, "<FileVersion>2.11.6.0</FileVersion>");
+        StringAssert.Contains(hudStubProject, "<AssemblyVersion>3.9.0.0</AssemblyVersion>");
+        StringAssert.Contains(hudStubSource, "public sealed class CustomSprite");
+        StringAssert.Contains(hudStubSource, "public PointF Position { get; set; }");
+        StringAssert.Contains(hudStubSource, "public SizeF Size { get; set; }");
         StringAssert.Contains(packageScript, "$reference.Version.Major -ne 2");
         StringAssert.Contains(deployScript, "$reference.Version.Major -ne 2");
         StringAssert.Contains(safetyScript, "$reference.Version.Major -ne 2");
@@ -195,6 +265,26 @@ public class PackagingSafetyTests
         StringAssert.Contains(deployScript, "$scriptApi.version");
         StringAssert.Contains(deployScript, "--runtime-api");
         StringAssert.Contains(deployScript, "avant toute ecriture");
+        StringAssert.Contains(deployScript, "Assert-HudRendererRuntime");
+        StringAssert.Contains(deployScript, "NIBScriptHookVDotNet3");
+        StringAssert.Contains(deployScript, "$parameters.Count -eq 3");
+        StringAssert.Contains(deployScript, "System.Drawing.SizeF");
+        StringAssert.Contains(deployScript, "System.Drawing.PointF");
+        StringAssert.Contains(deployScript, "System.Drawing.Color");
+        StringAssert.Contains(deployScript, "@($method.GetParameters()).Count -eq 0");
+        StringAssert.Contains(deployScript, "Assert-GameScriptHostsStopped");
+        StringAssert.Contains(deployScript, "GTA5_Enhanced");
+        StringAssert.Contains(deployScript, "GTA5");
+        StringAssert.Contains(deployScript, "PlayGTAV");
+        AssertTextOrdered(
+            deployScript,
+            "$binaryHadOriginal = Backup-ExistingTargetFile",
+            "$binaryInstalled = $true",
+            "Install-StagedFile `",
+            "Le binaire GTA ne correspond pas au package apres remplacement.");
+        StringAssert.Contains(packageScript, "justiceAssets = $packagedJusticeAssetEntries");
+        StringAssert.Contains(packageScript, "hudRenderer = [ordered]@{");
+        StringAssert.Contains(safetyScript, "build-stub-hud-api");
         StringAssert.Contains(safetyScript, "$manifest.scriptApi.version");
         StringAssert.Contains(safetyScript, "verify-nib-abi");
         StringAssert.Contains(
@@ -242,6 +332,13 @@ public class PackagingSafetyTests
             File.Copy(
                 Path.Combine(GetReleaseBuildDirectory(), "DonJCustomNpcPlacer.pdb"),
                 Path.Combine(invalidBuildDirectory, "DonJCustomNpcPlacer.pdb"));
+            foreach (string relativeAssetPath in JusticeAssetRelativePaths)
+            {
+                string platformPath = relativeAssetPath.Replace('/', Path.DirectorySeparatorChar);
+                string destination = Path.Combine(invalidBuildDirectory, platformPath);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination));
+                File.Copy(Path.Combine(GetReleaseBuildDirectory(), platformPath), destination, true);
+            }
 
             string absentOutput = Path.Combine(tempRoot, "rejected-new-package");
             ProcessResult createResult = RunPowerShellAllowDirtySource(
@@ -455,6 +552,8 @@ public class PackagingSafetyTests
             File.WriteAllText(
                 Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.manifest.json"),
                 "ancien-manifest");
+            string unrelatedFile = Path.Combine(scriptsDirectory, "fichier-utilisateur.txt");
+            File.WriteAllText(unrelatedFile, "à-conserver");
             foreach (string alias in ObsoleteAliases())
             {
                 File.WriteAllText(Path.Combine(scriptsDirectory, alias), "ancien-alias");
@@ -476,6 +575,15 @@ public class PackagingSafetyTests
             Assert.AreEqual(
                 HashFile(Path.Combine(packageDirectory, "manifest.json")),
                 HashFile(Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.manifest.json")));
+            foreach (string relativeAssetPath in JusticeAssetRelativePaths)
+            {
+                string platformPath = relativeAssetPath.Replace('/', Path.DirectorySeparatorChar);
+                Assert.AreEqual(
+                    HashFile(Path.Combine(packageDirectory, platformPath)),
+                    HashFile(Path.Combine(scriptsDirectory, platformPath)),
+                    "Chaque asset Justice doit être déployé sans altération.");
+            }
+            Assert.AreEqual("à-conserver", File.ReadAllText(unrelatedFile));
 
             foreach (string alias in ObsoleteAliases())
             {
@@ -514,6 +622,177 @@ public class PackagingSafetyTests
             Assert.AreNotEqual(0, result.ExitCode);
             Assert.AreEqual("version-conservée", File.ReadAllText(installed));
             StringAssert.Contains(result.CombinedOutput, "Manifest game-ready invalide");
+        });
+    }
+
+    [TestMethod]
+    public void GameReadyPackage_DeclaresNativeFallbackWhenHudProviderIsAbsent()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string packageDirectory = CreateVerifiedPackage(
+                tempRoot,
+                publishable: false,
+                includeHudProvider: false);
+            PackageManifest manifest = ReadManifest(Path.Combine(packageDirectory, "manifest.json"));
+
+            Assert.IsNotNull(manifest.HudRenderer);
+            Assert.IsTrue(manifest.HudRenderer.Optional);
+            Assert.AreEqual("native", manifest.HudRenderer.Fallback);
+            Assert.IsFalse(manifest.HudRenderer.Available);
+            Assert.IsNull(manifest.HudRenderer.AssemblyName);
+            Assert.IsNull(manifest.HudRenderer.Version);
+            Assert.AreEqual(3, manifest.HudRenderer.MinimumMajor);
+            Assert.AreEqual("GTA.UI.CustomSprite", manifest.HudRenderer.TypeName);
+            Assert.AreEqual(1, manifest.HudRenderer.ContractVersion);
+            Assert.IsFalse(File.Exists(Path.Combine(packageDirectory, "NIBScriptHookVDotNet3.dll")));
+        });
+    }
+
+    [TestMethod]
+    public void GameReadyDeployment_UsesNativeFallbackWhenHudRuntimeIsMissing()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string packageDirectory = CreateVerifiedPackage(tempRoot, true);
+            string gtaRoot = CreateFakeGtaRoot(tempRoot);
+            File.Delete(Path.Combine(gtaRoot, "NIBScriptHookVDotNet3.dll"));
+            string scriptsDirectory = Path.Combine(gtaRoot, "Scripts");
+            Directory.CreateDirectory(scriptsDirectory);
+            string installed = Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.ENdll");
+            File.WriteAllText(installed, "version-conservée");
+
+            ProcessResult result = RunPowerShell(
+                GetDeployScriptPath(),
+                "-PackageDirectory", packageDirectory,
+                "-GtaRoot", gtaRoot,
+                "-GtaScriptsDir", scriptsDirectory);
+
+            Assert.AreEqual(0, result.ExitCode, result.CombinedOutput);
+            StringAssert.Contains(result.CombinedOutput, "Renderer HUD: fallback natif");
+            Assert.AreEqual(
+                HashFile(Path.Combine(packageDirectory, "DonJCustomNpcPlacer.ENdll")),
+                HashFile(installed));
+            Assert.IsTrue(Directory.Exists(Path.Combine(scriptsDirectory, "Assets", "Justice")));
+            Assert.AreEqual(0, Directory.GetFiles(scriptsDirectory, ".DonJCustomNpcPlacer.*").Length);
+        });
+    }
+
+    [TestMethod]
+    public void GameReadyDeployment_RejectsIncompatibleInstalledHudRuntimeBeforeTouchingTheGame()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string packageDirectory = CreateVerifiedPackage(tempRoot, true);
+            string gtaRoot = CreateFakeGtaRoot(tempRoot);
+            File.Copy(
+                typeof(DonJEnemySpawner).BaseType.Assembly.Location,
+                Path.Combine(gtaRoot, "NIBScriptHookVDotNet3.dll"),
+                true);
+            string scriptsDirectory = Path.Combine(gtaRoot, "Scripts");
+            Directory.CreateDirectory(scriptsDirectory);
+            string installed = Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.ENdll");
+            File.WriteAllText(installed, "version-conservée");
+
+            ProcessResult result = RunPowerShell(
+                GetDeployScriptPath(),
+                "-PackageDirectory", packageDirectory,
+                "-GtaRoot", gtaRoot,
+                "-GtaScriptsDir", scriptsDirectory);
+
+            Assert.AreNotEqual(0, result.ExitCode);
+            StringAssert.Contains(result.CombinedOutput, "Renderer HUD incompatible");
+            Assert.AreEqual("version-conservée", File.ReadAllText(installed));
+            Assert.IsFalse(Directory.Exists(Path.Combine(scriptsDirectory, "Assets", "Justice")));
+            Assert.AreEqual(0, Directory.GetFiles(scriptsDirectory, ".DonJCustomNpcPlacer.*").Length);
+        });
+    }
+
+    [TestMethod]
+    public void GameReadyDeployment_RejectsRunningGtaHostWithoutStoppingItOrTouchingScripts()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string packageDirectory = CreateVerifiedPackage(tempRoot, true);
+            string gtaRoot = CreateFakeGtaRoot(tempRoot);
+            string scriptsDirectory = Path.Combine(gtaRoot, "Scripts");
+            Directory.CreateDirectory(scriptsDirectory);
+            string installed = Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.ENdll");
+            File.WriteAllText(installed, "version-conservée");
+
+            string hostDirectory = Path.Combine(tempRoot, "host-process");
+            Directory.CreateDirectory(hostDirectory);
+            string hostExecutable = Path.Combine(hostDirectory, "GTA5_Enhanced.exe");
+            File.Copy(
+                Path.Combine(Environment.SystemDirectory, "ping.exe"),
+                hostExecutable,
+                true);
+
+            ProcessStartInfo startInfo = new ProcessStartInfo
+            {
+                FileName = hostExecutable,
+                Arguments = "127.0.0.1 -n 12 -w 1000",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (Process host = Process.Start(startInfo))
+            {
+                Assert.IsNotNull(host, "Je dois pouvoir simuler un host GTA sans lancer le jeu.");
+                System.Threading.Thread.Sleep(250);
+                Assert.IsFalse(host.HasExited, "Le host GTA simulé doit rester actif pendant le préflight.");
+
+                ProcessResult result = RunPowerShell(
+                    GetDeployScriptPath(),
+                    "-PackageDirectory", packageDirectory,
+                    "-GtaRoot", gtaRoot,
+                    "-GtaScriptsDir", scriptsDirectory);
+
+                Assert.AreNotEqual(0, result.ExitCode);
+                StringAssert.Contains(result.CombinedOutput, "Deploiement refuse: ferme GTA");
+                StringAssert.Contains(result.CombinedOutput, "GTA5_Enhanced");
+                Assert.IsFalse(host.HasExited, "Le déployeur ne doit jamais terminer le processus détecté.");
+                Assert.AreEqual("version-conservée", File.ReadAllText(installed));
+                Assert.IsFalse(Directory.Exists(Path.Combine(scriptsDirectory, "Assets", "Justice")));
+                Assert.IsTrue(host.WaitForExit(20000), "Le host simulé doit se terminer naturellement.");
+            }
+        });
+    }
+
+    [TestMethod]
+    public void GameReadyDeployment_RejectsCorruptedJusticeAssetBeforeTouchingTheGame()
+    {
+        WithTemporaryDirectory(tempRoot =>
+        {
+            string packageDirectory = CreateVerifiedPackage(tempRoot, true);
+            string corruptedAsset = Path.Combine(
+                packageDirectory,
+                JusticeAssetRelativePaths[0].Replace('/', Path.DirectorySeparatorChar));
+            using (FileStream stream = new FileStream(
+                corruptedAsset,
+                FileMode.Append,
+                FileAccess.Write,
+                FileShare.None))
+            {
+                stream.WriteByte(0x00);
+            }
+
+            string gtaRoot = CreateFakeGtaRoot(tempRoot);
+            string scriptsDirectory = Path.Combine(gtaRoot, "Scripts");
+            Directory.CreateDirectory(scriptsDirectory);
+            string installed = Path.Combine(scriptsDirectory, "DonJCustomNpcPlacer.ENdll");
+            File.WriteAllText(installed, "version-conservée");
+
+            ProcessResult result = RunPowerShell(
+                GetDeployScriptPath(),
+                "-PackageDirectory", packageDirectory,
+                "-GtaRoot", gtaRoot,
+                "-GtaScriptsDir", scriptsDirectory);
+
+            Assert.AreNotEqual(0, result.ExitCode);
+            StringAssert.Contains(result.CombinedOutput, "Taille invalide pour Assets/Justice/immatriculation.png");
+            Assert.AreEqual("version-conservée", File.ReadAllText(installed));
+            Assert.IsFalse(Directory.Exists(Path.Combine(scriptsDirectory, "Assets", "Justice")));
         });
     }
 
@@ -782,6 +1061,18 @@ public class PackagingSafetyTests
             File.WriteAllBytes(installedPdb, originalPdb);
             File.WriteAllText(installedManifest, OriginalManifest);
 
+            Dictionary<string, string> originalAssets = new Dictionary<string, string>();
+            foreach (string relativeAssetPath in JusticeAssetRelativePaths)
+            {
+                string installedAsset = Path.Combine(
+                    scriptsDirectory,
+                    relativeAssetPath.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(installedAsset));
+                string content = "ancien-asset-" + Path.GetFileName(installedAsset);
+                File.WriteAllText(installedAsset, content);
+                originalAssets.Add(installedAsset, content);
+            }
+
             foreach (string alias in ObsoleteAliases())
             {
                 File.WriteAllText(Path.Combine(scriptsDirectory, alias), "conserver-" + alias);
@@ -805,6 +1096,13 @@ public class PackagingSafetyTests
             CollectionAssert.AreEqual(originalEndll, File.ReadAllBytes(installedEndll));
             CollectionAssert.AreEqual(originalPdb, File.ReadAllBytes(installedPdb));
             Assert.AreEqual(OriginalManifest, File.ReadAllText(installedManifest));
+            foreach (KeyValuePair<string, string> originalAsset in originalAssets)
+            {
+                Assert.AreEqual(
+                    originalAsset.Value,
+                    File.ReadAllText(originalAsset.Key),
+                    "Le rollback du manifest doit aussi restaurer chaque ancien asset.");
+            }
             foreach (string alias in ObsoleteAliases())
             {
                 Assert.IsTrue(
@@ -823,11 +1121,14 @@ public class PackagingSafetyTests
             string deploymentSource = File.ReadAllText(GetDeployScriptPath());
             AssertTextOrdered(
                 deploymentSource,
+                "$assetTransaction.HadOriginal = Backup-ExistingTargetFile",
+                "$assetTransaction.Installed = $true",
+                "Je garde les anciens alias disponibles",
+                "[System.IO.File]::Move(",
+                "Je publie volontairement le manifest en dernier",
+                "$manifestHadOriginal = Backup-ExistingTargetFile",
                 "$manifestInstalled = $true",
                 "Le manifest GTA ne correspond pas au package apres remplacement.",
-                "Je publie et relis d'abord le triplet canonique",
-                "[System.IO.File]::Move(",
-                "Je restaure les alias avant de retirer le nouvel ENdll",
                 "if ($manifestInstalled)");
 
             string packageDirectory = CreateVerifiedPackage(tempRoot, true);
@@ -899,16 +1200,35 @@ public class PackagingSafetyTests
         }
     }
 
-    private static string CreateVerifiedPackage(string tempRoot, bool publishable = false)
+    private static string CreateVerifiedPackage(
+        string tempRoot,
+        bool publishable = false,
+        bool includeHudProvider = true)
     {
         string packageDirectory = Path.Combine(tempRoot, "game-ready");
+        string dependencyDirectory = Path.Combine(tempRoot, "package-dependencies");
+        Directory.CreateDirectory(dependencyDirectory);
+
+        // Je construis un jeu de dépendances explicite afin de tester séparément
+        // la présence du provider HUD optionnel et son fallback natif.
+        string runtimeApi = typeof(DonJEnemySpawner).BaseType.Assembly.Location;
+        string runtimeApiName = AssemblyName.GetAssemblyName(runtimeApi).Name + ".dll";
+        File.Copy(runtimeApi, Path.Combine(dependencyDirectory, runtimeApiName), true);
+        if (includeHudProvider)
+        {
+            File.Copy(
+                GetHudStubAssemblyPath(),
+                Path.Combine(dependencyDirectory, "NIBScriptHookVDotNet3.dll"),
+                true);
+        }
+
         ProcessResult result = RunPowerShellAllowDirtySource(
             GetPackageScriptPath(),
             "-Configuration", "Release",
             "-RepositoryRoot", GetRepositoryRoot(),
             "-BuildDirectory", GetReleaseBuildDirectory(),
             "-OutputDirectory", packageDirectory,
-            "-DependencyDirectory", Path.GetDirectoryName(typeof(DonJEnemySpawner).Assembly.Location));
+            "-DependencyDirectory", dependencyDirectory);
 
         Assert.AreEqual(0, result.ExitCode, result.CombinedOutput);
         string manifestPath = Path.Combine(packageDirectory, "manifest.json");
@@ -1029,7 +1349,76 @@ public class PackagingSafetyTests
             runtimeApi,
             Path.Combine(gtaRoot, Path.GetFileName(runtimeApi)),
             true);
+        File.Copy(
+            GetHudStubAssemblyPath(),
+            Path.Combine(gtaRoot, "NIBScriptHookVDotNet3.dll"),
+            true);
         return gtaRoot;
+    }
+
+    private static string GetHudStubAssemblyPath()
+    {
+        string repositoryRoot = GetRepositoryRoot();
+        string projectPath = Path.Combine(
+            repositoryRoot,
+            "tools",
+            "Stubs",
+            "NIBScriptHookVDotNet3",
+            "NIBScriptHookVDotNet3.csproj");
+        string assemblyPath = Path.Combine(
+            Path.GetDirectoryName(projectPath),
+            "bin",
+            "Release",
+            "NIBScriptHookVDotNet3.dll");
+
+        lock (HudStubBuildSync)
+        {
+            if (!File.Exists(assemblyPath))
+            {
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = "dotnet",
+                    Arguments = "build " + QuoteArgument(projectPath) + " -c Release",
+                    WorkingDirectory = repositoryRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using (Process process = Process.Start(startInfo))
+                {
+                    Assert.IsNotNull(process, "Impossible de compiler le stub HUD NIB v3.");
+                    string output = process.StandardOutput.ReadToEnd();
+                    string error = process.StandardError.ReadToEnd();
+                    Assert.IsTrue(process.WaitForExit(120000), "La compilation du stub HUD a expiré.");
+                    Assert.AreEqual(0, process.ExitCode, output + Environment.NewLine + error);
+                }
+            }
+        }
+
+        Assert.IsTrue(File.Exists(assemblyPath), "Le stub HUD NIB v3 est absent après compilation.");
+        return assemblyPath;
+    }
+
+    private static void CopyJusticeAssetsToRepositoryFixture(string repositoryRoot)
+    {
+        foreach (string relativeAssetPath in JusticeAssetRelativePaths)
+        {
+            string platformPath = relativeAssetPath.Replace('/', Path.DirectorySeparatorChar);
+            string source = Path.Combine(
+                GetRepositoryRoot(),
+                "src",
+                "DonJEnemySpawner",
+                platformPath);
+            string destination = Path.Combine(
+                repositoryRoot,
+                "src",
+                "DonJEnemySpawner",
+                platformPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(destination));
+            File.Copy(source, destination, true);
+        }
     }
 
     private static string[] ObsoleteAliases()
@@ -1347,6 +1736,9 @@ public class PackagingSafetyTests
         [DataMember(Name = "scriptApi")]
         internal PackageScriptApi ScriptApi { get; set; }
 
+        [DataMember(Name = "hudRenderer")]
+        internal PackageHudRenderer HudRenderer { get; set; }
+
         [DataMember(Name = "sourceDirty")]
         internal bool SourceDirty { get; set; }
 
@@ -1387,6 +1779,34 @@ public class PackagingSafetyTests
     }
 
     [DataContract]
+    private sealed class PackageHudRenderer
+    {
+        [DataMember(Name = "optional")]
+        internal bool Optional { get; set; }
+
+        [DataMember(Name = "fallback")]
+        internal string Fallback { get; set; }
+
+        [DataMember(Name = "available")]
+        internal bool Available { get; set; }
+
+        [DataMember(Name = "assemblyName")]
+        internal string AssemblyName { get; set; }
+
+        [DataMember(Name = "version")]
+        internal string Version { get; set; }
+
+        [DataMember(Name = "minimumMajor")]
+        internal int MinimumMajor { get; set; }
+
+        [DataMember(Name = "typeName")]
+        internal string TypeName { get; set; }
+
+        [DataMember(Name = "contractVersion")]
+        internal int ContractVersion { get; set; }
+    }
+
+    [DataContract]
     private sealed class PackageFiles
     {
         [DataMember(Name = "binary")]
@@ -1397,6 +1817,22 @@ public class PackagingSafetyTests
 
         [DataMember(Name = "installationGuide")]
         internal PackageFile InstallationGuide { get; set; }
+
+        [DataMember(Name = "justiceAssets")]
+        internal PackageJusticeAssets JusticeAssets { get; set; }
+    }
+
+    [DataContract]
+    private sealed class PackageJusticeAssets
+    {
+        [DataMember(Name = "immatriculation")]
+        internal PackageFile Immatriculation { get; set; }
+
+        [DataMember(Name = "outfit")]
+        internal PackageFile Outfit { get; set; }
+
+        [DataMember(Name = "warrant")]
+        internal PackageFile Warrant { get; set; }
     }
 
     [DataContract]

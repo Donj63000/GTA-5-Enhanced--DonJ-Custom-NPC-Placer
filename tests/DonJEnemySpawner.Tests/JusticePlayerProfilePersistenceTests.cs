@@ -711,6 +711,36 @@ public sealed class JusticePlayerProfilePersistenceTests
     }
 
     [TestMethod]
+    public void PlayerProfiles_ActiveResetWaitsUntilMortalityIsVerified()
+    {
+        JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+        object script = CreateHeadlessScript(profiles, 0);
+        InitializeProfileResetRuntimeCollections(script);
+        SetField(
+            script,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => 0));
+        SetField(
+            script,
+            "_justicePlayerMortalityVerificationOverride",
+            new Func<int, bool>(slot => false));
+
+        Assert.IsFalse((bool)Invoke(script, "ResetJusticePlayerProfile", 0));
+        Assert.AreEqual(2, profiles[0].RecordState.RecidivismIndex);
+
+        SetField(
+            script,
+            "_justicePlayerMortalityVerificationOverride",
+            new Func<int, bool>(slot => slot == 0));
+        Assert.IsTrue((bool)Invoke(script, "ResetJusticePlayerProfile", 0));
+        Assert.AreEqual(
+            0,
+            GetField<JusticePlayerProfileState[]>(script, "_justicePlayerProfiles")[0]
+                .RecordState
+                .RecidivismIndex);
+    }
+
+    [TestMethod]
     public void PlayerProfiles_PoliceSuppressionRestoreBlocksSwitchAndProfileResetUntilRecovered()
     {
         JusticePlayerProfileState profile = new JusticePlayerProfileState(0)
@@ -831,6 +861,18 @@ public sealed class JusticePlayerProfilePersistenceTests
     [TestMethod]
     public void PlayerProfiles_ResetRefusesRecoverableInventoryAndDoesNotTouchOtherHero()
     {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped activePlayer = new GTA.Ped
+        {
+            Handle = 861,
+            Model = new GTA.Model("player_zero"),
+            IsPlayer = true,
+            IsDead = false,
+            IsInvincible = true
+        };
+        GTA.Game.Player.Character = activePlayer;
+#endif
         JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
         profiles[1].CustodyXml =
             "<Custody active=\"false\" site=\"None\" playerSlot=\"1\">" +
@@ -849,7 +891,40 @@ public sealed class JusticePlayerProfilePersistenceTests
         Assert.AreEqual(0, reset[1].RecordState.RecidivismIndex);
         Assert.AreEqual(string.Empty, reset[1].CaseState.LastCrimeLabel);
         Assert.AreEqual(2, reset[0].RecordState.RecidivismIndex);
+#if DONJ_STUB_API
+        Assert.IsTrue(
+            activePlayer.IsInvincible,
+            "Le reset d'un profil inactif ne doit jamais modifier le ped du héros joué.");
+#endif
     }
+
+#if DONJ_STUB_API
+    [TestMethod]
+    public void PlayerProfiles_ActiveResetRefusesMismatchedHeroWithoutChangingInvincibility()
+    {
+        GTA.StubRuntime.Reset();
+        GTA.Ped otherHero = new GTA.Ped
+        {
+            Handle = 864,
+            Model = new GTA.Model("player_one"),
+            IsPlayer = true,
+            IsDead = false,
+            IsInvincible = true
+        };
+        GTA.Game.Player.Character = otherHero;
+
+        JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
+        object script = CreateHeadlessScript(profiles, 0);
+        otherHero.Model = new GTA.Model("player_one");
+        SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 1));
+
+        Assert.IsFalse((bool)Invoke(script, "ResetJusticePlayerProfile", 0));
+        Assert.IsTrue(
+            otherHero.IsInvincible,
+            "Un autre héros ne doit subir aucune mutation monde pour le reset du profil actif mémorisé.");
+        Assert.AreEqual(2, profiles[0].RecordState.RecidivismIndex);
+    }
+#endif
 
     [TestMethod]
     public void PlayerProfiles_JusticeToggleIsNotDangerousAndResetConfirmationKeepsItsTarget()
@@ -903,6 +978,18 @@ public sealed class JusticePlayerProfilePersistenceTests
     [TestMethod]
     public void PlayerProfiles_ResetWalReplaysAfterTheFirstResultWriteFails()
     {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped resetPlayer = new GTA.Ped
+        {
+            Handle = 862,
+            Model = new GTA.Model("player_zero"),
+            IsPlayer = true,
+            IsDead = false,
+            IsInvincible = true
+        };
+        GTA.Game.Player.Character = resetPlayer;
+#endif
         WithTemporaryJusticeDirectory(directory =>
         {
             JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
@@ -910,6 +997,9 @@ public sealed class JusticePlayerProfilePersistenceTests
             InitializeProfileResetRuntimeCollections(script);
             SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => 0));
             SetField(script, "_justiceMenuSelectedProfileSlot", 0);
+            Assert.IsFalse(
+                (bool)Invoke(script, "HasJusticeCustodyRecoveryState"),
+                "Le scénario doit couvrir un reset actif dont tous les flags custody sont perdus.");
             FlushAndAwait(script);
             string path = Path.Combine(directory, "_justice_state.xml");
             string durableBeforeReset = File.ReadAllText(path);
@@ -919,6 +1009,11 @@ public sealed class JusticePlayerProfilePersistenceTests
                 "_justiceStateFlushFailureOverride",
                 new Func<int, bool>(attempt => true));
             Invoke(script, "ExecuteJusticeSelectedProfileReset");
+#if DONJ_STUB_API
+            Assert.IsFalse(
+                resetPlayer.IsInvincible,
+                "Le premier résultat WAL doit rendre le héros actif mortel avant le profil vide.");
+#endif
 
             Assert.AreEqual(
                 0,
@@ -936,7 +1031,15 @@ public sealed class JusticePlayerProfilePersistenceTests
             Assert.AreEqual(
                 2,
                 GetField<JusticeRecordState>(afterCrash, "_justiceRecordState").RecidivismIndex);
+#if DONJ_STUB_API
+            resetPlayer.IsInvincible = true;
+#endif
             Invoke(afterCrash, "InitializeJusticePersistenceServices");
+#if DONJ_STUB_API
+            Assert.IsFalse(
+                resetPlayer.IsInvincible,
+                "Le replay WAL doit réaffirmer la mortalité même si le résultat métier est rejoué.");
+#endif
             Assert.AreEqual(
                 0,
                 GetField<JusticeRecordState>(afterCrash, "_justiceRecordState").RecidivismIndex,
@@ -979,13 +1082,21 @@ public sealed class JusticePlayerProfilePersistenceTests
 
             Invoke(script, "ExecuteJusticeSelectedProfileReset");
             AwaitQueuedPersistence(script);
-            Assert.IsFalse((bool)Invoke(
+            bool resetCompleted = (bool)Invoke(
                 script,
-                "TryResumePendingJusticeProfileResetWal"));
-            AwaitQueuedPersistence(script);
-            Assert.IsTrue((bool)Invoke(
-                script,
-                "TryResumePendingJusticeProfileResetWal"));
+                "TryResumePendingJusticeProfileResetWal");
+            if (!resetCompleted)
+            {
+                // Je couvre les deux cadences légitimes du writer : la seconde
+                // copie peut être déjà durable ou demander encore une barrière.
+                AwaitQueuedPersistence(script);
+                resetCompleted = (bool)Invoke(
+                    script,
+                    "TryResumePendingJusticeProfileResetWal");
+            }
+            Assert.IsTrue(
+                resetCompleted,
+                "Le reset doit devenir terminal dès que primaire et backup sont prouvés.");
 
             string path = Path.Combine(directory, "_justice_state.xml");
             string backupPath = path + ".bak";
@@ -1082,6 +1193,10 @@ public sealed class JusticePlayerProfilePersistenceTests
             JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
             object script = CreateHeadlessScript(profiles, 0);
             InitializeProfileResetRuntimeCollections(script);
+            SetField(
+                script,
+                "_justiceCanonicalPlayerSlotOverride",
+                new Func<int>(() => 0));
             string statePath = Path.Combine(directory, "_justice_state.xml");
             using (FirstWriteBlockingAtomicFileStore store =
                 new FirstWriteBlockingAtomicFileStore())
@@ -1295,6 +1410,10 @@ public sealed class JusticePlayerProfilePersistenceTests
             JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
             object writer = CreateHeadlessScript(profiles, 0);
             InitializeProfileResetRuntimeCollections(writer);
+            SetField(
+                writer,
+                "_justiceCanonicalPlayerSlotOverride",
+                new Func<int>(() => 0));
             FlushAndAwait(writer);
             long baseRevision = GetField<long>(writer, "_justicePersistenceRevision");
             long baseGeneration = GetField<long[]>(
@@ -3940,6 +4059,18 @@ public sealed class JusticePlayerProfilePersistenceTests
     [TestMethod]
     public void ActiveCustodyReset_WalSurvivesFinalFlushFailureAndReload()
     {
+#if DONJ_STUB_API
+        GTA.StubRuntime.Reset();
+        GTA.Ped resetPlayer = new GTA.Ped
+        {
+            Handle = 863,
+            Model = new GTA.Model(123456),
+            IsPlayer = true,
+            IsDead = false,
+            IsInvincible = true
+        };
+        GTA.Game.Player.Character = resetPlayer;
+#endif
         WithTemporaryJusticeDirectory(directory =>
         {
             JusticePlayerProfileState[] profiles = CreateDistinctProfiles();
@@ -4012,8 +4143,29 @@ public sealed class JusticePlayerProfilePersistenceTests
             Invoke(resumed, "ResetJusticeCustodyPersistentFields", false);
             GetField<JusticeCaseState>(resumed, "_justiceCaseState").Phase = JusticePhase.AtLarge;
             InitializeProfileResetRuntimeCollections(resumed);
+#if DONJ_STUB_API
+            // Je reproduis aussi un owner de masque Justice resté en mémoire
+            // alors que les indicateurs custody ont disparu.
+            SetPrivateEnumField(
+                resumed,
+                "_playerInvincibilityOwners",
+                "JusticePreJudgmentHolding");
+            SetField(resumed, "_playerInvincibilityPed", resetPlayer);
+            SetField(resumed, "_playerInvincibilityPedHandle", resetPlayer.Handle);
+            SetField(resumed, "_playerInvincibilityBaseline", true);
+            SetField(resumed, "_playerInvincibilityBaselineCaptured", true);
+#endif
             SetField(resumed, "_justiceStateFlushFailureOverride", new Func<int, bool>(attempt => true));
             Assert.IsFalse((bool)Invoke(resumed, "ResumeJusticeActiveProfileResetTransaction"));
+#if DONJ_STUB_API
+            Assert.IsFalse(
+                resetPlayer.IsInvincible,
+                "Le reset actif sans flags recovery doit normaliser le ped avant le commit final.");
+            Assert.AreEqual(
+                0,
+                Convert.ToInt32(GetField<object>(resumed, "_playerInvincibilityOwners")),
+                "Le owner Justice orphelin doit être terminé sans supprimer un owner tiers.");
+#endif
             Assert.IsTrue(GetField<bool>(resumed, "_justiceActiveProfileResetPending"));
             Assert.AreEqual(
                 0,
@@ -4027,11 +4179,19 @@ public sealed class JusticePlayerProfilePersistenceTests
             Assert.AreEqual(2, GetField<JusticeRecordState>(afterCrash, "_justiceRecordState").RecidivismIndex);
 
             SetField(resumed, "_justiceStateFlushFailureOverride", new Func<int, bool>(attempt => false));
+#if DONJ_STUB_API
+            resetPlayer.IsInvincible = true;
+#endif
             SetField(
                 resumed,
                 "_justiceMonotonicTimeMs",
                 GetField<long>(resumed, "_justiceNextStateFlushAttemptAtMs"));
             Assert.IsTrue((bool)Invoke(resumed, "ResumeJusticeActiveProfileResetTransaction"));
+#if DONJ_STUB_API
+            Assert.IsFalse(
+                resetPlayer.IsInvincible,
+                "Chaque reprise du reset actif doit réaffirmer IsInvincible=false.");
+#endif
             AwaitQueuedPersistence(resumed);
             Assert.IsFalse(GetField<bool>(resumed, "_justiceActiveProfileResetPending"));
 
@@ -4058,7 +4218,13 @@ public sealed class JusticePlayerProfilePersistenceTests
                 StringComparison.Ordinal);
             string resumeBody = source.Substring(resumeStart, nextMethod - resumeStart);
             StringAssert.Contains(resumeBody, "JusticeAmnestyCustody()");
+            StringAssert.Contains(
+                resumeBody,
+                "EnsureJusticeActiveProfileResetPlayerIsMortal(slot)");
             StringAssert.Contains(resumeBody, "ReplaceJusticePlayerProfileWithEmptyState(slot)");
+            Assert.IsFalse(
+                resumeBody.Contains("HasJusticeCustodyRecoveryState() &&"),
+                "La mortalité ne doit plus dépendre de flags custody susceptibles d'être perdus.");
             int resumePrecommitAt = resumeBody.IndexOf(
                 "EnsureJusticeActiveProfileResetPrecommitRedundant()",
                 StringComparison.Ordinal);
@@ -4073,6 +4239,7 @@ public sealed class JusticePlayerProfilePersistenceTests
                 "EnsureJusticeActiveProfileResetPrecommitRedundant()",
                 "EnsureJusticeDeathFrontsDurableBeforeDestructiveTransaction()",
                 "ClearPendingJusticeDeathCapture()",
+                "EnsureJusticeActiveProfileResetPlayerIsMortal(slot)",
                 "JusticeAmnestyCustody()",
                 "ReplaceJusticePlayerProfileWithEmptyState(slot)");
             Assert.IsFalse(
@@ -5239,6 +5406,24 @@ public sealed class JusticePlayerProfilePersistenceTests
         JusticePlayerProfileState[] profiles,
         int activeSlot)
     {
+#if DONJ_STUB_API
+        if (activeSlot >= 0 && activeSlot < 3)
+        {
+            // Je donne au harness le héros canonique annoncé par le profil : la
+            // nouvelle barrière d'identité doit tester un vrai ped stub, pas le
+            // Model(0) artificiel créé par FormatterServices.
+            GTA.Ped player = GTA.Game.Player.Character;
+            if (!GTA.Entity.Exists(player))
+            {
+                player = new GTA.Ped { Handle = 1, IsPlayer = true };
+                GTA.Game.Player.Character = player;
+            }
+            string modelName = activeSlot == 0
+                ? "player_zero"
+                : activeSlot == 1 ? "player_one" : "player_two";
+            player.Model = new GTA.Model(modelName);
+        }
+#endif
         object script = FormatterServices.GetUninitializedObject(ScriptType);
         JusticeCaseState activeCase = activeSlot >= 0 && profiles != null
             ? profiles[activeSlot].CaseState
@@ -5255,6 +5440,15 @@ public sealed class JusticePlayerProfilePersistenceTests
         SetField(script, "_justiceSuspendedPursuitDeathPlayerSlot", -1);
         SetField(script, "_justiceCustodyPlayerSlot", -1);
         SetField(script, "_justiceReleaseSelectedWeaponHash", unchecked((int)0xA2719263));
+#if !DONJ_STUB_API
+        // L'assembly GTA réel ne peut pas fournir de ped dans VSTest. Je conserve
+        // le contrôle canonique séparé et simule uniquement la preuve de mortalité;
+        // les tests stub vérifient, eux, la propriété IsInvincible du vrai faux ped.
+        SetField(
+            script,
+            "_justicePlayerMortalityVerificationOverride",
+            new Func<int, bool>(slot => true));
+#endif
         return script;
     }
 

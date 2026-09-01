@@ -152,7 +152,7 @@ public sealed class JusticeCustodyHardeningTests
     }
 
     [TestMethod]
-    public void CustodyMisconduct_DoesNotCreateAnArtificialDisciplinePath()
+    public void CustodyMisconduct_UsesOnlyTheBoundedOwnedGuardRetaliationPath()
     {
         string source = ReadCustodySource();
         string update = ExtractMethodBody(source, "JusticeUpdateCustody");
@@ -162,7 +162,11 @@ public sealed class JusticeCustodyHardeningTests
         Assert.IsFalse(source.Contains("BeginJusticeCustodyDiscipline"));
         Assert.IsFalse(source.Contains("CompleteJusticeCustodyDiscipline"));
         Assert.IsFalse(source.Contains("JusticeRegisterCustodyDisciplineCharge"));
-        Assert.IsFalse(source.Contains("Hash.TASK_COMBAT_PED"));
+        string retaliation = ExtractMethodBody(
+            source,
+            "CommandJusticeCustodyGuardCombatIfDue");
+        StringAssert.Contains(retaliation, "Hash.TASK_COMBAT_PED");
+        StringAssert.Contains(retaliation, "JusticeCustodyGuardCombatRetryMs");
         Assert.IsFalse(update.Contains("TryAcquirePlayerInvincibility"));
         AssertOrdered(
             update,
@@ -438,7 +442,8 @@ public sealed class JusticeCustodyHardeningTests
             "ScheduleJusticeBolingbrokeTransferIfRequired");
         AssertOrdered(
             promotion,
-            "_justiceCaseState.SentenceSeconds < JusticeCustodyPrisonThresholdSeconds",
+            "GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState) <",
+            "JusticeCustodyPrisonThresholdSeconds",
             "_justiceCustodySite = JusticeCustodySite.Bolingbroke",
             "_justiceCaseState.Phase = JusticePhase.Transporting",
             "PersistJusticeCriticalPrecommitRedundantly()",
@@ -486,7 +491,8 @@ public sealed class JusticeCustodyHardeningTests
             "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)",
             "IsJusticeTeleportVerified(player, transferPosition, 8.0f)",
             "TryJusticeEmergencyTeleport(",
-            "if (transferred && !EnsureJusticeCustodyPlayerMobility(player))",
+            "(!CompleteJusticePreJudgmentHoldingStreamingProtection(player) ||",
+            "!EnsureJusticeCustodyPlayerMobility(player))",
             "if (!transferred)",
             "_justiceCustodyTransferPending = false");
         AssertOrdered(
@@ -794,7 +800,7 @@ public sealed class JusticeCustodyHardeningTests
 
         AssertOrdered(
             begin,
-            "if (_justiceCaseState.SentenceSeconds <= 0)",
+            "if (GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState) <= 0L)",
             "if (HasPlacementSessionState())",
             "StopPlacementMode(false)",
             "if (_placementPlayerStateStored ||",
@@ -1072,7 +1078,7 @@ public sealed class JusticeCustodyHardeningTests
         string update = ExtractMethodBody(source, "JusticeUpdateCustody");
         AssertOrdered(
             update,
-            "_justiceCaseState.SentenceSeconds <= 0",
+            "GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState) <= 0L",
             "CompleteJusticeLegalRelease(player)",
             "RestoreJusticeCustodyRuntimeFromCase()");
 

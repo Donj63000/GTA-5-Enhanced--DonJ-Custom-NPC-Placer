@@ -103,7 +103,10 @@ public sealed partial class DonJEnemySpawner
 
         _justicePendingProfileResetWalRecord = attempted;
         _justiceProfileResetCompletionNotificationPending = true;
-        ApplyJusticeProfileResetWalResult(attempted);
+        if (!ApplyJusticeProfileResetWalResult(attempted))
+        {
+            return false;
+        }
         JusticeMarkStateDirty();
         JusticeFlushStateNow();
         return true;
@@ -152,7 +155,18 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        ApplyJusticeProfileResetWalResult(latest);
+        if (!ApplyJusticeProfileResetWalResult(latest))
+        {
+            return false;
+        }
+        // Je rends le nettoyage du stockage reconnaissance rejouable avant de
+        // terminaliser le WAL Justice qui porte le reset explicite.
+        if (!ClearJusticeRecognitionProfile(
+            pending.ProfileSlot,
+            "réinitialisation explicite du profil confirmée"))
+        {
+            return false;
+        }
         FinalizeJusticeWalTransactionsWhoseSnapshotIsDurable();
         latest = _justiceWriteAheadLog.GetLatest(pending.TransactionId);
         if (latest != null && latest.State == JusticeWalState.Confirmed)
@@ -212,7 +226,12 @@ public sealed partial class DonJEnemySpawner
         long loadedDocumentRevision = Math.Max(0L, _justicePersistenceRevision);
         bool resultAlreadyDurable = IsJusticeProfileResetResultPresent(
             _justicePlayerProfiles[record.ProfileSlot]);
-        ApplyJusticeProfileResetWalResult(record);
+        if (!ApplyJusticeProfileResetWalResult(record))
+        {
+            // Je conserve le WAL ouvert tant que le héros propriétaire n'est
+            // pas identifiable ou que sa mortalité ne peut pas être vérifiée.
+            return;
+        }
         if (resultAlreadyDurable && record.State == JusticeWalState.Ambiguous)
         {
             EnsureJusticeProfileResetResultTracker()[record.TransactionId] =
@@ -228,7 +247,7 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
-    private void ApplyJusticeProfileResetWalResult(JusticeWalRecord record)
+    private bool ApplyJusticeProfileResetWalResult(JusticeWalRecord record)
     {
         if (!IsJusticeProfileResetWalRecordExact(record))
         {
@@ -244,6 +263,11 @@ public sealed partial class DonJEnemySpawner
             record,
             "profileGeneration",
             -1L);
+        if (!EnsureJusticeActiveProfileResetPlayerIsMortal(record.ProfileSlot))
+        {
+            return false;
+        }
+
         bool resetAlreadyPresent = IsJusticeProfileResetResultPresent(target);
         bool stateChanged = false;
         if (!resetAlreadyPresent)
@@ -258,8 +282,7 @@ public sealed partial class DonJEnemySpawner
             }
             if (!ReplaceJusticePlayerProfileWithEmptyState(record.ProfileSlot))
             {
-                throw new InvalidDataException(
-                    "Le profil ciblé par le reset WAL ne peut pas être remplacé.");
+                return false;
             }
             stateChanged = true;
         }
@@ -278,6 +301,7 @@ public sealed partial class DonJEnemySpawner
         {
             JusticeMarkStateDirty();
         }
+        return true;
     }
 
     private static bool IsJusticeProfileResetResultPresent(
@@ -318,7 +342,8 @@ public sealed partial class DonJEnemySpawner
         return state != null && !state.Enabled && state.Charges.Count == 0 &&
                state.ActiveScore == 0 && state.FineDue == 0L &&
                state.VoluntaryFinePaid == 0L && state.FineInDispute == 0L &&
-               state.SentenceSeconds == 0 && !state.HasWarrant &&
+               state.SentenceSeconds == 0 &&
+               state.CustodyGuardPenaltySeconds == 0L && !state.HasWarrant &&
                !state.EscapeWantedMinimumPending &&
                !state.EscapeWantedMinimumAttempted &&
                state.Phase == JusticePhase.AtLarge &&
@@ -371,6 +396,7 @@ public sealed partial class DonJEnemySpawner
                custody.ReleaseSelectedWeapon == JusticeUnarmedHash &&
                !custody.LegalReleaseWantedClearAttempted &&
                !custody.AmnestyWantedClearAttempted &&
+               !custody.GuardRetaliationActive &&
                custody.FineDebitIntent == null &&
                custody.VoluntaryPaymentIntent == null &&
                custody.DisciplineIntent == null &&
@@ -581,6 +607,7 @@ public sealed partial class DonJEnemySpawner
             caseState.Charges.Count == 0 && caseState.ActiveScore == 0 &&
             caseState.FineDue == 0L && caseState.VoluntaryFinePaid == 0L &&
             caseState.FineInDispute == 0L && caseState.SentenceSeconds == 0 &&
+            caseState.CustodyGuardPenaltySeconds == 0L &&
             !caseState.HasWarrant && !caseState.EscapeWantedMinimumPending &&
             !caseState.EscapeWantedMinimumAttempted &&
             caseState.Phase == JusticePhase.AtLarge &&

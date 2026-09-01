@@ -47,6 +47,19 @@
     <Reference Include="System.Windows.Forms" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Je copie les trois logos Justice à côté du livrable sans dupliquer l'inclusion SDK des sources C#. -->
+    <None Update="Assets\Justice\immatriculation.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Assets\Justice\tenue.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Assets\Justice\mandat.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
   <Target Name="ValidateGtaReference" BeforeTargets="ResolveReferences">
     <Error
       Condition="!Exists('$(GtaRoot)\GTA5_Enhanced.exe')"

@@ -509,13 +509,18 @@ public sealed partial class DonJEnemySpawner
         AddCachedMenuEntry(scene, MainMenuAction.Load, "Charger", MainMenuRowKind.Action);
         SetObsidianMenuPage(MenuCategory.Scene, scene);
 
-        List<MainMenuEntry> justice = NewMenuPage(18);
+        List<MainMenuEntry> justice = NewMenuPage(23);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeEnabled, "Justice du héros joué", MainMenuRowKind.Primary);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeProfile, "Personnage", MainMenuRowKind.Normal);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeStatus, "Statut judiciaire", MainMenuRowKind.Info);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeLastCrime, "Dernière infraction", MainMenuRowKind.Info);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeSeverity, "Niveau de gravité", MainMenuRowKind.Info);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeWarrant, "Mandat actif", MainMenuRowKind.Info);
+        AddCachedMenuEntry(justice, MainMenuAction.JusticeRecognitionStatus, "Reconnaissance du héros joué", MainMenuRowKind.Info);
+        AddCachedMenuEntry(justice, MainMenuAction.JusticeRecognitionPlate, "Plaques signalées", MainMenuRowKind.Info);
+        AddCachedMenuEntry(justice, MainMenuAction.JusticeRecognitionOutfit, "Tenues signalées", MainMenuRowKind.Info);
+        AddCachedMenuEntry(justice, MainMenuAction.JusticeRecognitionWarrant, "Zone de recherche", MainMenuRowKind.Info);
+        AddCachedMenuEntry(justice, MainMenuAction.JusticeRecognitionDistance, "Risque d'identification", MainMenuRowKind.Info);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeCharges, "Délits du dossier", MainMenuRowKind.Action);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeRecord, "Casier judiciaire", MainMenuRowKind.Action);
         AddCachedMenuEntry(justice, MainMenuAction.JusticeFine, "Amende", MainMenuRowKind.Info);
@@ -567,6 +572,11 @@ public sealed partial class DonJEnemySpawner
 
     private void RefreshObsidianMenuEntryValues(List<MainMenuEntry> entries)
     {
+        string[] recognitionLines =
+            _mainMenuCategory == MenuCategory.Justice
+                ? GetJusticeRecognitionStatusLines()
+                : null;
+
         for (int i = 0; i < entries.Count; i++)
         {
             MainMenuEntry entry = entries[i];
@@ -696,6 +706,26 @@ public sealed partial class DonJEnemySpawner
                     entry.Value = JusticeDisplayOrFallback(GetJusticeMenuSelectedWarrantDisplay());
                     break;
 
+                case MainMenuAction.JusticeRecognitionStatus:
+                    entry.Value = GetJusticeRecognitionStatusValue(recognitionLines, 0);
+                    break;
+
+                case MainMenuAction.JusticeRecognitionPlate:
+                    entry.Value = GetJusticeRecognitionStatusValue(recognitionLines, 1);
+                    break;
+
+                case MainMenuAction.JusticeRecognitionOutfit:
+                    entry.Value = GetJusticeRecognitionStatusValue(recognitionLines, 2);
+                    break;
+
+                case MainMenuAction.JusticeRecognitionWarrant:
+                    entry.Value = GetJusticeRecognitionStatusValue(recognitionLines, 3);
+                    break;
+
+                case MainMenuAction.JusticeRecognitionDistance:
+                    entry.Value = GetJusticeRecognitionStatusValue(recognitionLines, 4);
+                    break;
+
                 case MainMenuAction.JusticeCharges:
                     entry.Value = JusticeDisplayOrFallback(GetJusticeMenuSelectedChargesDisplay()) + " · ouvrir";
                     break;
@@ -770,6 +800,25 @@ public sealed partial class DonJEnemySpawner
                     break;
             }
         }
+    }
+
+    private static string GetJusticeRecognitionStatusValue(
+        string[] lines,
+        int index)
+    {
+        if (lines == null ||
+            index < 0 ||
+            index >= lines.Length ||
+            string.IsNullOrWhiteSpace(lines[index]))
+        {
+            return "indisponible";
+        }
+
+        string line = lines[index].Trim();
+        int separator = line.IndexOf(':');
+        return separator >= 0 && separator + 1 < line.Length
+            ? line.Substring(separator + 1).Trim()
+            : line;
     }
 
     private static string JusticeDisplayOrFallback(string value)
@@ -2290,6 +2339,12 @@ public sealed partial class DonJEnemySpawner
                 return "Indique la gravité cumulée des faits reprochés au personnage sélectionné.";
             case MainMenuAction.JusticeWarrant:
                 return "Indique si le personnage sélectionné conserve un mandat après la poursuite.";
+            case MainMenuAction.JusticeRecognitionStatus:
+            case MainMenuAction.JusticeRecognitionPlate:
+            case MainMenuAction.JusticeRecognitionOutfit:
+            case MainMenuAction.JusticeRecognitionWarrant:
+            case MainMenuAction.JusticeRecognitionDistance:
+                return "Affiche les indices de reconnaissance du héros actuellement joué : plaque, tenue, apparence et zone bleue. Changer le sélecteur de dossier ne change pas cette identité active.";
             case MainMenuAction.JusticeCharges:
                 return "Entrée ouvre chaque charge conservée du dossier. Au-delà de " +
                        JusticePolicy.MaxActiveCharges.ToString(CultureInfo.InvariantCulture) + " charges, " +
