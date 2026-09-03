@@ -57,6 +57,7 @@ public sealed partial class DonJEnemySpawner
     private const int JusticeCustodyDeferredRestoreRetryMs = 5000;
     private const int JusticeCustodyEscapeGraceMs = 6000;
     private const int JusticeCustodyMaxFrameElapsedMs = 2000;
+    private const int JusticeCustodyResidualMissionFlagObservationWindowMs = 15000;
     private const int JusticeCustodyModelTimeoutMs = 75;
     private const int JusticeCustodyModelRetryMs = 7500;
     private const int JusticeCustodyMaxWeapons = 160;
@@ -400,6 +401,8 @@ public sealed partial class DonJEnemySpawner
     private int _justiceCustodyPlayerSlot = -1;
     private int _justiceCustodyLastTickAt;
     private int _justiceCustodyElapsedRemainderMs;
+    private bool _justiceCustodyResidualMissionFlagBypassArmed;
+    private long _justiceCustodyResidualMissionFlagObservationDeadlineMs;
     private int _justiceCustodyInitialSentenceSeconds;
     private int _justiceNextCustodySceneRefreshAt;
     private int _justiceNextCustodyModelRetryAt;
@@ -1030,6 +1033,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         ResetJusticeCustodyClock(now);
+        _justiceCustodyElapsedRemainderMs = 0;
     }
 
     private void ObserveJusticeCustodyDeathDuringSuspension(Ped player)
@@ -1526,6 +1530,7 @@ public sealed partial class DonJEnemySpawner
                                 (uint)JusticeCustodyTransferTimeoutMs;
         ResetJusticeCustodyTransferRetryState();
         _justiceCustodyRuntimeActive = true;
+        ArmJusticeCustodyResidualMissionFlagBypass();
         _justiceCustodyLastTickAt = now;
         _justiceCustodyElapsedRemainderMs = 0;
         _justiceOutsideCustodySinceAt = 0;
@@ -4968,11 +4973,140 @@ public sealed partial class DonJEnemySpawner
             modelHash);
     }
 
+    private void ArmJusticeCustodyResidualMissionFlagBypass()
+    {
+        // Le flag mission de la séquence BUSTED peut apparaître juste après le
+        // téléport validé. J'ouvre une courte fenêtre d'observation : dès qu'il
+        // est vu, le bypass reste valable uniquement jusqu'à sa première chute.
+        _justiceCustodyResidualMissionFlagBypassArmed = true;
+        _justiceCustodyResidualMissionFlagObservationDeadlineMs =
+            _justiceMonotonicTimeMs +
+            JusticeCustodyResidualMissionFlagObservationWindowMs;
+    }
+
+    private void UpdateJusticeCustodyResidualMissionFlagBypass(
+        bool runtimeSuspended)
+    {
+        if (!_justiceCustodyResidualMissionFlagBypassArmed)
+        {
+            return;
+        }
+
+        bool residualLatchWasObserved =
+            _justiceCustodyResidualMissionFlagObservationDeadlineMs == 0L;
+        bool observationWindowOpen =
+            !residualLatchWasObserved &&
+            _justiceMonotonicTimeMs <
+                _justiceCustodyResidualMissionFlagObservationDeadlineMs;
+        if (runtimeSuspended &&
+            _justiceRuntimeSuspendedByMissionFlagOnlyCached &&
+            (residualLatchWasObserved || observationWindowOpen))
+        {
+            // Zéro signifie : le latch résiduel a réellement été observé. Il peut
+            // durer longtemps, mais il ne sera jamais réutilisé après être retombé.
+            _justiceCustodyResidualMissionFlagObservationDeadlineMs = 0L;
+            return;
+        }
+
+        bool observationWindowExpired =
+            !residualLatchWasObserved && !observationWindowOpen;
+        if (residualLatchWasObserved || observationWindowExpired)
+        {
+            // Avant la première observation, une courte cinématique BUSTED peut
+            // coexister avec le flag mission : elle garde seulement la fenêtre
+            // armée, sans aucun bypass. Après observation, la première chute ou
+            // toute suspension forte ferme définitivement le droit d'ignorer.
+            _justiceCustodyResidualMissionFlagBypassArmed = false;
+            _justiceCustodyResidualMissionFlagObservationDeadlineMs = 0L;
+        }
+    }
+
+    private bool IsJusticeCustodyRuntimeSuspended(Ped player)
+    {
+        return IsJusticeCustodyRuntimeSuspended(
+            player,
+            IsJusticeRuntimeSuspended(player));
+    }
+
+    private bool IsJusticeCustodyRuntimeSuspended(
+        Ped player,
+        bool runtimeSuspended)
+    {
+        if (!runtimeSuspended)
+        {
+            return false;
+        }
+
+        // Une erreur native, un chargement, une cinématique, une pause ou un vrai
+        // changement de héros restent toujours fail-closed. Le seul assouplissement
+        // admis est le latch mission BUSTED observé juste après un transfert réussi.
+        return !_justiceRuntimeSuspendedByMissionFlagOnlyCached ||
+               !CanIgnoreJusticeMissionFlagForCustody(player);
+    }
+
+    private bool CanIgnoreJusticeMissionFlagForCustody(Ped player)
+    {
+        if (!_justiceRuntimeSuspendedByMissionFlagOnlyCached ||
+            !_justiceCustodyResidualMissionFlagBypassArmed ||
+            _justiceCustodyResidualMissionFlagObservationDeadlineMs != 0L ||
+            _justiceCaseState == null ||
+            _justiceProfileContextBlocked ||
+            _justiceProfileSelectionPending ||
+            _justiceProfileSwitchPersistencePending ||
+            !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot) ||
+            _justiceCustodyWaitingForRespawn ||
+            _justiceCustodyDeathRebindPending ||
+            _justiceCustodyDeathStatePersistencePending ||
+            _justiceCustodyTransferRollbackFinalizationPending ||
+            !Entity.Exists(player) || player.IsDead)
+        {
+            return false;
+        }
+
+        bool stableCustody =
+            _justiceCustodyRuntimeActive &&
+            !_justiceCustodyTransferPending &&
+            !_justiceCustodyResumePending &&
+            !_justiceCustodyRespawnTransferPending &&
+            !_justiceCustodyRespawnRestorePending &&
+            _justiceCustodyContainmentEstablished &&
+            (_justiceCaseState.Phase == JusticePhase.Incarcerated ||
+             _justiceCaseState.Phase == JusticePhase.Escaping);
+        bool releaseFinalization =
+            _justiceLegalReleaseFinalizationPending &&
+            _justiceLegalReleaseFinalizationSite != JusticeCustodySite.None;
+        if (!stableCustody && !releaseFinalization)
+        {
+            return false;
+        }
+
+        int currentSlot = GetJusticeCanonicalPlayerSlotSafe();
+        int currentModelHash = GetJusticePedModelHashSafe(player);
+        if (IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot))
+        {
+            return _justiceCustodyPlayerSlot == _justiceActivePlayerProfileSlot &&
+                   JusticePolicy.IsCustodyLiveIdentityCompatible(
+                       _justiceCustodyPlayerSlot,
+                       currentSlot,
+                       _justiceCustodyPlayerHandle,
+                       player.Handle,
+                       _justiceCustodyPlayerModelHash,
+                       currentModelHash);
+        }
+
+        // La première étape d'une libération durable efface volontairement le
+        // snapshot de détention avant le téléport extérieur. Si son second flush
+        // doit être repris, un héros canonique reste prouvable par le profil actif.
+        return releaseFinalization &&
+               IsJusticeCanonicalProfileSlot(currentSlot) &&
+               currentSlot == _justiceActivePlayerProfileSlot;
+    }
+
     private bool JusticeCustodyCanMutateWorld(Ped player)
     {
         return Entity.Exists(player) &&
                !player.IsDead &&
-               !IsJusticeRuntimeSuspended(player);
+               !IsJusticeCustodyRuntimeSuspended(player);
     }
 
     private bool EnsureJusticeCustodyPlayerMobility(Ped player)
@@ -5049,8 +5183,17 @@ public sealed partial class DonJEnemySpawner
 
     private void ResetJusticeCustodyClock(int now)
     {
+        // Je rebascule l'origine sur le tick courant sans récupérer le temps passé
+        // dans le gate. En revanche je conserve les millisecondes de gameplay déjà
+        // réellement observées avant la suspension. Les effacer à chaque micro-gate
+        // pouvait empêcher indéfiniment d'atteindre une seconde complète.
         _justiceCustodyLastTickAt = now;
-        _justiceCustodyElapsedRemainderMs = 0;
+        if (_justiceCustodyElapsedRemainderMs < 0 ||
+            _justiceCustodyElapsedRemainderMs >= 1000)
+        {
+            // Un état runtime impossible ne doit jamais produire un rattrapage.
+            _justiceCustodyElapsedRemainderMs = 0;
+        }
     }
 
     private void MaintainJusticeCustodyPoliceSuppression(Ped player, int now)
@@ -5255,7 +5398,7 @@ public sealed partial class DonJEnemySpawner
                _justiceCaseState.Phase == JusticePhase.Incarcerated &&
                !_justiceCustodyTransferPending && !_justiceCustodyResumePending &&
                IsJusticeCustodyPlayerIdentityCompatible(player) &&
-               !IsJusticeRuntimeSuspended(player);
+               !IsJusticeCustodyRuntimeSuspended(player);
     }
 
     private string GetJusticePoliceIntegrationModeDisplay()
@@ -6292,6 +6435,7 @@ public sealed partial class DonJEnemySpawner
         _justiceNextPoliceSuppressionAt = 0;
         _justiceOutsideCustodySinceAt = 0;
         ResetJusticeCustodyClock(now);
+        _justiceCustodyElapsedRemainderMs = 0;
         return true;
     }
 
@@ -10755,6 +10899,8 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyGuardDeathPenaltyPending = false;
         _justiceCustodyPlayerHandle = 0;
         _justiceCustodyInitialSentenceSeconds = 0;
+        _justiceCustodyLastTickAt = 0;
+        _justiceCustodyElapsedRemainderMs = 0;
         _justiceNextCustodySceneRefreshAt = 0;
         _justiceNextCustodyModelRetryAt = 0;
         ResetJusticeCustodyTransferRetryState();

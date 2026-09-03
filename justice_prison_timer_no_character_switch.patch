@@ -1,0 +1,577 @@
+diff --git a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs
+index 5970f8d..772d70a 100644
+--- a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs
++++ b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs
+@@ -57,6 +57,7 @@ public sealed partial class DonJEnemySpawner
+     private const int JusticeCustodyDeferredRestoreRetryMs = 5000;
+     private const int JusticeCustodyEscapeGraceMs = 6000;
+     private const int JusticeCustodyMaxFrameElapsedMs = 2000;
++    private const int JusticeCustodyResidualMissionFlagObservationWindowMs = 15000;
+     private const int JusticeCustodyModelTimeoutMs = 75;
+     private const int JusticeCustodyModelRetryMs = 7500;
+     private const int JusticeCustodyMaxWeapons = 160;
+@@ -400,6 +401,8 @@ public sealed partial class DonJEnemySpawner
+     private int _justiceCustodyPlayerSlot = -1;
+     private int _justiceCustodyLastTickAt;
+     private int _justiceCustodyElapsedRemainderMs;
++    private bool _justiceCustodyResidualMissionFlagBypassArmed;
++    private long _justiceCustodyResidualMissionFlagObservationDeadlineMs;
+     private int _justiceCustodyInitialSentenceSeconds;
+     private int _justiceNextCustodySceneRefreshAt;
+     private int _justiceNextCustodyModelRetryAt;
+@@ -1030,6 +1033,7 @@ public sealed partial class DonJEnemySpawner
+         }
+ 
+         ResetJusticeCustodyClock(now);
++        _justiceCustodyElapsedRemainderMs = 0;
+     }
+ 
+     private void ObserveJusticeCustodyDeathDuringSuspension(Ped player)
+@@ -1526,6 +1530,7 @@ public sealed partial class DonJEnemySpawner
+                                 (uint)JusticeCustodyTransferTimeoutMs;
+         ResetJusticeCustodyTransferRetryState();
+         _justiceCustodyRuntimeActive = true;
++        ArmJusticeCustodyResidualMissionFlagBypass();
+         _justiceCustodyLastTickAt = now;
+         _justiceCustodyElapsedRemainderMs = 0;
+         _justiceOutsideCustodySinceAt = 0;
+@@ -4968,11 +4973,140 @@ public sealed partial class DonJEnemySpawner
+             modelHash);
+     }
+ 
++    private void ArmJusticeCustodyResidualMissionFlagBypass()
++    {
++        // Le flag mission de la séquence BUSTED peut apparaître juste après le
++        // téléport validé. J'ouvre une courte fenêtre d'observation : dès qu'il
++        // est vu, le bypass reste valable uniquement jusqu'à sa première chute.
++        _justiceCustodyResidualMissionFlagBypassArmed = true;
++        _justiceCustodyResidualMissionFlagObservationDeadlineMs =
++            _justiceMonotonicTimeMs +
++            JusticeCustodyResidualMissionFlagObservationWindowMs;
++    }
++
++    private void UpdateJusticeCustodyResidualMissionFlagBypass(
++        bool runtimeSuspended)
++    {
++        if (!_justiceCustodyResidualMissionFlagBypassArmed)
++        {
++            return;
++        }
++
++        bool residualLatchWasObserved =
++            _justiceCustodyResidualMissionFlagObservationDeadlineMs == 0L;
++        bool observationWindowOpen =
++            !residualLatchWasObserved &&
++            _justiceMonotonicTimeMs <
++                _justiceCustodyResidualMissionFlagObservationDeadlineMs;
++        if (runtimeSuspended &&
++            _justiceRuntimeSuspendedByMissionFlagOnlyCached &&
++            (residualLatchWasObserved || observationWindowOpen))
++        {
++            // Zéro signifie : le latch résiduel a réellement été observé. Il peut
++            // durer longtemps, mais il ne sera jamais réutilisé après être retombé.
++            _justiceCustodyResidualMissionFlagObservationDeadlineMs = 0L;
++            return;
++        }
++
++        bool observationWindowExpired =
++            !residualLatchWasObserved && !observationWindowOpen;
++        if (residualLatchWasObserved || observationWindowExpired)
++        {
++            // Avant la première observation, une courte cinématique BUSTED peut
++            // coexister avec le flag mission : elle garde seulement la fenêtre
++            // armée, sans aucun bypass. Après observation, la première chute ou
++            // toute suspension forte ferme définitivement le droit d'ignorer.
++            _justiceCustodyResidualMissionFlagBypassArmed = false;
++            _justiceCustodyResidualMissionFlagObservationDeadlineMs = 0L;
++        }
++    }
++
++    private bool IsJusticeCustodyRuntimeSuspended(Ped player)
++    {
++        return IsJusticeCustodyRuntimeSuspended(
++            player,
++            IsJusticeRuntimeSuspended(player));
++    }
++
++    private bool IsJusticeCustodyRuntimeSuspended(
++        Ped player,
++        bool runtimeSuspended)
++    {
++        if (!runtimeSuspended)
++        {
++            return false;
++        }
++
++        // Une erreur native, un chargement, une cinématique, une pause ou un vrai
++        // changement de héros restent toujours fail-closed. Le seul assouplissement
++        // admis est le latch mission BUSTED observé juste après un transfert réussi.
++        return !_justiceRuntimeSuspendedByMissionFlagOnlyCached ||
++               !CanIgnoreJusticeMissionFlagForCustody(player);
++    }
++
++    private bool CanIgnoreJusticeMissionFlagForCustody(Ped player)
++    {
++        if (!_justiceRuntimeSuspendedByMissionFlagOnlyCached ||
++            !_justiceCustodyResidualMissionFlagBypassArmed ||
++            _justiceCustodyResidualMissionFlagObservationDeadlineMs != 0L ||
++            _justiceCaseState == null ||
++            _justiceProfileContextBlocked ||
++            _justiceProfileSelectionPending ||
++            _justiceProfileSwitchPersistencePending ||
++            !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot) ||
++            _justiceCustodyWaitingForRespawn ||
++            _justiceCustodyDeathRebindPending ||
++            _justiceCustodyDeathStatePersistencePending ||
++            _justiceCustodyTransferRollbackFinalizationPending ||
++            !Entity.Exists(player) || player.IsDead)
++        {
++            return false;
++        }
++
++        bool stableCustody =
++            _justiceCustodyRuntimeActive &&
++            !_justiceCustodyTransferPending &&
++            !_justiceCustodyResumePending &&
++            !_justiceCustodyRespawnTransferPending &&
++            !_justiceCustodyRespawnRestorePending &&
++            _justiceCustodyContainmentEstablished &&
++            (_justiceCaseState.Phase == JusticePhase.Incarcerated ||
++             _justiceCaseState.Phase == JusticePhase.Escaping);
++        bool releaseFinalization =
++            _justiceLegalReleaseFinalizationPending &&
++            _justiceLegalReleaseFinalizationSite != JusticeCustodySite.None;
++        if (!stableCustody && !releaseFinalization)
++        {
++            return false;
++        }
++
++        int currentSlot = GetJusticeCanonicalPlayerSlotSafe();
++        int currentModelHash = GetJusticePedModelHashSafe(player);
++        if (IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot))
++        {
++            return _justiceCustodyPlayerSlot == _justiceActivePlayerProfileSlot &&
++                   JusticePolicy.IsCustodyLiveIdentityCompatible(
++                       _justiceCustodyPlayerSlot,
++                       currentSlot,
++                       _justiceCustodyPlayerHandle,
++                       player.Handle,
++                       _justiceCustodyPlayerModelHash,
++                       currentModelHash);
++        }
++
++        // La première étape d'une libération durable efface volontairement le
++        // snapshot de détention avant le téléport extérieur. Si son second flush
++        // doit être repris, un héros canonique reste prouvable par le profil actif.
++        return releaseFinalization &&
++               IsJusticeCanonicalProfileSlot(currentSlot) &&
++               currentSlot == _justiceActivePlayerProfileSlot;
++    }
++
+     private bool JusticeCustodyCanMutateWorld(Ped player)
+     {
+         return Entity.Exists(player) &&
+                !player.IsDead &&
+-               !IsJusticeRuntimeSuspended(player);
++               !IsJusticeCustodyRuntimeSuspended(player);
+     }
+ 
+     private bool EnsureJusticeCustodyPlayerMobility(Ped player)
+@@ -5049,8 +5183,17 @@ public sealed partial class DonJEnemySpawner
+ 
+     private void ResetJusticeCustodyClock(int now)
+     {
++        // Je rebascule l'origine sur le tick courant sans récupérer le temps passé
++        // dans le gate. En revanche je conserve les millisecondes de gameplay déjà
++        // réellement observées avant la suspension. Les effacer à chaque micro-gate
++        // pouvait empêcher indéfiniment d'atteindre une seconde complète.
+         _justiceCustodyLastTickAt = now;
+-        _justiceCustodyElapsedRemainderMs = 0;
++        if (_justiceCustodyElapsedRemainderMs < 0 ||
++            _justiceCustodyElapsedRemainderMs >= 1000)
++        {
++            // Un état runtime impossible ne doit jamais produire un rattrapage.
++            _justiceCustodyElapsedRemainderMs = 0;
++        }
+     }
+ 
+     private void MaintainJusticeCustodyPoliceSuppression(Ped player, int now)
+@@ -5255,7 +5398,7 @@ public sealed partial class DonJEnemySpawner
+                _justiceCaseState.Phase == JusticePhase.Incarcerated &&
+                !_justiceCustodyTransferPending && !_justiceCustodyResumePending &&
+                IsJusticeCustodyPlayerIdentityCompatible(player) &&
+-               !IsJusticeRuntimeSuspended(player);
++               !IsJusticeCustodyRuntimeSuspended(player);
+     }
+ 
+     private string GetJusticePoliceIntegrationModeDisplay()
+@@ -6292,6 +6435,7 @@ public sealed partial class DonJEnemySpawner
+         _justiceNextPoliceSuppressionAt = 0;
+         _justiceOutsideCustodySinceAt = 0;
+         ResetJusticeCustodyClock(now);
++        _justiceCustodyElapsedRemainderMs = 0;
+         return true;
+     }
+ 
+@@ -10755,6 +10899,8 @@ public sealed partial class DonJEnemySpawner
+         _justiceCustodyGuardDeathPenaltyPending = false;
+         _justiceCustodyPlayerHandle = 0;
+         _justiceCustodyInitialSentenceSeconds = 0;
++        _justiceCustodyLastTickAt = 0;
++        _justiceCustodyElapsedRemainderMs = 0;
+         _justiceNextCustodySceneRefreshAt = 0;
+         _justiceNextCustodyModelRetryAt = 0;
+         ResetJusticeCustodyTransferRetryState();
+diff --git a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs
+index e5ecdf2..ba6432b 100644
+--- a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs
++++ b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.Profiles.cs
+@@ -755,8 +755,7 @@ public sealed partial class DonJEnemySpawner
+ 
+     private bool IsJusticePlayedProfileCustodyContextReady()
+     {
+-        if (_justiceRuntimeSuspendedCached || !JusticeIsCustodyActive ||
+-            !IsJusticePlayedProfileContextReady())
++        if (!JusticeIsCustodyActive || !IsJusticePlayedProfileContextReady())
+         {
+             return false;
+         }
+@@ -772,7 +771,10 @@ public sealed partial class DonJEnemySpawner
+         try
+         {
+             Ped player = Game.Player.Character;
+-            if (!Entity.Exists(player) || player.IsDead)
++            if (!Entity.Exists(player) || player.IsDead ||
++                IsJusticeCustodyRuntimeSuspended(
++                    player,
++                    _justiceRuntimeSuspendedCached))
+             {
+                 return false;
+             }
+diff --git a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs
+index 5c9c5c6..a7ffb05 100644
+--- a/src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs
++++ b/src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs
+@@ -266,6 +266,7 @@ public sealed partial class DonJEnemySpawner
+     private int _justiceSuspendedPursuitDeathPlayerSlot = -1;
+     private int _justiceSuspendedPursuitDeathPlayerModelHash;
+     private bool _justiceRuntimeSuspendedCached;
++    private bool _justiceRuntimeSuspendedByMissionFlagOnlyCached;
+     private int _justiceLastRawGameTime;
+     private int _justiceLastWantedLevel;
+     private int _justiceAimTargetHandle;
+@@ -1511,15 +1512,20 @@ public sealed partial class DonJEnemySpawner
+             !_justiceProfileContextBlocked &&
+             IsJusticeRuntimeProfileContextCompatible();
+         bool runtimeSuspended = IsJusticeRuntimeSuspended(player);
+-        if ((runtimeSuspended || !profileContextCompatible) &&
++        UpdateJusticeCustodyResidualMissionFlagBypass(runtimeSuspended);
++        bool custodyRuntimeSuspended =
++            IsJusticeCustodyRuntimeSuspended(player, runtimeSuspended);
++        if ((custodyRuntimeSuspended || !profileContextCompatible) &&
+             (_justicePoliceSuppressionActive || _justicePoliceIgnoreApplied ||
+              _justicePoliceDispatchDisabled))
+         {
+-            // Je rends mes flags globaux avant de laisser une mission, une
+-            // cinématique ou un autre protagoniste prendre la main.
++            // GET_MISSION_FLAG peut rester vrai après le transfert BUSTED. Une
++            // détention déjà physiquement prouvée garde alors la main; seules une
++            // vraie pause, un chargement, une cinématique ou un switch rendent ici
++            // les flags globaux de police.
+             SetJusticeCustodyPoliceSuppression(false);
+         }
+-        bool suspendSentenceClocks = runtimeSuspended ||
++        bool suspendSentenceClocks = custodyRuntimeSuspended ||
+             IsJusticePlayerDeadSafe(player) || !profileContextCompatible ||
+             _justiceProfileSwitchPersistencePending ||
+             _justicePoliceSuppressionRestorePending;
+@@ -1537,7 +1543,7 @@ public sealed partial class DonJEnemySpawner
+ 
+         if (profileContextCompatible &&
+             _justiceLegalReleaseFinalizationPending &&
+-            !runtimeSuspended)
++            !custodyRuntimeSuspended)
+         {
+             ResumeJusticeLegalReleaseFinalization(player, nowRaw);
+         }
+@@ -1549,6 +1555,9 @@ public sealed partial class DonJEnemySpawner
+             JusticeUpdateCustody(player, nowRaw);
+         }
+ 
++        // La détection des délits reste volontairement suspendue sur le signal
++        // global complet. Le bypass mission-only ne concerne que le contrôleur
++        // d'une détention dont Justice possède déjà l'identité et le transfert.
+         bool suspended = runtimeSuspended ||
+                          _justiceAmnestyPending ||
+                          _justiceVoluntaryFinePaymentIntent != null ||
+@@ -1617,6 +1626,7 @@ public sealed partial class DonJEnemySpawner
+         // runtime Justice n'avait pas le droit d'observer le joueur.
+         InterruptJusticeCustodyEscapeObservation();
+         ResetJusticeCustodyClock(now);
++        _justiceCustodyElapsedRemainderMs = 0;
+         AdvanceJusticeInactiveCustodyProfiles(now, true);
+     }
+ 
+@@ -5227,6 +5237,12 @@ public sealed partial class DonJEnemySpawner
+ 
+     private bool ComputeJusticeRuntimeSuspended(Ped player)
+     {
++        // Ce témoin n'est vrai que si toutes les barrières fortes ont été lues
++        // avec succès et que GET_MISSION_FLAG est l'unique cause de suspension.
++        // Il permet au contrôleur d'une détention déjà prouvée d'ignorer le latch
++        // BUSTED résiduel sans ouvrir le reste de Justice pendant une mission.
++        _justiceRuntimeSuspendedByMissionFlagOnlyCached = false;
++
+         if (_justiceProfileSelectionPending &&
+             !IsJusticeCanonicalProfileSlot(GetJusticeCanonicalPlayerSlotSafe()))
+         {
+@@ -5254,13 +5270,44 @@ public sealed partial class DonJEnemySpawner
+         }
+         catch
+         {
++            // La pause illisible ne suffit pas à elle seule à déclarer un état
++            // jouable; les natives fortes ci-dessous restent fail-closed.
+         }
+ 
+-        if (CallJusticeBooleanNativeWithCircuit(JusticeNativeGetIsLoadingScreenActive, JusticeCircuitLoading, true) ||
+-            CallJusticeBooleanNativeWithCircuit(JusticeNativeGetMissionFlag, JusticeCircuitMission, true) ||
+-            CallJusticeBooleanNativeWithCircuit(JusticeNativeIsCutsceneActive, JusticeCircuitCutscene, true) ||
+-            CallJusticeBooleanNativeWithCircuit(JusticeNativeIsPlayerSwitchInProgress, JusticeCircuitPlayerSwitch, true))
++        bool nativeSignal;
++        if (!TryCallJusticeBooleanNativeWithCircuit(
++                JusticeNativeGetIsLoadingScreenActive,
++                JusticeCircuitLoading,
++                out nativeSignal) || nativeSignal)
++        {
++            return true;
++        }
++        if (!TryCallJusticeBooleanNativeWithCircuit(
++                JusticeNativeIsCutsceneActive,
++                JusticeCircuitCutscene,
++                out nativeSignal) || nativeSignal)
++        {
++            return true;
++        }
++        if (!TryCallJusticeBooleanNativeWithCircuit(
++                JusticeNativeIsPlayerSwitchInProgress,
++                JusticeCircuitPlayerSwitch,
++                out nativeSignal) || nativeSignal)
++        {
++            return true;
++        }
++        if (!TryCallJusticeBooleanNativeWithCircuit(
++                JusticeNativeGetMissionFlag,
++                JusticeCircuitMission,
++                out nativeSignal))
++        {
++            // Une native mission indisponible reste une suspension dure. Elle ne
++            // doit jamais être confondue avec un vrai mission flag résiduel.
++            return true;
++        }
++        if (nativeSignal)
+         {
++            _justiceRuntimeSuspendedByMissionFlagOnlyCached = true;
+             return true;
+         }
+ 
+diff --git a/tests/DonJEnemySpawner.Tests/JusticeCustodyHardeningTests.cs b/tests/DonJEnemySpawner.Tests/JusticeCustodyHardeningTests.cs
+index f9b59ba..d38b36d 100644
+--- a/tests/DonJEnemySpawner.Tests/JusticeCustodyHardeningTests.cs
++++ b/tests/DonJEnemySpawner.Tests/JusticeCustodyHardeningTests.cs
+@@ -1097,6 +1097,91 @@ public sealed class JusticeCustodyHardeningTests
+             "ResetJusticeCustodyPersistentFields()");
+     }
+ 
++    [TestMethod]
++    public void CustodyClock_ResetPreservesOnlyAValidObservedRemainder()
++    {
++        object script = FormatterServices.GetUninitializedObject(ScriptType);
++        SetField(script, "_justiceCustodyElapsedRemainderMs", 875);
++
++        Invoke(script, "ResetJusticeCustodyClock", 4200);
++
++        Assert.AreEqual(4200, GetField<int>(script, "_justiceCustodyLastTickAt"));
++        Assert.AreEqual(
++            875,
++            GetField<int>(script, "_justiceCustodyElapsedRemainderMs"),
++            "Je conserve uniquement le temps de jeu déjà observé avant un micro-gate.");
++
++        SetField(script, "_justiceCustodyElapsedRemainderMs", -1);
++        Invoke(script, "ResetJusticeCustodyClock", 4300);
++        Assert.AreEqual(0, GetField<int>(script, "_justiceCustodyElapsedRemainderMs"));
++
++        SetField(script, "_justiceCustodyElapsedRemainderMs", 1000);
++        Invoke(script, "ResetJusticeCustodyClock", 4400);
++        Assert.AreEqual(
++            0,
++            GetField<int>(script, "_justiceCustodyElapsedRemainderMs"),
++            "Un reste impossible ne doit jamais créer un rattrapage de peine.");
++    }
++
++    [TestMethod]
++    public void CustodyResidualMissionFlag_BypassIsObservedOnlyInsideItsWindow()
++    {
++        FieldInfo windowField = ScriptType.GetField(
++            "JusticeCustodyResidualMissionFlagObservationWindowMs",
++            PrivateStatic);
++        Assert.IsNotNull(windowField);
++        Assert.AreEqual(15000, (int)windowField.GetRawConstantValue());
++
++        object script = FormatterServices.GetUninitializedObject(ScriptType);
++        SetField(script, "_justiceMonotonicTimeMs", 1000L);
++        Invoke(script, "ArmJusticeCustodyResidualMissionFlagBypass");
++        Assert.IsTrue(GetField<bool>(
++            script,
++            "_justiceCustodyResidualMissionFlagBypassArmed"));
++        Assert.AreEqual(
++            16000L,
++            GetField<long>(
++                script,
++                "_justiceCustodyResidualMissionFlagObservationDeadlineMs"));
++
++        SetField(script, "_justiceMonotonicTimeMs", 15999L);
++        SetField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
++        Invoke(script, "UpdateJusticeCustodyResidualMissionFlagBypass", true);
++        Assert.AreEqual(
++            0L,
++            GetField<long>(
++                script,
++                "_justiceCustodyResidualMissionFlagObservationDeadlineMs"),
++            "Je mémorise le latch BUSTED uniquement lorsqu'il apparaît dans la fenêtre bornée.");
++
++        Invoke(script, "UpdateJusticeCustodyResidualMissionFlagBypass", true);
++        Assert.IsTrue(GetField<bool>(
++            script,
++            "_justiceCustodyResidualMissionFlagBypassArmed"));
++
++        SetField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", false);
++        Invoke(script, "UpdateJusticeCustodyResidualMissionFlagBypass", false);
++        Assert.IsFalse(GetField<bool>(
++            script,
++            "_justiceCustodyResidualMissionFlagBypassArmed"));
++
++        SetField(script, "_justiceMonotonicTimeMs", 20000L);
++        Invoke(script, "ArmJusticeCustodyResidualMissionFlagBypass");
++        SetField(script, "_justiceMonotonicTimeMs", 35000L);
++        SetField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
++        Invoke(script, "UpdateJusticeCustodyResidualMissionFlagBypass", true);
++
++        Assert.IsFalse(GetField<bool>(
++            script,
++            "_justiceCustodyResidualMissionFlagBypassArmed"));
++        Assert.AreEqual(
++            0L,
++            GetField<long>(
++                script,
++                "_justiceCustodyResidualMissionFlagObservationDeadlineMs"),
++            "Un flag mission tardif doit rester une suspension normale.");
++    }
++
+     private static Type GetNestedType(string name)
+     {
+         Type type = ScriptType.GetNestedType(name, BindingFlags.NonPublic);
+diff --git a/tests/DonJEnemySpawner.Tests/JusticeRuntimeContractTests.cs b/tests/DonJEnemySpawner.Tests/JusticeRuntimeContractTests.cs
+index 294e55e..2ae0890 100644
+--- a/tests/DonJEnemySpawner.Tests/JusticeRuntimeContractTests.cs
++++ b/tests/DonJEnemySpawner.Tests/JusticeRuntimeContractTests.cs
+@@ -269,6 +269,33 @@ public sealed class JusticeRuntimeContractTests
+             "_justiceNextSuspensionCheckAtMs = _justiceMonotonicTimeMs + JusticeScalarScanIntervalMs",
+             "ComputeJusticeRuntimeSuspended(player)");
+ 
++        string probe = ExtractMethodBody(source, "ComputeJusticeRuntimeSuspended");
++        AssertOrdered(
++            probe,
++            "_justiceRuntimeSuspendedByMissionFlagOnlyCached = false",
++            "JusticeNativeGetIsLoadingScreenActive",
++            "JusticeNativeIsCutsceneActive",
++            "JusticeNativeIsPlayerSwitchInProgress",
++            "JusticeNativeGetMissionFlag",
++            "_justiceRuntimeSuspendedByMissionFlagOnlyCached = true");
++        Assert.AreEqual(
++            4,
++            Regex.Matches(
++                probe,
++                Regex.Escape("TryCallJusticeBooleanNativeWithCircuit("))
++                .Count,
++            "Chaque barrière de transition doit rester fail-closed avant de qualifier le seul flag mission.");
++
++        string sentenceSuspension = ExtractMethodBody(
++            source,
++            "SuspendJusticeSentenceClocks");
++        AssertOrdered(
++            sentenceSuspension,
++            "InterruptJusticeCustodyEscapeObservation()",
++            "ResetJusticeCustodyClock(now)",
++            "_justiceCustodyElapsedRemainderMs = 0",
++            "AdvanceJusticeInactiveCustodyProfiles(now, true)");
++
+         int[] circuits =
+         {
+             GetStaticFieldValue<int>("JusticeCircuitLoading"),
+diff --git a/tests/DonJEnemySpawner.Tests/StubRuntimeBehaviorTests.cs b/tests/DonJEnemySpawner.Tests/StubRuntimeBehaviorTests.cs
+index 27ddec8..7f1d0c8 100644
+--- a/tests/DonJEnemySpawner.Tests/StubRuntimeBehaviorTests.cs
++++ b/tests/DonJEnemySpawner.Tests/StubRuntimeBehaviorTests.cs
+@@ -281,6 +281,62 @@ public class StubRuntimeBehaviorTests
+             "Trevor ne doit jamais adopter la détention liée au dernier slot Franklin.");
+     }
+ 
++    [TestMethod]
++    public void Detention_IgnoreUniquementLeFlagMissionResiduelProuve()
++    {
++        object script = FormatterServices.GetUninitializedObject(typeof(DonJEnemySpawner));
++        Ped player = new Ped
++        {
++            Handle = 44,
++            Model = new Model(123)
++        };
++        Game.Player.Character = player;
++        SetPrivateField(
++            script,
++            "_justiceCaseState",
++            new JusticeCaseState
++            {
++                Enabled = true,
++                Phase = JusticePhase.Incarcerated,
++                SentenceSeconds = 90
++            });
++        SetPrivateField(script, "_justiceActivePlayerProfileSlot", 1);
++        SetPrivateField(script, "_justiceCustodyPlayerSlot", 1);
++        SetPrivateField(script, "_justiceCustodyPlayerHandle", player.Handle);
++        SetPrivateField(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
++        SetPrivateField(script, "_justiceCustodyRuntimeActive", true);
++        SetPrivateField(script, "_justiceCustodyContainmentEstablished", true);
++        SetPrivateField(script, "_justiceCustodyResidualMissionFlagBypassArmed", true);
++        SetPrivateField(script, "_justiceCustodyResidualMissionFlagObservationDeadlineMs", 0L);
++        SetPrivateField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
++        SetPrivateField(
++            script,
++            "_justiceCanonicalPlayerSlotOverride",
++            new Func<int>(() => 1));
++
++        MethodInfo suspension = typeof(DonJEnemySpawner).GetMethod(
++            "IsJusticeCustodyRuntimeSuspended",
++            BindingFlags.Instance | BindingFlags.NonPublic,
++            null,
++            new[] { typeof(Ped), typeof(bool) },
++            null);
++        Assert.IsNotNull(suspension);
++        Assert.IsFalse(
++            (bool)suspension.Invoke(script, new object[] { player, true }),
++            "Le seul latch BUSTED observé peut laisser progresser la détention prouvée.");
++
++        SetPrivateField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", false);
++        Assert.IsTrue(
++            (bool)suspension.Invoke(script, new object[] { player, true }),
++            "Une suspension forte reste toujours fail-closed.");
++
++        SetPrivateField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
++        SetPrivateField(script, "_justiceCustodyContainmentEstablished", false);
++        Assert.IsTrue(
++            (bool)suspension.Invoke(script, new object[] { player, true }),
++            "Je n'ignore jamais le flag mission avant une détention physiquement établie.");
++    }
++
+     [TestMethod]
+     public void Detention_DegèleLeJoueurEtRépareLeSnapshotAprèsLeTransfert()
+     {

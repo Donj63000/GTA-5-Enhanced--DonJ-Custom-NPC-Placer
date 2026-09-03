@@ -282,6 +282,62 @@ public class StubRuntimeBehaviorTests
     }
 
     [TestMethod]
+    public void Detention_IgnoreUniquementLeFlagMissionResiduelProuve()
+    {
+        object script = FormatterServices.GetUninitializedObject(typeof(DonJEnemySpawner));
+        Ped player = new Ped
+        {
+            Handle = 44,
+            Model = new Model(123)
+        };
+        Game.Player.Character = player;
+        SetPrivateField(
+            script,
+            "_justiceCaseState",
+            new JusticeCaseState
+            {
+                Enabled = true,
+                Phase = JusticePhase.Incarcerated,
+                SentenceSeconds = 90
+            });
+        SetPrivateField(script, "_justiceActivePlayerProfileSlot", 1);
+        SetPrivateField(script, "_justiceCustodyPlayerSlot", 1);
+        SetPrivateField(script, "_justiceCustodyPlayerHandle", player.Handle);
+        SetPrivateField(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        SetPrivateField(script, "_justiceCustodyRuntimeActive", true);
+        SetPrivateField(script, "_justiceCustodyContainmentEstablished", true);
+        SetPrivateField(script, "_justiceCustodyResidualMissionFlagBypassArmed", true);
+        SetPrivateField(script, "_justiceCustodyResidualMissionFlagObservationDeadlineMs", 0L);
+        SetPrivateField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
+        SetPrivateField(
+            script,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => 1));
+
+        MethodInfo suspension = typeof(DonJEnemySpawner).GetMethod(
+            "IsJusticeCustodyRuntimeSuspended",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(Ped), typeof(bool) },
+            null);
+        Assert.IsNotNull(suspension);
+        Assert.IsFalse(
+            (bool)suspension.Invoke(script, new object[] { player, true }),
+            "Le seul latch BUSTED observé peut laisser progresser la détention prouvée.");
+
+        SetPrivateField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", false);
+        Assert.IsTrue(
+            (bool)suspension.Invoke(script, new object[] { player, true }),
+            "Une suspension forte reste toujours fail-closed.");
+
+        SetPrivateField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
+        SetPrivateField(script, "_justiceCustodyContainmentEstablished", false);
+        Assert.IsTrue(
+            (bool)suspension.Invoke(script, new object[] { player, true }),
+            "Je n'ignore jamais le flag mission avant une détention physiquement établie.");
+    }
+
+    [TestMethod]
     public void Detention_DegèleLeJoueurEtRépareLeSnapshotAprèsLeTransfert()
     {
         object script = FormatterServices.GetUninitializedObject(typeof(DonJEnemySpawner));

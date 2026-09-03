@@ -266,6 +266,7 @@ public sealed partial class DonJEnemySpawner
     private int _justiceSuspendedPursuitDeathPlayerSlot = -1;
     private int _justiceSuspendedPursuitDeathPlayerModelHash;
     private bool _justiceRuntimeSuspendedCached;
+    private bool _justiceRuntimeSuspendedByMissionFlagOnlyCached;
     private int _justiceLastRawGameTime;
     private int _justiceLastWantedLevel;
     private int _justiceAimTargetHandle;
@@ -1511,15 +1512,20 @@ public sealed partial class DonJEnemySpawner
             !_justiceProfileContextBlocked &&
             IsJusticeRuntimeProfileContextCompatible();
         bool runtimeSuspended = IsJusticeRuntimeSuspended(player);
-        if ((runtimeSuspended || !profileContextCompatible) &&
+        UpdateJusticeCustodyResidualMissionFlagBypass(runtimeSuspended);
+        bool custodyRuntimeSuspended =
+            IsJusticeCustodyRuntimeSuspended(player, runtimeSuspended);
+        if ((custodyRuntimeSuspended || !profileContextCompatible) &&
             (_justicePoliceSuppressionActive || _justicePoliceIgnoreApplied ||
              _justicePoliceDispatchDisabled))
         {
-            // Je rends mes flags globaux avant de laisser une mission, une
-            // cinématique ou un autre protagoniste prendre la main.
+            // GET_MISSION_FLAG peut rester vrai après le transfert BUSTED. Une
+            // détention déjà physiquement prouvée garde alors la main; seules une
+            // vraie pause, un chargement, une cinématique ou un switch rendent ici
+            // les flags globaux de police.
             SetJusticeCustodyPoliceSuppression(false);
         }
-        bool suspendSentenceClocks = runtimeSuspended ||
+        bool suspendSentenceClocks = custodyRuntimeSuspended ||
             IsJusticePlayerDeadSafe(player) || !profileContextCompatible ||
             _justiceProfileSwitchPersistencePending ||
             _justicePoliceSuppressionRestorePending;
@@ -1537,7 +1543,7 @@ public sealed partial class DonJEnemySpawner
 
         if (profileContextCompatible &&
             _justiceLegalReleaseFinalizationPending &&
-            !runtimeSuspended)
+            !custodyRuntimeSuspended)
         {
             ResumeJusticeLegalReleaseFinalization(player, nowRaw);
         }
@@ -1549,6 +1555,9 @@ public sealed partial class DonJEnemySpawner
             JusticeUpdateCustody(player, nowRaw);
         }
 
+        // La détection des délits reste volontairement suspendue sur le signal
+        // global complet. Le bypass mission-only ne concerne que le contrôleur
+        // d'une détention dont Justice possède déjà l'identité et le transfert.
         bool suspended = runtimeSuspended ||
                          _justiceAmnestyPending ||
                          _justiceVoluntaryFinePaymentIntent != null ||
@@ -1617,6 +1626,7 @@ public sealed partial class DonJEnemySpawner
         // runtime Justice n'avait pas le droit d'observer le joueur.
         InterruptJusticeCustodyEscapeObservation();
         ResetJusticeCustodyClock(now);
+        _justiceCustodyElapsedRemainderMs = 0;
         AdvanceJusticeInactiveCustodyProfiles(now, true);
     }
 
@@ -5227,6 +5237,12 @@ public sealed partial class DonJEnemySpawner
 
     private bool ComputeJusticeRuntimeSuspended(Ped player)
     {
+        // Ce témoin n'est vrai que si toutes les barrières fortes ont été lues
+        // avec succès et que GET_MISSION_FLAG est l'unique cause de suspension.
+        // Il permet au contrôleur d'une détention déjà prouvée d'ignorer le latch
+        // BUSTED résiduel sans ouvrir le reste de Justice pendant une mission.
+        _justiceRuntimeSuspendedByMissionFlagOnlyCached = false;
+
         if (_justiceProfileSelectionPending &&
             !IsJusticeCanonicalProfileSlot(GetJusticeCanonicalPlayerSlotSafe()))
         {
@@ -5254,13 +5270,44 @@ public sealed partial class DonJEnemySpawner
         }
         catch
         {
+            // La pause illisible ne suffit pas à elle seule à déclarer un état
+            // jouable; les natives fortes ci-dessous restent fail-closed.
         }
 
-        if (CallJusticeBooleanNativeWithCircuit(JusticeNativeGetIsLoadingScreenActive, JusticeCircuitLoading, true) ||
-            CallJusticeBooleanNativeWithCircuit(JusticeNativeGetMissionFlag, JusticeCircuitMission, true) ||
-            CallJusticeBooleanNativeWithCircuit(JusticeNativeIsCutsceneActive, JusticeCircuitCutscene, true) ||
-            CallJusticeBooleanNativeWithCircuit(JusticeNativeIsPlayerSwitchInProgress, JusticeCircuitPlayerSwitch, true))
+        bool nativeSignal;
+        if (!TryCallJusticeBooleanNativeWithCircuit(
+                JusticeNativeGetIsLoadingScreenActive,
+                JusticeCircuitLoading,
+                out nativeSignal) || nativeSignal)
         {
+            return true;
+        }
+        if (!TryCallJusticeBooleanNativeWithCircuit(
+                JusticeNativeIsCutsceneActive,
+                JusticeCircuitCutscene,
+                out nativeSignal) || nativeSignal)
+        {
+            return true;
+        }
+        if (!TryCallJusticeBooleanNativeWithCircuit(
+                JusticeNativeIsPlayerSwitchInProgress,
+                JusticeCircuitPlayerSwitch,
+                out nativeSignal) || nativeSignal)
+        {
+            return true;
+        }
+        if (!TryCallJusticeBooleanNativeWithCircuit(
+                JusticeNativeGetMissionFlag,
+                JusticeCircuitMission,
+                out nativeSignal))
+        {
+            // Une native mission indisponible reste une suspension dure. Elle ne
+            // doit jamais être confondue avec un vrai mission flag résiduel.
+            return true;
+        }
+        if (nativeSignal)
+        {
+            _justiceRuntimeSuspendedByMissionFlagOnlyCached = true;
             return true;
         }
 

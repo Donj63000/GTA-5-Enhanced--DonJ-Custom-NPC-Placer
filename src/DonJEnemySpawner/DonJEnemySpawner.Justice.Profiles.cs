@@ -755,8 +755,7 @@ public sealed partial class DonJEnemySpawner
 
     private bool IsJusticePlayedProfileCustodyContextReady()
     {
-        if (_justiceRuntimeSuspendedCached || !JusticeIsCustodyActive ||
-            !IsJusticePlayedProfileContextReady())
+        if (!JusticeIsCustodyActive || !IsJusticePlayedProfileContextReady())
         {
             return false;
         }
@@ -772,7 +771,10 @@ public sealed partial class DonJEnemySpawner
         try
         {
             Ped player = Game.Player.Character;
-            if (!Entity.Exists(player) || player.IsDead)
+            if (!Entity.Exists(player) || player.IsDead ||
+                IsJusticeCustodyRuntimeSuspended(
+                    player,
+                    _justiceRuntimeSuspendedCached))
             {
                 return false;
             }

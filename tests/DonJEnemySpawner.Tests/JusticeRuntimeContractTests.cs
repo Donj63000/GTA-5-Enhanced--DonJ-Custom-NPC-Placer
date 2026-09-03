@@ -269,6 +269,33 @@ public sealed class JusticeRuntimeContractTests
             "_justiceNextSuspensionCheckAtMs = _justiceMonotonicTimeMs + JusticeScalarScanIntervalMs",
             "ComputeJusticeRuntimeSuspended(player)");
 
+        string probe = ExtractMethodBody(source, "ComputeJusticeRuntimeSuspended");
+        AssertOrdered(
+            probe,
+            "_justiceRuntimeSuspendedByMissionFlagOnlyCached = false",
+            "JusticeNativeGetIsLoadingScreenActive",
+            "JusticeNativeIsCutsceneActive",
+            "JusticeNativeIsPlayerSwitchInProgress",
+            "JusticeNativeGetMissionFlag",
+            "_justiceRuntimeSuspendedByMissionFlagOnlyCached = true");
+        Assert.AreEqual(
+            4,
+            Regex.Matches(
+                probe,
+                Regex.Escape("TryCallJusticeBooleanNativeWithCircuit("))
+                .Count,
+            "Chaque barrière de transition doit rester fail-closed avant de qualifier le seul flag mission.");
+
+        string sentenceSuspension = ExtractMethodBody(
+            source,
+            "SuspendJusticeSentenceClocks");
+        AssertOrdered(
+            sentenceSuspension,
+            "InterruptJusticeCustodyEscapeObservation()",
+            "ResetJusticeCustodyClock(now)",
+            "_justiceCustodyElapsedRemainderMs = 0",
+            "AdvanceJusticeInactiveCustodyProfiles(now, true)");
+
         int[] circuits =
         {
             GetStaticFieldValue<int>("JusticeCircuitLoading"),

@@ -1097,6 +1097,91 @@ public sealed class JusticeCustodyHardeningTests
             "ResetJusticeCustodyPersistentFields()");
     }
 
+    [TestMethod]
+    public void CustodyClock_ResetPreservesOnlyAValidObservedRemainder()
+    {
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        SetField(script, "_justiceCustodyElapsedRemainderMs", 875);
+
+        Invoke(script, "ResetJusticeCustodyClock", 4200);
+
+        Assert.AreEqual(4200, GetField<int>(script, "_justiceCustodyLastTickAt"));
+        Assert.AreEqual(
+            875,
+            GetField<int>(script, "_justiceCustodyElapsedRemainderMs"),
+            "Je conserve uniquement le temps de jeu déjà observé avant un micro-gate.");
+
+        SetField(script, "_justiceCustodyElapsedRemainderMs", -1);
+        Invoke(script, "ResetJusticeCustodyClock", 4300);
+        Assert.AreEqual(0, GetField<int>(script, "_justiceCustodyElapsedRemainderMs"));
+
+        SetField(script, "_justiceCustodyElapsedRemainderMs", 1000);
+        Invoke(script, "ResetJusticeCustodyClock", 4400);
+        Assert.AreEqual(
+            0,
+            GetField<int>(script, "_justiceCustodyElapsedRemainderMs"),
+            "Un reste impossible ne doit jamais créer un rattrapage de peine.");
+    }
+
+    [TestMethod]
+    public void CustodyResidualMissionFlag_BypassIsObservedOnlyInsideItsWindow()
+    {
+        FieldInfo windowField = ScriptType.GetField(
+            "JusticeCustodyResidualMissionFlagObservationWindowMs",
+            PrivateStatic);
+        Assert.IsNotNull(windowField);
+        Assert.AreEqual(15000, (int)windowField.GetRawConstantValue());
+
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        SetField(script, "_justiceMonotonicTimeMs", 1000L);
+        Invoke(script, "ArmJusticeCustodyResidualMissionFlagBypass");
+        Assert.IsTrue(GetField<bool>(
+            script,
+            "_justiceCustodyResidualMissionFlagBypassArmed"));
+        Assert.AreEqual(
+            16000L,
+            GetField<long>(
+                script,
+                "_justiceCustodyResidualMissionFlagObservationDeadlineMs"));
+
+        SetField(script, "_justiceMonotonicTimeMs", 15999L);
+        SetField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
+        Invoke(script, "UpdateJusticeCustodyResidualMissionFlagBypass", true);
+        Assert.AreEqual(
+            0L,
+            GetField<long>(
+                script,
+                "_justiceCustodyResidualMissionFlagObservationDeadlineMs"),
+            "Je mémorise le latch BUSTED uniquement lorsqu'il apparaît dans la fenêtre bornée.");
+
+        Invoke(script, "UpdateJusticeCustodyResidualMissionFlagBypass", true);
+        Assert.IsTrue(GetField<bool>(
+            script,
+            "_justiceCustodyResidualMissionFlagBypassArmed"));
+
+        SetField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", false);
+        Invoke(script, "UpdateJusticeCustodyResidualMissionFlagBypass", false);
+        Assert.IsFalse(GetField<bool>(
+            script,
+            "_justiceCustodyResidualMissionFlagBypassArmed"));
+
+        SetField(script, "_justiceMonotonicTimeMs", 20000L);
+        Invoke(script, "ArmJusticeCustodyResidualMissionFlagBypass");
+        SetField(script, "_justiceMonotonicTimeMs", 35000L);
+        SetField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
+        Invoke(script, "UpdateJusticeCustodyResidualMissionFlagBypass", true);
+
+        Assert.IsFalse(GetField<bool>(
+            script,
+            "_justiceCustodyResidualMissionFlagBypassArmed"));
+        Assert.AreEqual(
+            0L,
+            GetField<long>(
+                script,
+                "_justiceCustodyResidualMissionFlagObservationDeadlineMs"),
+            "Un flag mission tardif doit rester une suspension normale.");
+    }
+
     private static Type GetNestedType(string name)
     {
         Type type = ScriptType.GetNestedType(name, BindingFlags.NonPublic);
