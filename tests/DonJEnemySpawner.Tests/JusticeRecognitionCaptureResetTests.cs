@@ -72,9 +72,12 @@ public sealed class JusticeRecognitionCaptureResetTests
         Assert.AreEqual(0, profile.OutfitEvidence.Count, "L'icône tenue doit disparaître.");
         Assert.IsNotNull(profile.AppearanceEvidence);
         Assert.IsFalse(profile.AppearanceEvidence.Active);
+        Assert.AreEqual(0L, profile.AppearanceEvidence.SourceEpisodeId);
         Assert.IsNotNull(profile.SearchZone);
         Assert.IsFalse(profile.SearchZone.Active, "L'icône mandat local doit disparaître.");
+        Assert.AreEqual(0L, profile.SearchZone.SourceEpisodeId);
         Assert.AreEqual(0, profile.SearchZone.WantedFloor);
+        Assert.AreEqual(0.0f, profile.SearchZone.Radius, 0.001f);
     }
 
     [TestMethod]
@@ -93,11 +96,23 @@ public sealed class JusticeRecognitionCaptureResetTests
                 "src",
                 "DonJEnemySpawner",
                 "DonJEnemySpawner.Justice.Recognition.cs"));
+        string durableRecognitionReset = ExtractMethod(
+            integration,
+            "private bool EnsureJusticeRecognitionCaptureResetDurable(string reason)",
+            "private void ResetJusticeRecognitionCaptureResetConfirmation()");
 
         string completedTransfer = ExtractMethod(
             custody,
             "private void CompleteJusticeCustodyTransfer(Ped player, int now)",
-            "private static bool BeginJusticeCustodyRespawnTransferMask()");
+            "private bool TrySecureJusticeCustodyAdmission(Ped player, int now)");
+        string secureAdmission = ExtractMethod(
+            custody,
+            "private bool TrySecureJusticeCustodyAdmission(Ped player, int now)",
+            "private void ResetJusticeCustodyAdmissionWantedStability(int now)");
+        string admissionFinalization = ExtractMethod(
+            custody,
+            "private void FinalizeJusticeCustodyAdmissionAfterFadeIn(",
+            "private JusticePreJudgmentHoldingSource GetJusticeCustodyAdmissionHoldingSource()");
         string beginTransfer = ExtractMethod(
             custody,
             "private void JusticeBeginCustodyTransfer(bool deathCapture)",
@@ -111,21 +126,55 @@ public sealed class JusticeRecognitionCaptureResetTests
             "EnforceJusticePreJudgmentHoldingControlLock(player);",
             "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
             "if (!transferred)",
+            "_justiceCustodyAdmissionPositionEstablished = true;",
+            "PrimeJusticeCustodyGuardDamageFrontsForAdmission(player);",
+            "if (!TrySecureJusticeCustodyAdmission(player, now))",
             "_justiceCaseState.Phase = JusticePhase.Incarcerated;",
-            "ClearJusticeWantedLevelOnce();");
+            "EnsureJusticeCustodyScene(now);",
+            "PersistJusticeCriticalPrecommitRedundantly(",
+            "RestoreJusticeCustodyRespawnTransferMask()",
+            "TryFinishJusticeCustodyAdmissionFadeIn(",
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn(layout, now)");
+        AssertContainsInOrder(
+            admissionFinalization,
+            "_justiceCustodyRespawnTransferPending = false;",
+            "ClearPendingJusticeDeathCapture();",
+            "_justiceCustodyLastTickAt = now;");
         Assert.AreEqual(
             1,
             CountOccurrences(
                 completedTransfer,
                 "EnsureJusticeRecognitionCaptureResetDurable("),
             "Je ne crée qu'une intention de reset à la frontière commune aux arrestations et morts policières.");
+        Assert.AreEqual(
+            1,
+            CountOccurrences(
+                completedTransfer,
+                "RestoreJusticeCustodyRespawnTransferMask()"),
+            "Le transfert réussi ne peut rendre l'écran qu'une fois, tout à la fin.");
+        AssertContainsInOrder(
+            secureAdmission,
+            "SuppressJusticeRecognitionWantedLoss(",
+            "ClearJusticeWantedLevelOnceDetailed()",
+            "wantedClear != JusticeWantedClearResult.Succeeded",
+            "GetJusticeWantedLevelSafe() != 0",
+            "SetJusticeCustodyPoliceSuppression(true)",
+            "_justiceCustodyAdmissionWantedStabilityStarted = true;",
+            "JusticeCustodyAdmissionWantedStabilityMs",
+            "return true;");
+        Assert.IsFalse(
+            secureAdmission.Contains("TryRestoreJusticeCustodyRespawnTransferMask("),
+            "La vérification wanted/police ne doit jamais rendre elle-même le masque.");
+        Assert.IsFalse(
+            completedTransfer.Contains("DO_SCREEN_FADE_IN"),
+            "Le transfert passe uniquement par le propriétaire idempotent du masque.");
         AssertContainsInOrder(
             beginTransfer,
             "if (GetJusticeCustodyTotalRemainingSeconds(_justiceCaseState) <= 0L)",
             "if (!EnsureJusticeRecognitionCaptureResetDurable(",
             "return;",
             "SuppressJusticeRecognitionWantedLoss(",
-            "ResetJusticeCustodyPersistentFields();",
+            "ResetJusticeCustodyPersistentFields(",
             "JusticePrepareLegalReleaseState();");
         Assert.AreEqual(
             1,
@@ -145,6 +194,20 @@ public sealed class JusticeRecognitionCaptureResetTests
         StringAssert.Contains(
             integration,
             "frontière d'arrestation suspendue et retry armé");
+        AssertContainsInOrder(
+            durableRecognitionReset,
+            "_justiceRecognitionCaptureResetConfirmedProfileSlot == profileSlot",
+            "_justiceRecognitionCaptureResetConfirmedEpisodeId,",
+            "return true;",
+            "if (NotifyJusticeRecognitionPlayerCaptured(reason))",
+            "_justiceRecognitionCaptureResetConfirmedProfileSlot = profileSlot;",
+            "_justiceRecognitionCaptureResetConfirmedEpisodeId =");
+        Assert.AreEqual(
+            1,
+            CountOccurrences(
+                durableRecognitionReset,
+                "NotifyJusticeRecognitionPlayerCaptured(reason)"),
+            "Je ne recrée pas une commande Recognition après sa confirmation pour le même épisode.");
     }
 
     private static string ExtractMethod(

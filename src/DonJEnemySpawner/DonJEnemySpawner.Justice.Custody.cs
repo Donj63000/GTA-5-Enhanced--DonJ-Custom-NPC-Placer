@@ -49,6 +49,8 @@ public sealed partial class DonJEnemySpawner
     private const int JusticeCustodyGuardCombatRetryMs = 1500;
     private const int JusticeCustodyGuardWantedMinimum = 2;
     private const int JusticeCustodyPoliceSuppressionIntervalMs = 1000;
+    private const int JusticeCustodyAdmissionWantedStabilityMs = 1000;
+    private const int JusticeCustodyAdmissionWantedObservationMs = 100;
     private const int JusticeCustodyTransferInitialRetryMs = 750;
     private const int JusticeCustodyTransferMaximumRetryMs = 5000;
     private const int JusticeCustodyTransferTimeoutMs = 30000;
@@ -71,6 +73,16 @@ public sealed partial class DonJEnemySpawner
     private const int JusticeCustodyFineDollarsPerSecond = 150;
     private const int JusticeCustodyFineCashReadRetryMs = 750;
     private const int JusticeCustodyDeathPersistenceRetryMs = 1000;
+    private const string JusticeLegalReleaseBarrierPrefix =
+        "JusticeLegalRelease.";
+    private const string JusticeLegalReleasePrepareBarrier =
+        JusticeLegalReleaseBarrierPrefix + "Prepare";
+    private const string JusticeLegalReleaseCaseClearedBarrier =
+        JusticeLegalReleaseBarrierPrefix + "CaseCleared";
+    private const string JusticeLegalReleaseWantedPreparedBarrier =
+        JusticeLegalReleaseBarrierPrefix + "WantedClearPrepared";
+    private const string JusticeLegalReleaseAcknowledgementBarrier =
+        JusticeLegalReleaseBarrierPrefix + "Acknowledgement";
     private const int JusticeDlcWeaponDataSize = 312;
     private const int JusticeDlcWeaponHashOffset = 8;
     private const float JusticeCustodyGuardPostReturnDistanceSquared = 6.25f;
@@ -387,6 +399,7 @@ public sealed partial class DonJEnemySpawner
     private string _justiceCapturePrecommitConfirmedEpisodeId = string.Empty;
     private bool _justiceCustodyPersistenceOutageHoldingEstablished;
     private bool _justiceCustodyDeathRebindPending;
+    private bool _justiceCustodyRespawnIdentityRebindConfirmed;
     private bool _justiceCustodyDeathStatePersistencePending;
     private long _justiceCustodyDeathPersistenceRevision;
     private long _justiceCustodyDeathPersistenceWriteFailures;
@@ -408,10 +421,16 @@ public sealed partial class DonJEnemySpawner
     private int _justiceNextCustodyModelRetryAt;
     private int _justiceOutsideCustodySinceAt;
     private bool _justiceCustodyContainmentEstablished;
+    private bool _justiceCustodyAdmissionPositionEstablished;
+    private bool _justiceCustodyAdmissionReturnToCell;
+    private bool _justiceCustodyAdmissionWantedStabilityStarted;
+    private int _justiceCustodyAdmissionWantedStableSinceAt;
+    private bool _justiceCustodyAdmissionFadeInRequested;
     private int _justiceNextPoliceSuppressionAt;
     private bool _justicePoliceSuppressionActive;
     private bool _justicePoliceIgnoreApplied;
     private bool _justicePoliceDispatchDisabled;
+    private bool _justicePoliceSuppressionApplyConfirmed;
     private bool _justicePoliceSuppressionRestorePending;
     private bool _justicePoliceSuppressionFailureLogged;
     private int _justiceNextPoliceSuppressionRestoreAt;
@@ -438,6 +457,9 @@ public sealed partial class DonJEnemySpawner
     private JusticeInventoryCustodyState _justiceInventoryCustodyState;
     private int _justiceInventoryCaptureFailureCount;
     private int _justiceInventoryRemovalFailureCount;
+    private int _justiceInventoryRemovalVerifiedPlayerHandle;
+    private int _justiceInventoryRemovalVerifiedPlayerModelHash;
+    private string _justiceInventoryRemovalVerifiedEpisodeId = string.Empty;
 
     private int _justiceEscapePersistenceRetryAt;
     private int _justiceReleaseRestoreStartedAt;
@@ -449,7 +471,15 @@ public sealed partial class DonJEnemySpawner
     private int _justiceReleaseSelectedWeaponHash = JusticeUnarmedHash;
     private bool _justiceLegalReleaseFinalizationPending;
     private bool _justiceLegalReleaseWantedClearAttempted;
+    private bool _justiceLegalReleaseWantedClearExecutionPending;
     private bool _justiceLegalReleaseWeaponSelectionApplied;
+    private bool _justicePoliceDeathNoCellReleaseExitApplied;
+    private bool _justicePoliceDeathNoCellReleaseProtectionRestorePending;
+    private bool _justicePoliceDeathNoCellReleaseFadeInRequested;
+    private bool _justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement;
+    private bool _justicePoliceDeathNoCellReleaseWantedStabilityStarted;
+    private int _justicePoliceDeathNoCellReleaseWantedStableSinceAt;
+    private int _justiceNextPoliceDeathNoCellReleaseWantedObservationAt;
     private JusticeCustodySite _justiceLegalReleaseFinalizationSite;
     private int _justiceLegalReleaseSelectedWeaponHash = JusticeUnarmedHash;
 
@@ -616,7 +646,7 @@ public sealed partial class DonJEnemySpawner
             Ped waitingPlayer = Game.Player.Character;
             int waitingPlayerSlot = GetCurrentSinglePlayerCashSlotSafe();
             bool provenCustomRespawn = waitingPlayerSlot == -1 &&
-                !_justiceCustodyDeathRebindPending &&
+                IsJusticeCustodyRespawnIdentityRebindConfirmedFor(waitingPlayer) &&
                 _justiceCustodyPlayerSlot == _justiceActivePlayerProfileSlot &&
                 _justiceLastCanonicalPlayerSlot == _justiceCustodyPlayerSlot &&
                 IsJusticeCustodyPlayerIdentityCompatible(waitingPlayer);
@@ -656,15 +686,76 @@ public sealed partial class DonJEnemySpawner
                 // zéro perdue après un crash.
                 return;
             }
+            bool preserveResidualMissionFlagBypass = false;
+            long preservedResidualMissionFlagDeadlineMs = 0L;
+            bool policeDeathDispositionPending = deathCapture ||
+                _justicePursuitDeathObservedDuringSuspension;
+            if (policeDeathDispositionPending)
+            {
+                if (!_justicePursuitDeathObservedDuringSuspension ||
+                    !HasExactJusticePendingPoliceDeathCaptureOwner() ||
+                    !HasJusticeCapturePrecommitConfirmationForCurrentEpisode())
+                {
+                    // Je ne transforme jamais une incohérence de propriétaire
+                    // en libération : le front policier exact reste durable et
+                    // cette même capture reprendra sa frontière au prochain tick.
+                    LogWarning(
+                        "Justice.Capture",
+                        "Libération sans cellule différée : front de mort ou précommit exact indisponible.");
+                    return;
+                }
+
+                Ped releasePlayer = Game.Player.Character;
+                if (_justiceRuntimeSuspendedByMissionFlagOnlyCached &&
+                    _justicePreJudgmentHoldingSource ==
+                        JusticePreJudgmentHoldingSource.Captured &&
+                    _justicePoliceDeathPreJudgmentHoldingEstablished &&
+                    Entity.Exists(releasePlayer) && !releasePlayer.IsDead &&
+                    IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(
+                        releasePlayer) &&
+                    IsInsideJusticePoliceDeathPreJudgmentHolding(
+                        releasePlayer.Position) &&
+                    IsJusticePoliceDeathFrontResultDurable())
+                {
+                    // Je qualifie aussi la sortie sans cellule avant d'effacer
+                    // son DeathFront : sa barrière durable peut demander plusieurs ticks.
+                    ArmJusticeCustodyResidualMissionFlagBypassObserved();
+                }
+                preserveResidualMissionFlagBypass =
+                    _justiceCustodyResidualMissionFlagBypassArmed &&
+                    _justiceCustodyResidualMissionFlagObservationDeadlineMs == 0L;
+                preservedResidualMissionFlagDeadlineMs =
+                    _justiceCustodyResidualMissionFlagObservationDeadlineMs;
+                // Je conserve le DeathFront jusqu'à l'acquittement final de la
+                // libération. Il devient le propriétaire durable du masque, du
+                // holding et des retries wanted, y compris après un rechargement.
+            }
             SuppressJusticeRecognitionWantedLoss(
                 "arrestation confirmée sans placement en cellule");
-            ResetJusticeCustodyPersistentFields();
+            ResetJusticeCustodyPersistentFields(
+                true,
+                policeDeathDispositionPending);
             JusticePrepareLegalReleaseState();
             _justiceLegalReleaseFinalizationPending = true;
             _justiceLegalReleaseFinalizationSite = JusticeCustodySite.None;
             _justiceLegalReleaseSelectedWeaponHash = 0;
             _justiceLegalReleaseWantedClearAttempted = false;
+            _justiceLegalReleaseWantedClearExecutionPending = false;
             _justiceLegalReleaseWeaponSelectionApplied = false;
+            ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
+            if (policeDeathDispositionPending)
+            {
+                // Je garde l'origine hospitalière masquée et le protagoniste
+                // protégé jusqu'au snapshot unique qui acquitte à la fois la
+                // sortie et le DeathFront exact.
+                _justiceCustodyRespawnTransferPending = true;
+                _justiceCustodyRespawnRestorePending = false;
+                _justicePoliceDeathRespawnMaskIntentPending = true;
+                ReassertJusticeCustodyRespawnTransferMask();
+            }
+            RestoreJusticeCustodyResidualMissionFlagBypassForLegalRelease(
+                preserveResidualMissionFlagBypass,
+                preservedResidualMissionFlagDeadlineMs);
             JusticeMarkStateDirty();
             ResumeJusticeLegalReleaseFinalization(
                 Game.Player.Character,
@@ -701,27 +792,33 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyTransferPending = true;
         _justiceCustodyResumePending = false;
         _justiceCustodyPersistenceOutageHoldingEstablished = false;
-        if (!waitForRespawn)
+        if (!waitForRespawn &&
+            !_justiceCustodyRespawnTransferPending &&
+            !_justiceCustodyRespawnRestorePending)
         {
-            if (_justiceCustodyRespawnTransferPending)
-            {
-                if (!TryRestoreJusticeCustodyRespawnTransferMask())
-                {
-                    return;
-                }
-            }
-            else
-            {
-                _justiceCustodyRespawnMaskNeedsRearm = false;
-                _justiceCustodyRespawnRestorePending = false;
-            }
+            // Je ne consomme jamais ici un masque déjà armé : l'admission finale
+            // en est l'unique propriétaire et le rendra seulement après sécurité.
+            _justiceCustodyRespawnMaskNeedsRearm = false;
         }
         ResetJusticeCustodyTransferRetryState();
         _justiceCustodyWaitingForRespawn = waitForRespawn;
         _justiceOutsideCustodySinceAt = 0;
         _justiceCustodyContainmentEstablished = false;
         _justiceCaseState.Phase = JusticePhase.Transporting;
+        if (waitForRespawn &&
+            _justicePreJudgmentHoldingSource !=
+                JusticePreJudgmentHoldingSource.PendingWalCustodyRebind)
+        {
+            // Je transmets le holding policier au transfert avant de consommer le
+            // front PendingDeathCapture. Sa protection ne disparaît ainsi jamais
+            // pendant une frame intermédiaire, même pour un respawn canonique.
+            SetJusticePreJudgmentHoldingIntent(
+                JusticePreJudgmentHoldingSource.Captured,
+                _justicePoliceDeathPreJudgmentHoldingOwnerSlot,
+                _justicePoliceDeathPreJudgmentHoldingOwnerModelHash);
+        }
         JusticeMarkStateDirty();
+        TryArmPendingJusticeDeathCaptureForTransfer();
 
         Ped player = Game.Player.Character;
         if (!waitForRespawn && Entity.Exists(player) && !player.IsDead)
@@ -761,8 +858,6 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        UpdateJusticeCustodyGuardRetaliation(player, now);
-
         if (Entity.Exists(player) && player.IsDead)
         {
             if (IsJusticeRuntimeSuspended(player))
@@ -780,7 +875,17 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
+        bool respawnIdentityRebindConfirmed =
+            IsJusticeCustodyRespawnIdentityRebindConfirmedFor(player);
+        if (_justiceCustodyRespawnIdentityRebindConfirmed &&
+            !respawnIdentityRebindConfirmed)
+        {
+            // Je retire uniquement la preuve volatile devenue périmée. Le latch
+            // durable d'admission imposera ensuite le rebind large ou strict prévu.
+            _justiceCustodyRespawnIdentityRebindConfirmed = false;
+        }
         if (_justiceCustodyWaitingForRespawn && Entity.Exists(player) && !player.IsDead &&
+            !respawnIdentityRebindConfirmed &&
             (_justiceCustodyDeathRebindPending ||
              !IsJusticeCustodyPlayerIdentityCompatible(player)))
         {
@@ -904,6 +1009,10 @@ public sealed partial class DonJEnemySpawner
 
         if (!Entity.Exists(player))
         {
+            if (_justiceCustodyTransferPending || _justiceCustodyResumePending)
+            {
+                ResetJusticeCustodyAdmissionWantedStability(now);
+            }
             InterruptJusticeCustodyEscapeObservation();
             ResetJusticeCustodyClock(now);
             return;
@@ -911,6 +1020,10 @@ public sealed partial class DonJEnemySpawner
 
         if (!IsJusticeCustodyPlayerIdentityCompatible(player))
         {
+            if (_justiceCustodyTransferPending || _justiceCustodyResumePending)
+            {
+                ResetJusticeCustodyAdmissionWantedStability(now);
+            }
             // Je suspends sur un vrai changement de protagoniste pour ne jamais
             // rendre le loadout de Michael à Franklin (ou inversement).
             InterruptJusticeCustodyEscapeObservation();
@@ -920,21 +1033,32 @@ public sealed partial class DonJEnemySpawner
 
         if (_justiceCustodyWaitingForRespawn)
         {
-            _justiceCustodyWaitingForRespawn = false;
-            _justiceCustodyTransferPending = true;
-            JusticeMarkStateDirty();
-            if (!JusticeFlushStateNow())
+            if (_justiceCustodyDeathRebindPending &&
+                !IsJusticeCustodyRespawnIdentityRebindConfirmedFor(player))
             {
-                _justiceCustodyWaitingForRespawn = true;
-                _justiceCustodyTransferPending = false;
-                JusticeMarkStateDirty();
+                // Je ne consomme jamais le droit de rebind sur une simple
+                // compatibilité de slot : le handle et le modèle vivants doivent
+                // avoir été confirmés dans cette session.
                 ResetJusticeCustodyClock(now);
                 return;
             }
 
-            // Le helper l'a normalement armé dès le premier ped vivant. Je garde
-            // ce fallback runtime pour une native d'identité devenue disponible
-            // seulement après le rebind durable.
+            if (!_justiceCustodyTransferPending)
+            {
+                _justiceCustodyTransferPending = true;
+                JusticeMarkStateDirty();
+                if (!JusticeFlushStateNow())
+                {
+                    _justiceCustodyTransferPending = false;
+                    JusticeMarkStateDirty();
+                    ResetJusticeCustodyClock(now);
+                    return;
+                }
+            }
+
+            // Je conserve waitingForRespawn jusqu'au FADE_IN final. Avec le droit
+            // large consommé, ce latch représente l'identité adoptée et permet au
+            // reload de reconstruire strictement son handle non sérialisé.
             _justiceCustodyRespawnTransferPending = true;
         }
 
@@ -942,6 +1066,9 @@ public sealed partial class DonJEnemySpawner
         {
             if (!JusticeCustodyCanMutateWorld(player))
             {
+                // Je recommence toute la seconde de stabilité après chaque
+                // suspension, même brève, afin d'exiger une observation complète.
+                ResetJusticeCustodyAdmissionWantedStability(now);
                 ResetJusticeCustodyClock(now);
                 return;
             }
@@ -976,6 +1103,7 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
+        UpdateJusticeCustodyGuardRetaliation(player, now);
         // Je ne modifie les flags globaux police qu'après le gate gameplay et
         // après la validation physique du transfert en détention.
         MaintainJusticeCustodyPoliceSuppression(player, now);
@@ -1011,6 +1139,9 @@ public sealed partial class DonJEnemySpawner
         {
             CaptureJusticeCustodyGuardDamageFrontsAtDeath(player);
             FreezeJusticeCustodyGuardDeathPenalty(player);
+            // Je retire la riposte du snapshot avant de publier le front de mort.
+            // La décision de peine figée juste au-dessus reste conservée séparément.
+            ResetJusticeCustodyGuardRetaliation(player, true, true);
         }
         if (identityCompatible &&
             (!_justiceCustodyDeathRebindPending ||
@@ -1028,7 +1159,6 @@ public sealed partial class DonJEnemySpawner
         }
         if (identityCompatible)
         {
-            ResetJusticeCustodyGuardRetaliation(player, true, true);
             ArmJusticeCustodyDeathFailClosedState(player, now);
         }
 
@@ -1046,6 +1176,8 @@ public sealed partial class DonJEnemySpawner
         }
         CaptureJusticeCustodyGuardDamageFrontsAtDeath(player);
         FreezeJusticeCustodyGuardDeathPenalty(player);
+        // Je publie toujours un état sans riposte active avec le droit de rebind.
+        ResetJusticeCustodyGuardRetaliation(player, true, true);
         if (!_justiceCustodyDeathRebindPending ||
             _justicePendingDeathFrontWalRecord != null ||
             _justiceCustodyGuardDeathPenaltyPending)
@@ -1057,7 +1189,6 @@ public sealed partial class DonJEnemySpawner
                 _justiceCustodyGuardDeathPenaltyPending = false;
             }
         }
-        ResetJusticeCustodyGuardRetaliation(player, true, true);
         ArmJusticeCustodyDeathFailClosedState(
             player,
             GetJusticeRawGameTimeSafe());
@@ -1067,6 +1198,7 @@ public sealed partial class DonJEnemySpawner
     {
         _justiceCustodyContainmentEstablished = false;
         _justiceOutsideCustodySinceAt = 0;
+        _justiceCustodyRespawnIdentityRebindConfirmed = false;
         bool stateChanged = false;
         if (!_justiceCustodyDeathRebindPending)
         {
@@ -1239,23 +1371,22 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        bool insideContainment = IsInsideJusticeCustodyLayout(
-            layout,
-            player.Position);
-        bool moved = insideContainment;
-        if (!moved)
+        if (!_justiceCustodyRespawnTransferPending ||
+            _justiceCustodyRespawnRestorePending ||
+            _justiceCustodyRespawnMaskNeedsRearm)
         {
-            if (_justiceCustodyRespawnTransferPending)
-            {
-                ReassertJusticeCustodyRespawnTransferMask();
-            }
-            // Je réutilise le déplacement non bloquant du holding : il conserve
-            // le masque pendant le streaming et ne contient aucun FadeIn interne.
-            moved = TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(
-                player,
-                layout.CellPosition,
-                layout.CellHeading);
+            _justiceCustodyRespawnTransferPending = true;
+            _justiceCustodyRespawnRestorePending = false;
+            ReassertJusticeCustodyRespawnTransferMask();
         }
+
+        // Je réutilise systématiquement le déplacement non bloquant du holding,
+        // même si GTA a déjà replacé le ped dans l'enceinte. Il acquiert ainsi
+        // la protection et le gel qui doivent survivre à toute panne du writer.
+        bool moved = TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(
+            player,
+            layout.CellPosition,
+            layout.CellHeading);
 
         if (!moved ||
             !IsInsideJusticeCustodyLayout(layout, player.Position))
@@ -1280,18 +1411,10 @@ public sealed partial class DonJEnemySpawner
         {
             _justiceCustodyPlayerSlot = currentSlot;
         }
-        if (!CompleteJusticePreJudgmentHoldingStreamingProtection(player) ||
-            !EnsureJusticeCustodyPlayerMobility(player))
-        {
-            if (_justiceCustodyRespawnTransferPending)
-            {
-                ReassertJusticeCustodyRespawnTransferMask();
-            }
-            _justiceNextCustodyTransferAttemptAt = JusticeCustodyFutureTime(
-                now,
-                JusticeCustodyTransferInitialRetryMs);
-            return false;
-        }
+        // Je ne rends ni la mobilité, ni la mortalité, ni l'image tant que le
+        // front CustodyRebind n'est pas durable. Sans writer, je ne pourrais pas
+        // non plus persister les jetons nécessaires à la suppression policière.
+        EnforceJusticePreJudgmentHoldingControlLock(player);
 
         bool firstHolding = !_justiceCustodyPersistenceOutageHoldingEstablished;
         _justiceCustodyPersistenceOutageHoldingEstablished = true;
@@ -1299,11 +1422,6 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyContainmentEstablished = true;
         _justiceOutsideCustodySinceAt = 0;
         _justiceNextCustodyTransferAttemptAt = 0;
-        if (_justiceCustodyRespawnTransferPending)
-        {
-            TryRestoreJusticeCustodyRespawnTransferMask();
-        }
-
         if (firstHolding)
         {
             // Je ne libère jamais un détenu parce que le XML est corrompu. Le
@@ -1353,14 +1471,40 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        bool returnToCell = JusticePolicy.ShouldReturnCustodyTransferToCell(
-            _justiceCaseState.Phase);
-        Vector3 transferPosition = returnToCell
+        if (!_justiceCustodyAdmissionPositionEstablished)
+        {
+            // Je mémorise la destination de cette admission avant de passer la
+            // phase à Incarcerated. Les ticks du FadeIn ne doivent pas déplacer
+            // une première admission de l'arrivée vers la cellule.
+            _justiceCustodyAdmissionReturnToCell =
+                JusticePolicy.ShouldReturnCustodyTransferToCell(
+                    _justiceCaseState.Phase);
+        }
+        Vector3 transferPosition = _justiceCustodyAdmissionReturnToCell
             ? layout.CellPosition
             : layout.ArrivalPosition;
-        float transferHeading = returnToCell
+        float transferHeading = _justiceCustodyAdmissionReturnToCell
             ? layout.CellHeading
             : layout.ArrivalHeading;
+
+        if (_justiceCustodyAdmissionFadeInRequested)
+        {
+            // Je reprends directement la frontière visuelle déjà demandée. Tout
+            // le précommit métier est durable à ce stade; le rejouer pourrait
+            // surtout masquer un rebond wanted survenu pendant les 350 ms.
+            if (TryFinishJusticeCustodyAdmissionFadeIn(
+                    player,
+                    layout,
+                    transferPosition,
+                    transferHeading,
+                    now))
+            {
+                FinalizeJusticeCustodyAdmissionAfterFadeIn(
+                    layout,
+                    now);
+            }
+            return;
+        }
 
         if (!StoreJusticeCustodyPlayerState(player))
         {
@@ -1393,9 +1537,7 @@ public sealed partial class DonJEnemySpawner
                 ReassertJusticeCustodyRespawnTransferMask();
             }
             EnforceJusticePreJudgmentHoldingControlLock(player);
-            _justiceNextCustodyTransferAttemptAt = JusticeCustodyFutureTime(
-                now,
-                JusticeCustodyTransferInitialRetryMs);
+            ResetJusticeCustodyAdmissionWantedStability(now);
             return;
         }
 
@@ -1439,81 +1581,103 @@ public sealed partial class DonJEnemySpawner
             }
         }
 
-        bool transferred = false;
-        bool maskRespawnOrigin = _justiceCustodyRespawnTransferPending;
-        try
+        if (!_justiceCustodyRespawnTransferPending ||
+            _justiceCustodyRespawnRestorePending)
         {
-            if (maskRespawnOrigin)
-            {
-                ReassertJusticeCustodyRespawnTransferMask();
-            }
-            _activeInteriorSession = null;
-            ClearInteriorRenderingFocusSafe(player);
-            TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading);
-            transferred = IsJusticeTeleportVerified(player, transferPosition, 8.0f);
+            // Je donne à toute admission, y compris une arrestation sans décès,
+            // le même masque atomique. Aucun chemin ne peut rendre la cellule
+            // avant d'avoir sécurisé le wanted et les deux flags de police.
+            _justiceCustodyRespawnTransferPending = true;
+            _justiceCustodyRespawnRestorePending = false;
         }
-        catch (Exception ex)
-        {
-            // Je conserve le masque pendant tout retry du même détenu. Le rendre
-            // ici exposerait de nouveau l'hôpital entre deux essais de transfert.
-            LogException("Justice.Transfert", ex);
-        }
-
-        if (!transferred)
-        {
-            // Je vérifie aussi les téléports silencieusement ignorés par GTA :
-            // aucune phase Incarcerated ne peut être validée hors de la cour.
-            transferred = TryJusticeEmergencyTeleport(
+        SetJusticePreJudgmentHoldingIntent(
+            GetJusticeCustodyAdmissionHoldingSource(),
+            _justiceCustodyPlayerSlot,
+            _justiceCustodyPlayerModelHash);
+        bool holdingProtectionReady =
+            EnsureJusticePreJudgmentHoldingStreamingState(
                 player,
-                transferPosition,
+                transferPosition + new Vector3(0.0f, 0.0f, 0.35f),
                 transferHeading);
-        }
-        if (transferred && !IsInsideJusticeCustodyLayout(layout, player.Position))
+        ReassertJusticeCustodyRespawnTransferMask();
+        EnforceJusticePreJudgmentHoldingControlLock(player);
+        if (!holdingProtectionReady || _justiceCustodyRespawnMaskNeedsRearm)
         {
-            // Une native peut annoncer le déplacement alors qu'un autre script a
-            // replacé le ped dans la même frame. Je refuse alors d'armer l'évasion.
-            transferred = false;
-        }
-        if (transferred &&
-            (!CompleteJusticePreJudgmentHoldingStreamingProtection(player) ||
-             !EnsureJusticeCustodyPlayerMobility(player)))
-        {
-            // Je ne valide jamais une détention dont le ped reste gelé par la
-            // transition d'arrestation ou de respawn encore active côté GTA.
-            transferred = false;
-        }
-        if (!transferred)
-        {
-            if (maskRespawnOrigin)
-            {
-                // Les deux téléporteurs rendent leur propre fade même lorsqu'ils
-                // échouent. Je remasque l'origine GTA avant tout nettoyage : une
-                // exception avalée par le stage ne peut plus exposer l'hôpital.
-                ReassertJusticeCustodyRespawnTransferMask();
-            }
+            // Je ne téléporte jamais un protagoniste si la protection temporaire
+            // ou le noir n'est pas confirmé. Le prochain tick reprend la même
+            // admission atomique sans exposer une frame mortelle à la police.
             HandleJusticeCustodyTransferFailure(player, now);
-            RestoreJusticeCustodyPlayerTransientState(player);
+            ResetJusticeCustodyAdmissionWantedStability(now);
             return;
         }
 
-        // Le masque de respawn reste armé à travers les retries et n'est consommé
-        // qu'après un transfert physiquement vérifié. Un premier téléport refusé
-        // par le moteur ne peut donc pas révéler l'hôpital au passage suivant.
-        if (maskRespawnOrigin)
+        bool transferred = TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(
+            player,
+            transferPosition,
+            transferHeading,
+            now);
+        if (transferred && !IsInsideJusticeCustodyLayout(layout, player.Position))
         {
-            // Le téléport principal rend normalement l'écran, mais une exception
-            // suivie d'un fallback d'urgence réussi peut contourner son fade-in.
-            // Je réaffirme donc explicitement la restitution avant de consommer
-            // le latch; répéter cette native après le chemin normal est sans effet.
-            TryRestoreJusticeCustodyRespawnTransferMask();
+            // Une native peut annoncer le déplacement alors qu'un autre script a
+            // replacé le ped dans la même frame. Je refuse alors l'admission.
+            transferred = false;
         }
-        ClearJusticeRepairArrestPreJudgmentHoldingIntent(
-            _justiceCustodyPlayerSlot,
-            _justiceCustodyPlayerModelHash);
-        ResetJusticePoliceDeathPreJudgmentHoldingState();
-        ResetJusticeCapturePrecommitConfirmation();
-        _justicePoliceDeathRespawnMaskIntentPending = false;
-        _justiceCustodyPersistenceOutageHoldingEstablished = false;
+        if (!transferred)
+        {
+            ReassertJusticeCustodyRespawnTransferMask();
+            HandleJusticeCustodyTransferFailure(player, now);
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return;
+        }
+
+        _justiceCustodyAdmissionPositionEstablished = true;
+        _justicePoliceDeathPreJudgmentHoldingEstablished = true;
+        // Je prends cette position exacte comme frontière si le premier maintien
+        // n'avait pas abouti; elle arme BUSTED sans acquitter encore le DeathFront.
+        TryArmPendingJusticeDeathCaptureForTransfer();
+        if (!resumingCustody)
+        {
+            // Je purge avant l'admission toute riposte et tout front de dégâts
+            // provenant de l'hôpital, du holding ou d'une scène précédente.
+            // Une agression commise après le fade restera détectée.
+            ResetJusticeCustodyGuardRetaliation(player, false, false);
+        }
+        PrimeJusticeCustodyGuardDamageFrontsForAdmission(player);
+        if (!TrySecureJusticeCustodyAdmission(player, now))
+        {
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return;
+        }
+
+        bool transferTimedOut = unchecked((uint)(now - _justiceCustodyTransferStartedAt)) >=
+                                (uint)JusticeCustodyTransferTimeoutMs;
+        ApplyJusticeTransition(
+            transferTimedOut ? JusticeSignal.TransferTimedOut : JusticeSignal.TransferCompleted,
+            _justiceCaseState.CustodyEpisodeId);
+        if (_justiceCaseState.Phase != JusticePhase.Incarcerated)
+        {
+            _justiceCaseState.Phase = JusticePhase.Incarcerated;
+        }
+        _justiceCustodyContainmentEstablished = true;
+        SynchronizeJusticeRecognition(true);
+        EnsureJusticeCustodyRelationshipGroups();
+        EnsureJusticeCustodyScene(now);
+        PrimeJusticeCustodyGuardDamageFrontsForAdmission(player);
+
+        JusticeOperation enterOperation = CreateJusticeCustodyOperation(
+            JusticeOperationKind.EnterCustody);
+        JusticePolicy.TryRegisterOperation(_justiceCaseState, enterOperation);
+        JusticeMarkStateDirty();
+        if (!PersistJusticeCriticalPrecommitRedundantly(
+                "CompleteJusticeCustodyTransfer"))
+        {
+            // Je conserve le masque et la protection si l'admission finale n'est
+            // pas encore durable; le retry reprend exactement cette frontière.
+            HandleJusticeCustodyTransferFailure(player, now);
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return;
+        }
+
         _justiceCustodyPlayerHandle = player.Handle;
         _justiceCustodyPlayerModelHash = GetJusticePedModelHashSafe(player);
         RememberJusticeCustodyPlayerSlot();
@@ -1524,57 +1688,390 @@ public sealed partial class DonJEnemySpawner
                 GetJusticeCustodyTotalRemainingSecondsForRuntime(
                     _justiceCaseState));
         }
-        _justiceCustodyTransferPending = false;
-        _justiceCustodyResumePending = false;
-        bool transferTimedOut = unchecked((uint)(now - _justiceCustodyTransferStartedAt)) >=
-                                (uint)JusticeCustodyTransferTimeoutMs;
-        ResetJusticeCustodyTransferRetryState();
         _justiceCustodyRuntimeActive = true;
-        ArmJusticeCustodyResidualMissionFlagBypass();
-        _justiceCustodyLastTickAt = now;
-        _justiceCustodyElapsedRemainderMs = 0;
         _justiceOutsideCustodySinceAt = 0;
         _justiceCustodyContainmentEstablished = true;
-        ApplyJusticeTransition(
-            transferTimedOut ? JusticeSignal.TransferTimedOut : JusticeSignal.TransferCompleted,
-            _justiceCaseState.CustodyEpisodeId);
-        if (_justiceCaseState.Phase != JusticePhase.Incarcerated)
+        JusticeMarkStateDirty();
+        JusticeFlushStateNow();
+
+        // Je demande le FadeIn en dernier, sans consommer le latch générique :
+        // seul IS_SCREEN_FADED_IN prouvera ensuite que GTA a réellement rendu
+        // l'image avec le joueur toujours protégé et sans recherche.
+        if (!RestoreJusticeCustodyRespawnTransferMask())
         {
-            _justiceCaseState.Phase = JusticePhase.Incarcerated;
+            RearmJusticeCustodyAdmissionMask(
+                player,
+                transferPosition,
+                transferHeading,
+                now);
+            return;
+        }
+        _justiceCustodyAdmissionFadeInRequested = true;
+        _justiceCustodyRespawnMaskNeedsRearm = false;
+        if (!TryFinishJusticeCustodyAdmissionFadeIn(
+                player,
+                layout,
+                transferPosition,
+                transferHeading,
+                now))
+        {
+            return;
         }
 
-        // Une capture met fin à la poursuite ambiante. Seule une riposte locale
-        // déjà restaurée peut conserver son plancher de deux étoiles, sans
-        // réactiver le dispatch extérieur dans l'enceinte.
+        FinalizeJusticeCustodyAdmissionAfterFadeIn(layout, now);
+    }
+
+    private bool TryFinishJusticeCustodyAdmissionFadeIn(
+        Ped player,
+        JusticeCustodyLayout layout,
+        Vector3 transferPosition,
+        float transferHeading,
+        int now)
+    {
+        if (!_justiceCustodyAdmissionFadeInRequested)
+        {
+            return false;
+        }
+
+        if (IsJusticeCustodyRuntimeSuspended(player) || layout == null ||
+            !Entity.Exists(player) || player.IsDead ||
+            !IsJusticeCustodyPlayerIdentityCompatible(player) ||
+            !IsInsideJusticeCustodyLayout(layout, player.Position) ||
+            !IsJusticeTeleportVerified(player, transferPosition, 8.0f))
+        {
+            // Je traite une pause forte, une identité ambiguë, un décès ou un
+            // déplacement concurrent comme une interruption complète du FadeIn.
+            RearmJusticeCustodyAdmissionMask(
+                player,
+                transferPosition,
+                transferHeading,
+                now);
+            return false;
+        }
+
+        if (!HasJusticePreJudgmentHoldingProtectionForPlayer(player) &&
+            (!EnsureJusticePreJudgmentHoldingStreamingState(
+                 player,
+                 transferPosition + new Vector3(0.0f, 0.0f, 0.35f),
+                 transferHeading) ||
+             !HasJusticePreJudgmentHoldingProtectionForPlayer(player)))
+        {
+            // Je réacquiers l'owner physique avant toute autre vérification : un
+            // écran en cours d'ouverture ne doit jamais exposer un ped mortel.
+            RearmJusticeCustodyAdmissionMask(
+                player,
+                transferPosition,
+                transferHeading,
+                now);
+            return false;
+        }
+
+        int expectedWantedLevel = _justiceCustodyGuardRetaliationActive
+            ? JusticeCustodyGuardWantedMinimum
+            : 0;
+        int wantedDuringFade;
+        if (!TryReadJusticeWantedLevel(out wantedDuringFade) ||
+            wantedDuringFade != expectedWantedLevel)
+        {
+            // Je referme immédiatement l'image si GTA réarme les étoiles pendant
+            // le FadeIn, puis je repars d'une seconde stable complète.
+            RearmJusticeCustodyAdmissionMask(
+                player,
+                transferPosition,
+                transferHeading,
+                now);
+            SuppressJusticeRecognitionWantedLoss(
+                "rebond wanted pendant le FadeIn d'admission");
+            ClearJusticeWantedLevelOnceDetailed();
+            if (expectedWantedLevel > 0)
+            {
+                SetJusticeWantedMinimum(expectedWantedLevel);
+            }
+            return false;
+        }
+
         SuppressJusticeRecognitionWantedLoss(
-            "entrée en détention confirmée");
-        if (_justiceCustodyGuardRetaliationActive)
+            "vérification finale du FadeIn d'admission");
+        JusticeWantedClearResult clearResult =
+            ClearJusticeWantedLevelOnceDetailed();
+        if (clearResult != JusticeWantedClearResult.Succeeded ||
+            (_justiceCustodyGuardRetaliationActive &&
+             (!SetJusticeWantedMinimum(JusticeCustodyGuardWantedMinimum) ||
+              GetJusticeWantedLevelSafe() !=
+                  JusticeCustodyGuardWantedMinimum)) ||
+            (!_justiceCustodyGuardRetaliationActive &&
+             GetJusticeWantedLevelSafe() != 0) ||
+            !SetJusticeCustodyPoliceSuppression(true))
         {
-            SetJusticeWantedMinimum(JusticeCustodyGuardWantedMinimum);
+            RearmJusticeCustodyAdmissionMask(
+                player,
+                transferPosition,
+                transferHeading,
+                now);
+            return false;
         }
-        else
-        {
-            ClearJusticeWantedLevelOnce();
-        }
-        SynchronizeJusticeRecognition(true);
-        SetJusticeCustodyPoliceSuppression(true);
-        EnsureJusticeCustodyRelationshipGroups();
-        EnsureJusticeCustodyScene(now);
 
-        JusticeOperation enterOperation = CreateJusticeCustodyOperation(JusticeOperationKind.EnterCustody);
-        JusticePolicy.TryRegisterOperation(_justiceCaseState, enterOperation);
+        if (!IsJusticeCustodyRespawnTransferMaskFullyRestored())
+        {
+            if (!IsJusticeCustodyRespawnTransferMaskRestoring())
+            {
+                // Je distingue strictement FADING_IN de FADED_IN. Si le moteur
+                // interrompt le fondu, je réarme le noir et toutes les preuves.
+                RearmJusticeCustodyAdmissionMask(
+                    player,
+                    transferPosition,
+                    transferHeading,
+                    now);
+                return false;
+            }
+
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+
+        if (!CompleteJusticePreJudgmentHoldingStreamingProtection(player) ||
+            !EnsureJusticeCustodyPlayerMobility(player))
+        {
+            // Je reprends la protection dans le même tick si la restitution de la
+            // mobilité ou de la mortalité échoue après l'ouverture de l'écran.
+            EnsureJusticePreJudgmentHoldingStreamingState(
+                player,
+                transferPosition + new Vector3(0.0f, 0.0f, 0.35f),
+                transferHeading);
+            RearmJusticeCustodyAdmissionMask(
+                player,
+                transferPosition,
+                transferHeading,
+                now);
+            return false;
+        }
+
+        return true;
+    }
+
+    private void RearmJusticeCustodyAdmissionMask(
+        Ped player,
+        int now)
+    {
+        JusticeCustodyLayout layout = GetJusticeCustodyLayout();
+        if (layout != null)
+        {
+            Vector3 transferPosition = _justiceCustodyAdmissionReturnToCell
+                ? layout.CellPosition
+                : layout.ArrivalPosition;
+            float transferHeading = _justiceCustodyAdmissionReturnToCell
+                ? layout.CellHeading
+                : layout.ArrivalHeading;
+            RearmJusticeCustodyAdmissionMask(
+                player,
+                transferPosition,
+                transferHeading,
+                now);
+            return;
+        }
+
+        // Je conserve au minimum le noir et le verrou logique si le catalogue
+        // d'intérieur devient momentanément indisponible pendant le FadeIn.
+        _justiceCustodyAdmissionFadeInRequested = false;
+        _justiceCustodyRespawnTransferPending = true;
+        _justiceCustodyRespawnRestorePending = false;
+        ReassertJusticeCustodyRespawnTransferMask();
+        ResetJusticeCustodyAdmissionWantedStability(now);
+        EnforceJusticePreJudgmentHoldingControlLock(player);
+    }
+
+    private void RearmJusticeCustodyAdmissionMask(
+        Ped player,
+        Vector3 transferPosition,
+        float transferHeading,
+        int now)
+    {
+        _justiceCustodyAdmissionFadeInRequested = false;
+        _justiceCustodyRespawnTransferPending = true;
+        _justiceCustodyRespawnRestorePending = false;
+        SetJusticePreJudgmentHoldingIntent(
+            GetJusticeCustodyAdmissionHoldingSource(),
+            _justiceCustodyPlayerSlot,
+            _justiceCustodyPlayerModelHash);
+        if (Entity.Exists(player) && !player.IsDead &&
+            IsJusticeCustodyPlayerIdentityCompatible(player))
+        {
+            EnsureJusticePreJudgmentHoldingStreamingState(
+                player,
+                transferPosition + new Vector3(0.0f, 0.0f, 0.35f),
+                transferHeading);
+        }
+        ReassertJusticeCustodyRespawnTransferMask();
+        ResetJusticeCustodyAdmissionWantedStability(now);
+        EnforceJusticePreJudgmentHoldingControlLock(player);
+    }
+
+    private void FinalizeJusticeCustodyAdmissionAfterFadeIn(
+        JusticeCustodyLayout layout,
+        int now)
+    {
+        // Je consomme les latches seulement après l'observation exacte de
+        // IS_SCREEN_FADED_IN et la restitution confirmée du ped.
+        _justiceCustodyAdmissionFadeInRequested = false;
+        _justiceCustodyRespawnTransferPending = false;
+        _justiceCustodyRespawnMaskNeedsRearm = false;
+        _justiceCustodyRespawnRestorePending = false;
+
+        ClearJusticeRepairArrestPreJudgmentHoldingIntent(
+            _justiceCustodyPlayerSlot,
+            _justiceCustodyPlayerModelHash);
+        if (HasExactJusticePendingPoliceDeathCaptureOwner())
+        {
+            // Je peux perdre la confirmation volatile au reload d'un transfert
+            // déjà placé. L'admission sûre et visible constitue alors la dernière
+            // frontière autorisée pour consommer le front policier exact.
+            ClearPendingJusticeDeathCapture();
+        }
+        _justiceCustodyWaitingForRespawn = false;
+        _justiceCustodyDeathRebindPending = false;
+        _justiceCustodyRespawnIdentityRebindConfirmed = false;
+        ResetJusticePoliceDeathPreJudgmentHoldingState();
+        ResetJusticeCapturePrecommitConfirmation();
+        _justicePoliceDeathRespawnMaskIntentPending = false;
+        _justiceCustodyPersistenceOutageHoldingEstablished = false;
+        _justiceCustodyTransferPending = false;
+        _justiceCustodyResumePending = false;
+        _justiceCustodyLastTickAt = now;
+        _justiceCustodyElapsedRemainderMs = 0;
+        ResetJusticeCustodyTransferRetryState();
+        ArmJusticeCustodyResidualMissionFlagBypass();
         JusticeMarkStateDirty();
         JusticeFlushStateNow();
         ShowStatus(layout.DisplayName + " : peine à purger.", 5500);
         LogInfo("Justice.Detention", "Entrée dans " + layout.DisplayName + ".");
     }
 
+    private JusticePreJudgmentHoldingSource GetJusticeCustodyAdmissionHoldingSource()
+    {
+        if (_justicePreJudgmentHoldingSource ==
+            JusticePreJudgmentHoldingSource.PendingWalCustodyRebind)
+        {
+            // Je conserve la preuve d'une mort en détention jusqu'au FADE_IN
+            // final. Le rebind du nouveau ped ne doit pas recréer le verrou
+            // circulaire du flag mission pendant la seconde de stabilité.
+            return JusticePreJudgmentHoldingSource.PendingWalCustodyRebind;
+        }
+
+        return JusticePreJudgmentHoldingSource.Captured;
+    }
+
+    private bool TrySecureJusticeCustodyAdmission(Ped player, int now)
+    {
+        JusticeCustodyLayout layout = GetJusticeCustodyLayout();
+        bool admissionPhase = _justiceCaseState != null &&
+            (_justiceCaseState.Phase == JusticePhase.Transporting ||
+             _justiceCaseState.Phase == JusticePhase.Incarcerated);
+        if (!admissionPhase || !_justiceCustodyRuntimeActive ||
+            (!_justiceCustodyTransferPending && !_justiceCustodyResumePending) ||
+            !_justiceCustodyAdmissionPositionEstablished || layout == null ||
+            !Entity.Exists(player) || player.IsDead ||
+            !IsJusticeCustodyPlayerIdentityCompatible(player) ||
+            !IsInsideJusticeCustodyLayout(layout, player.Position))
+        {
+            ResetJusticeCustodyAdmissionWantedStability(now);
+            return false;
+        }
+
+        int expectedWantedLevel = _justiceCustodyGuardRetaliationActive
+            ? JusticeCustodyGuardWantedMinimum
+            : 0;
+        int wantedBeforeClear;
+        bool wantedBeforeClearKnown = TryReadJusticeWantedLevel(
+            out wantedBeforeClear);
+        if (_justiceCustodyAdmissionWantedStabilityStarted &&
+            (!wantedBeforeClearKnown || wantedBeforeClear != expectedWantedLevel))
+        {
+            // Je refuse qu'une étoile revenue entre deux ticks soit effacée puis
+            // cachée derrière l'ancien timestamp : la seconde de sûreté repart
+            // toujours de la dernière observation réellement conforme.
+            ResetJusticeCustodyAdmissionWantedStability(now);
+        }
+
+        SuppressJusticeRecognitionWantedLoss(
+            "barrière d'admission en détention");
+        JusticeWantedClearResult wantedClear =
+            ClearJusticeWantedLevelOnceDetailed();
+        if (wantedClear != JusticeWantedClearResult.Succeeded)
+        {
+            ResetJusticeCustodyAdmissionWantedStability(now);
+            return false;
+        }
+
+        if (_justiceCustodyGuardRetaliationActive)
+        {
+            // Je garde une riposte réellement restaurée locale, mais remplace un
+            // éventuel wanted policier supérieur par son plancher exact de deux.
+            if (!SetJusticeWantedMinimum(JusticeCustodyGuardWantedMinimum) ||
+                GetJusticeWantedLevelSafe() != JusticeCustodyGuardWantedMinimum)
+            {
+                ResetJusticeCustodyAdmissionWantedStability(now);
+                return false;
+            }
+        }
+        else if (GetJusticeWantedLevelSafe() != 0)
+        {
+            ResetJusticeCustodyAdmissionWantedStability(now);
+            return false;
+        }
+
+        if (!SetJusticeCustodyPoliceSuppression(true))
+        {
+            ResetJusticeCustodyAdmissionWantedStability(now);
+            return false;
+        }
+
+        if (!_justiceCustodyAdmissionWantedStabilityStarted)
+        {
+            _justiceCustodyAdmissionWantedStabilityStarted = true;
+            _justiceCustodyAdmissionWantedStableSinceAt = now;
+            _justiceNextCustodyTransferAttemptAt = JusticeCustodyFutureTime(
+                now,
+                Math.Min(
+                    JusticeCustodyAdmissionWantedObservationMs,
+                    JusticeCustodyAdmissionWantedStabilityMs));
+            return false;
+        }
+
+        uint stableFor = unchecked((uint)(now -
+            _justiceCustodyAdmissionWantedStableSinceAt));
+        if (stableFor < (uint)JusticeCustodyAdmissionWantedStabilityMs)
+        {
+            int remaining = JusticeCustodyAdmissionWantedStabilityMs -
+                (int)stableFor;
+            _justiceNextCustodyTransferAttemptAt = JusticeCustodyFutureTime(
+                now,
+                Math.Min(
+                    JusticeCustodyAdmissionWantedObservationMs,
+                    remaining));
+            return false;
+        }
+
+        _justiceNextPoliceSuppressionAt = JusticeCustodyFutureTime(
+            now,
+            JusticeCustodyPoliceSuppressionIntervalMs);
+        return true;
+    }
+
+    private void ResetJusticeCustodyAdmissionWantedStability(int now)
+    {
+        _justiceCustodyAdmissionWantedStabilityStarted = false;
+        _justiceCustodyAdmissionWantedStableSinceAt = 0;
+        _justiceNextCustodyTransferAttemptAt = JusticeCustodyFutureTime(
+            now,
+            JusticeCustodyTransferInitialRetryMs);
+    }
+
     private static bool BeginJusticeCustodyRespawnTransferMask()
     {
         try
         {
-            // Le fade immédiat empêche l'hôpital GTA d'apparaître pendant les
-            // 250 ms de fondu normal du téléport sécurisé.
+            // Je masque immédiatement l'hôpital GTA pendant les 250 ms du fondu
+            // normal du téléport sécurisé.
             Function.Call(Hash.DO_SCREEN_FADE_OUT, 0);
             return IsJusticeCustodyRespawnTransferMaskActive();
         }
@@ -1713,24 +2210,6 @@ public sealed partial class DonJEnemySpawner
             JusticePreJudgmentHoldingSource.DurablePoliceDeath,
             ownerSlot,
             ownerModel);
-
-        bool playerAlive = Entity.Exists(player) && !player.IsDead;
-        bool holdingOwnerCompatible = playerAlive &&
-            IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player);
-        bool insideHolding = playerAlive &&
-            IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position);
-        if (ShouldKeepJusticePreJudgmentHoldingVisible(
-                _justicePoliceDeathPreJudgmentHoldingEstablished,
-                _justicePreJudgmentHoldingStreamingPending,
-                playerAlive,
-                holdingOwnerCompatible,
-                insideHolding))
-        {
-            // Je conserve le front durable sans remasquer un suspect dont le
-            // maintien est déjà entièrement vérifié et jouable dans l'enceinte.
-            // Je ne touche ici à aucun latch : cette branche est sans effet.
-            return;
-        }
 
         if (_justiceCustodyRespawnRestorePending)
         {
@@ -1923,6 +2402,11 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyTransferTimeoutLogged = false;
         _justiceCustodyTransferPrecommitConfirmed = false;
         _justiceCustodyFallbackPrecommitPending = false;
+        _justiceCustodyAdmissionPositionEstablished = false;
+        _justiceCustodyAdmissionReturnToCell = false;
+        _justiceCustodyAdmissionWantedStabilityStarted = false;
+        _justiceCustodyAdmissionWantedStableSinceAt = 0;
+        _justiceCustodyAdmissionFadeInRequested = false;
     }
 
     private void RegisterJusticeCustodyTransferFailure(int now)
@@ -1950,12 +2434,15 @@ public sealed partial class DonJEnemySpawner
 
     private void HandleJusticeCustodyTransferFailure(Ped player, int now)
     {
+        // Je considère qu'une panne intermédiaire invalide le wanted zéro et
+        // recommence cette preuve sans consommer le masque ni l'identité liée.
+        ResetJusticeCustodyAdmissionWantedStability(now);
         RegisterJusticeCustodyTransferFailure(now);
 
-        // Je ne transforme jamais une panne technique en remise en liberté :
-        // le dossier reste en transport et le retry borné continue jusqu'à un
-        // transfert vérifié. Je rends seulement le ped mobile entre deux essais.
-        EnsureJusticeCustodyPlayerMobility(player);
+        // Je ne transforme jamais une panne technique en remise en liberté : le
+        // dossier reste en transport, sous masque et protection, jusqu'à ce que
+        // toute la barrière d'admission soit vérifiée.
+        EnforceJusticePreJudgmentHoldingControlLock(player);
     }
 
     private bool TryRollbackJusticeCustodyTransfer(Ped player, int now)
@@ -2954,7 +3441,11 @@ public sealed partial class DonJEnemySpawner
         try
         {
             int modelHash = GetJusticePedModelHashSafe(player);
-            if (modelHash == 0 || !EnsureJusticePlayerIsMortal(player))
+            bool protectedByJusticeHolding =
+                IsJusticeAdmissionProtectionOwnedForPlayer(player);
+            if (modelHash == 0 ||
+                (!protectedByJusticeHolding &&
+                 !EnsureJusticePlayerIsMortal(player)))
             {
                 return false;
             }
@@ -2962,8 +3453,13 @@ public sealed partial class DonJEnemySpawner
             // Les anciennes sauvegardes restent lisibles, mais toute nouvelle
             // sortie doit garantir un joueur mortel.
             _justiceCustodyStoredInvincible = false;
-            _justiceCustodyStoredFrozen = player.FreezePosition;
-            _justiceCustodyStoredCanRagdoll = player.CanRagdoll;
+            _justiceCustodyStoredFrozen = protectedByJusticeHolding
+                ? false
+                : player.FreezePosition;
+            _justiceCustodyStoredCanRagdoll = protectedByJusticeHolding &&
+                _justicePreJudgmentHoldingCanRagdollCaptured
+                    ? _justicePreJudgmentHoldingStoredCanRagdoll
+                    : player.CanRagdoll;
             _justiceCustodyPlayerHandle = player.Handle;
             _justiceCustodyPlayerModelHash = modelHash;
             RememberJusticeCustodyPlayerSlot();
@@ -2974,6 +3470,56 @@ public sealed partial class DonJEnemySpawner
         {
             return false;
         }
+    }
+
+    private static bool IsJusticeCustodyRespawnTransferMaskFullyRestored()
+    {
+        try
+        {
+            return Function.Call<bool>(
+                (Hash)JusticeNativeIsScreenFadedIn);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsJusticeAdmissionProtectionOwnedForPlayer(Ped player)
+    {
+        if (!Entity.Exists(player) ||
+            _playerInvincibilityOwners !=
+                PlayerInvincibilityOwner.JusticePreJudgmentHolding ||
+            !_justicePreJudgmentHoldingProtectionOwned ||
+            !_justicePreJudgmentHoldingCanRagdollCaptured ||
+            !IsTrackedPlayerInvincibilityPed(player))
+        {
+            return false;
+        }
+
+        try
+        {
+            // Je reconnais uniquement la protection Justice du même ped physique.
+            // Un owner Placement, un handle réutilisé ou un modèle divergent reste
+            // bloquant et ne peut jamais profiter de cette exception d'admission.
+            return player.Handle != 0 &&
+                   player.Handle ==
+                       _justicePreJudgmentHoldingStreamingPlayerHandle &&
+                   GetJusticePedModelHashSafe(player) ==
+                       _justicePreJudgmentHoldingStreamingPlayerModelHash;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool CanPrepareJusticeCustodyPlayerWhileProtected(Ped player)
+    {
+        // Je fais avancer l'identité, le snapshot et le rebind sous la protection
+        // du holding; seule la barrière finale la libère et exige la mortalité.
+        return IsJusticeAdmissionProtectionOwnedForPlayer(player) ||
+               EnsureJusticePlayerIsMortal(player);
     }
 
     private bool TryBindJusticeCustodyPlayerIdentityForCapture(
@@ -3013,12 +3559,13 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        _justiceCustodyPlayerHandle = player.Handle;
-        _justiceCustodyPlayerModelHash = modelHash;
-        if (!EnsureJusticePlayerIsMortal(player))
+        if (!CanPrepareJusticeCustodyPlayerWhileProtected(player))
         {
             return false;
         }
+
+        _justiceCustodyPlayerHandle = player.Handle;
+        _justiceCustodyPlayerModelHash = modelHash;
         if (trustedSlot >= 0)
         {
             _justiceCustodyPlayerSlot = trustedSlot;
@@ -3028,6 +3575,50 @@ public sealed partial class DonJEnemySpawner
 
     private void UpdateJusticeCustodyRespawnTransferMask(Ped player)
     {
+        if (_justicePoliceDeathNoCellReleaseProtectionRestorePending)
+        {
+            // Je maintiens seulement le masque ici. ResumeJusticeLegalRelease est
+            // l'unique owner autorisé à libérer la protection puis écrire l'ACK.
+            MaintainJusticePoliceDeathNoCellReleaseProtectionRestore(
+                player,
+                GetJusticeRawGameTimeSafe());
+            return;
+        }
+
+        if (_justiceCustodyAdmissionFadeInRequested)
+        {
+            if (HasJusticeCustodyRespawnChangedCanonicalPlayer(player))
+            {
+                // Je rends l'écran au héros entrant sans toucher à son wanted. Le
+                // profil propriétaire conservera son admission durable à reprendre.
+                _justiceCustodyAdmissionFadeInRequested = false;
+                ResetJusticePoliceDeathPreJudgmentHoldingState();
+                TryRestoreJusticeCustodyRespawnTransferMask();
+                return;
+            }
+
+            if ((_justiceRuntimeSuspendedCached &&
+                 !_justiceRuntimeSuspendedByMissionFlagOnlyCached) ||
+                _justiceProfileContextBlocked ||
+                _justiceProfileSelectionPending ||
+                _justiceProfileSwitchPersistencePending ||
+                _justiceBackupRepairPending)
+            {
+                // Je referme l'image dès qu'une pause, un chargement ou une
+                // cinématique forte apparaît au milieu de la restitution.
+                RearmJusticeCustodyAdmissionMask(
+                    player,
+                    GetJusticeRawGameTimeSafe());
+                return;
+            }
+
+            // Je laisse CompleteJusticeCustodyTransfer observer FADED_IN. Le
+            // contrôleur générique ne doit surtout pas renvoyer FADE_OUT pendant
+            // que GTA exécute encore le FadeIn de 350 ms.
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return;
+        }
+
         if (_justiceCustodyRespawnRestorePending)
         {
             // Un refus transitoire de FADE_IN ne consomme jamais le latch. Je
@@ -3073,7 +3664,7 @@ public sealed partial class DonJEnemySpawner
     private bool UpdateJusticePoliceDeathPreJudgmentHolding(Ped player, int now)
     {
         RefreshJusticePreJudgmentHoldingIntent(player);
-        bool mustBlockLate = MustBlockJusticeLateForPreJudgmentHolding();
+        bool mustBlockLate = MustBlockJusticeLateForPreJudgmentHolding(player);
         if (IsJusticeTemporaryPlayerProtectionForbidden() &&
             !StopJusticeConcurrentPlayerProtectionModes())
         {
@@ -3098,6 +3689,16 @@ public sealed partial class DonJEnemySpawner
         {
             return false;
         }
+        if ((IsJusticePendingPoliceDeathNoCellLegalRelease() ||
+             _justicePoliceDeathNoCellReleaseProtectionRestorePending) &&
+            _justicePoliceDeathNoCellReleaseExitApplied)
+        {
+            // Je conserve ici le propriétaire exact déjà déplacé hors du holding,
+            // avec son masque et sa protection pendant le wanted
+            // et l'ACK, sans le renvoyer dans la cellule au tick suivant.
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
 
         if (!IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player))
         {
@@ -3120,6 +3721,19 @@ public sealed partial class DonJEnemySpawner
         bool insideContainment = IsInsideJusticeCustodyLayout(
             layout,
             player.Position);
+        if (insideContainment &&
+            !_justicePreJudgmentHoldingStreamingPending &&
+            !EnsureJusticePreJudgmentHoldingStreamingState(
+                player,
+                layout.CellPosition + new Vector3(0.0f, 0.0f, 0.35f),
+                layout.CellHeading))
+        {
+            // Je réacquiers la protection si, après reload, le joueur est déjà
+            // dans l'enceinte alors que l'owner d'invincibilité est volatile,
+            // avant de laisser une reprise métier franchir ce holding.
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return true;
+        }
         if (!_justicePoliceDeathPreJudgmentHoldingEstablished ||
             !insideContainment ||
             _justicePreJudgmentHoldingStreamingPending)
@@ -3133,6 +3747,14 @@ public sealed partial class DonJEnemySpawner
                     now,
                     _justiceNextPoliceDeathPreJudgmentHoldingAttemptAt))
             {
+                return mustBlockLate;
+            }
+            if (_justiceCustodyRespawnMaskNeedsRearm)
+            {
+                // Je garde la protection acquise sans déplacer le joueur tant
+                // que le noir réel n'est pas confirmé par GTA.
+                EnforceJusticePreJudgmentHoldingControlLock(player);
+                RegisterJusticePoliceDeathPreJudgmentHoldingFailure(now);
                 return mustBlockLate;
             }
             if (!TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(
@@ -3151,23 +3773,25 @@ public sealed partial class DonJEnemySpawner
             player.Position);
         if (insideContainment)
         {
-            if (!CompleteJusticePreJudgmentHoldingStreamingProtection(player) ||
-                !EnsureJusticePlayerIsMortal(player) ||
-                !EnsureJusticePlayerMobilityCore(player))
-            {
-                RegisterJusticePoliceDeathPreJudgmentHoldingFailure(now);
-                return mustBlockLate;
-            }
-
             bool firstVerifiedHolding =
                 !_justicePoliceDeathPreJudgmentHoldingEstablished;
             _justicePoliceDeathPreJudgmentHoldingEstablished = true;
             ResetJusticePoliceDeathPreJudgmentHoldingRetryState();
-            if (_justiceCustodyRespawnTransferPending ||
-                _justiceCustodyRespawnRestorePending)
-            {
-                TryRestoreJusticeCustodyRespawnTransferMask();
-            }
+            // Je conserve ici le gel, l'invincibilité et le masque. Le jugement,
+            // le wanted zéro et la suppression police doivent tous être prouvés
+            // avant que l'admission finale rende le joueur visible et vulnérable.
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            int armedOwnerSlot;
+            int armedOwnerModel;
+            bool exactDeathTransferArmed =
+                TryResolveJusticeArmedPoliceDeathTransferHoldingIntent(
+                    player,
+                    out armedOwnerSlot,
+                    out armedOwnerModel);
+            // Je qualifie le front policier tant que le précommit porte encore
+            // le modèle de la mort. Le DeathFront reste durable jusqu'au FadeIn.
+            bool deathFrontArmed =
+                TryArmPendingJusticeDeathCaptureForTransfer();
             if (firstVerifiedHolding)
             {
                 LogInfo(
@@ -3179,7 +3803,8 @@ public sealed partial class DonJEnemySpawner
                     _justicePoliceDeathPreJudgmentHoldingOwnerModelHash.ToString(
                         CultureInfo.InvariantCulture) + ".");
             }
-            return mustBlockLate;
+            return mustBlockLate ||
+                (exactDeathTransferArmed && !deathFrontArmed);
         }
 
         if (!JusticeCustodyHasReached(
@@ -3201,6 +3826,15 @@ public sealed partial class DonJEnemySpawner
         }
         if (_justiceCustodyRespawnMaskNeedsRearm)
         {
+            Vector3 protectedTarget = layout.CellPosition +
+                new Vector3(0.0f, 0.0f, 0.35f);
+            EnsureJusticePreJudgmentHoldingStreamingState(
+                player,
+                protectedTarget,
+                layout.CellHeading);
+            // Je garde le propriétaire exact gelé, désarmé et protégé même si le
+            // fondu est refusé; aucun timer ne peut démarrer pendant le retry.
+            EnforceJusticePreJudgmentHoldingControlLock(player);
             RegisterJusticePoliceDeathPreJudgmentHoldingFailure(now);
             return mustBlockLate;
         }
@@ -3211,10 +3845,7 @@ public sealed partial class DonJEnemySpawner
             layout.CellHeading,
             now);
         if (!moved ||
-            !IsInsideJusticeCustodyLayout(layout, player.Position) ||
-            !CompleteJusticePreJudgmentHoldingStreamingProtection(player) ||
-            !EnsureJusticePlayerIsMortal(player) ||
-            !EnsureJusticePlayerMobilityCore(player))
+            !IsInsideJusticeCustodyLayout(layout, player.Position))
         {
             RegisterJusticePoliceDeathPreJudgmentHoldingFailure(now);
             return mustBlockLate;
@@ -3223,9 +3854,21 @@ public sealed partial class DonJEnemySpawner
         bool firstHolding = !_justicePoliceDeathPreJudgmentHoldingEstablished;
         _justicePoliceDeathPreJudgmentHoldingEstablished = true;
         ResetJusticePoliceDeathPreJudgmentHoldingRetryState();
-        // Je rends l'image seulement après les deux preuves : position dans
-        // l'enceinte complète et ped effectivement mobile.
-        TryRestoreJusticeCustodyRespawnTransferMask();
+        // Je ne rends pas encore l'image : CompleteJusticeCustodyTransfer porte
+        // l'unique barrière d'admission et libérera ce même propriétaire temporaire.
+        EnforceJusticePreJudgmentHoldingControlLock(player);
+        int armedTransferOwnerSlot;
+        int armedTransferOwnerModel;
+        bool exactMovedDeathTransferArmed =
+            TryResolveJusticeArmedPoliceDeathTransferHoldingIntent(
+                player,
+                out armedTransferOwnerSlot,
+                out armedTransferOwnerModel);
+        // Je qualifie cette frontière avant le rebind du contrôleur Late : un
+        // respawn canonique peut légitimement avoir un autre modèle que le ped
+        // mort, alors que le slot et le holding physique prouvent déjà le héros.
+        bool movedDeathFrontArmed =
+            TryArmPendingJusticeDeathCaptureForTransfer();
         if (firstHolding)
         {
             ShowStatus(
@@ -3242,7 +3885,8 @@ public sealed partial class DonJEnemySpawner
                 _justicePoliceDeathPreJudgmentHoldingOwnerModelHash.ToString(
                     CultureInfo.InvariantCulture) + ".");
         }
-        return mustBlockLate;
+        return mustBlockLate ||
+            (exactMovedDeathTransferArmed && !movedDeathFrontArmed);
     }
 
     private void RefreshJusticePreJudgmentHoldingIntent(Ped player)
@@ -3280,6 +3924,50 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
+        if (TryResolveJusticeArmedPoliceDeathTransferHoldingIntent(
+                player,
+                out ownerSlot,
+                out ownerModel))
+        {
+            // Je conserve le relais Captured entre l'armement du transfert et son
+            // premier placement physique. Sans cette priorité, le front policier
+            // encore exact le rétrograderait en DurablePoliceDeath et le Late ne
+            // pourrait jamais atteindre le contrôleur qui établit le holding.
+            SetJusticePreJudgmentHoldingIntent(
+                JusticePreJudgmentHoldingSource.Captured,
+                ownerSlot,
+                ownerModel);
+            return;
+        }
+
+        if (TryResolveJusticePendingWalCustodyRebindHoldingIntent(
+                player,
+                out ownerSlot,
+                out ownerModel))
+        {
+            // Je donne la priorité au handoff de détention déjà durable.
+            // Après un reload, PendingDeathCapture peut encore attendre son
+            // acquittement final : il ne doit pas rétrograder ce transfert exact
+            // en DurablePoliceDeath et bloquer le contrôleur qui seul peut le finir.
+            SetJusticePreJudgmentHoldingIntent(
+                JusticePreJudgmentHoldingSource.PendingWalCustodyRebind,
+                ownerSlot,
+                ownerModel);
+            return;
+        }
+
+        if (_justicePreJudgmentHoldingSource ==
+            JusticePreJudgmentHoldingSource.Captured &&
+            JusticeIsCustodyActive &&
+            IsJusticeCustodyPlayerIdentityCompatible(player))
+        {
+            // Je conserve le relais Captured déjà attribué au transfert actif,
+            // même si son DeathFront reste durable jusqu'au FadeIn final. Le
+            // reclasser en DurablePoliceDeath recréerait un verrou circulaire :
+            // Late ne pourrait plus atteindre le contrôleur qui termine l'entrée.
+            return;
+        }
+
         if (HasJusticeActivePoliceDeathPreJudgmentIntent())
         {
             SetJusticePreJudgmentHoldingIntent(
@@ -3313,27 +4001,6 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
-        if (TryResolveJusticePendingWalCustodyRebindHoldingIntent(
-                player,
-                out ownerSlot,
-                out ownerModel))
-        {
-            SetJusticePreJudgmentHoldingIntent(
-                JusticePreJudgmentHoldingSource.PendingWalCustodyRebind,
-                ownerSlot,
-                ownerModel);
-            return;
-        }
-
-        if (_justicePreJudgmentHoldingSource ==
-                JusticePreJudgmentHoldingSource.Captured &&
-            JusticeIsCustodyActive)
-        {
-            // Je conserve l'enceinte provisoire pendant Transporting et ses
-            // retries. Seul le transfert normal physiquement vérifié la consomme.
-            return;
-        }
-
         if (_justicePreJudgmentHoldingSource ==
                 JusticePreJudgmentHoldingSource.RepairPoliceArrest)
         {
@@ -3363,18 +4030,33 @@ public sealed partial class DonJEnemySpawner
         if (_justicePreJudgmentHoldingSource ==
                 JusticePreJudgmentHoldingSource.DurablePoliceDeath)
         {
+            if (_justiceCustodyRespawnRestorePending ||
+                _justicePoliceDeathNoCellReleaseProtectionRestorePending)
+            {
+                // Je garde l'owner physique après l'ACK jusqu'à ce que GTA ait
+                // accepté le FadeIn et que la restitution soit vérifiée.
+                return;
+            }
             // ClearPendingJusticeDeathCapture et les resets de cycle appellent
             // déjà le reset explicite. Ce filet évite seulement un intent orphelin.
             ResetJusticePoliceDeathPreJudgmentHoldingState();
         }
     }
 
-    private bool MustBlockJusticeLateForPreJudgmentHolding()
+    private bool MustBlockJusticeLateForPreJudgmentHolding(Ped player)
     {
         if (_justicePreJudgmentHoldingSource ==
                 JusticePreJudgmentHoldingSource.None)
         {
             return false;
+        }
+        if (IsJusticePendingPoliceDeathNoCellLegalRelease())
+        {
+            // Je garde volontairement le DeathFront durable jusqu'à l'ACK de sortie.
+            // Avant la téléportation de libération, le Late ne passe qu'avec le
+            // propriétaire vivant, protégé et physiquement contenu.
+            return !_justicePoliceDeathNoCellReleaseExitApplied &&
+                   !IsJusticeProtectedPoliceDeathNoCellLegalRelease(player);
         }
         if (_justicePreJudgmentHoldingSource ==
                 JusticePreJudgmentHoldingSource.PendingWalCustodyRebind)
@@ -3388,16 +4070,37 @@ public sealed partial class DonJEnemySpawner
                     ReadWalString(pending, "mode", string.Empty),
                     JusticeCustodyDeathFrontMode,
                     StringComparison.Ordinal);
+            bool unboundIdentityReady = _justiceCustodyWaitingForRespawn &&
+                _justiceCustodyDeathRebindPending;
+            bool adoptedIdentityReady = _justiceCustodyWaitingForRespawn &&
+                !_justiceCustodyDeathRebindPending &&
+                CanRebindJusticeCustodyAdoptedRespawnIdentity(player);
             // Je bloque tant que le Prepared exact existe ou si son application
-            // n'a pas posé les deux latches. Une fois ceux-ci armés, le contrôleur
-            // de détention reprend, toujours après la preuve physique du holding.
+            // n'a produit ni droit initial ni identité adoptée strictement prouvée.
+            // Le holding physique reste actif pendant la reprise du contrôleur.
             return custodyRebindWalPending ||
-                   !_justiceCustodyWaitingForRespawn ||
-                   !_justiceCustodyDeathRebindPending;
+                   (!unboundIdentityReady && !adoptedIdentityReady);
         }
         if (_justicePreJudgmentHoldingSource !=
                 JusticePreJudgmentHoldingSource.Captured)
         {
+            return true;
+        }
+
+        int armedOwnerSlot;
+        int armedOwnerModel;
+        bool armedPoliceDeathTransfer =
+            TryResolveJusticeArmedPoliceDeathTransferHoldingIntent(
+                player,
+                out armedOwnerSlot,
+                out armedOwnerModel);
+        if (armedPoliceDeathTransfer &&
+            (!_justicePoliceDeathPreJudgmentHoldingEstablished ||
+             !IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position)))
+        {
+            // Je laisse le streaming finir avant le premier rebind. Le front et
+            // son précommit portent encore le modèle mort : leur consommation
+            // physique doit précéder l'adoption éventuelle du modèle de respawn.
             return true;
         }
 
@@ -3459,6 +4162,49 @@ public sealed partial class DonJEnemySpawner
             _justiceCustodyPlayerModelHash != 0;
     }
 
+    private bool TryResolveJusticeArmedPoliceDeathTransferHoldingIntent(
+        Ped player,
+        out int ownerSlot,
+        out int ownerModel)
+    {
+        ownerSlot = _justiceCustodyPlayerSlot;
+        ownerModel = _justiceCustodyPlayerModelHash;
+        bool unboundRespawnIdentity =
+            _justiceCustodyDeathRebindPending &&
+            _justiceCustodyPlayerModelHash ==
+                _justiceSuspendedPursuitDeathPlayerModelHash;
+        bool adoptedRespawnIdentity =
+            !_justiceCustodyDeathRebindPending &&
+            (IsJusticeCustodyRespawnIdentityRebindConfirmedFor(player) ||
+             CanRebindJusticeCustodyAdoptedRespawnIdentity(player));
+        bool rebindIdentityReady = unboundRespawnIdentity ||
+            adoptedRespawnIdentity;
+        return _justiceCaseState != null &&
+            _justiceCaseState.Phase == JusticePhase.Transporting &&
+            _justiceCustodyRuntimeActive && _justiceCustodyTransferPending &&
+            !_justiceCustodyResumePending &&
+            _justiceCustodyWaitingForRespawn && rebindIdentityReady &&
+            !_justiceBackupRepairPending && !_justiceProfileContextBlocked &&
+            !_justiceProfileSelectionPending &&
+            !_justiceProfileSwitchPersistencePending &&
+            !_justiceActiveProfileResetPending && !_justiceAmnestyPending &&
+            _justiceVoluntaryFinePaymentIntent == null &&
+            _justiceFineDebitIntent == null &&
+            !_justiceLegalReleaseFinalizationPending &&
+            !_justiceCustodyTransferRollbackFinalizationPending &&
+            !_justiceCustodyDeathStatePersistencePending &&
+            _justicePendingDeathFrontWalRecord == null &&
+            !IsJusticeSentencePolicyRecoveryBlockingActiveProfile() &&
+            !HasJusticeDeferredRuntimeFronts() &&
+            HasJusticeCapturePrecommitConfirmationForCurrentEpisode() &&
+            HasExactJusticePendingPoliceDeathCaptureOwner() &&
+            _justiceCustodyPlayerSlot ==
+                _justiceSuspendedPursuitDeathPlayerSlot &&
+            IsJusticePoliceDeathFrontResultDurable() &&
+            Entity.Exists(player) && !player.IsDead &&
+            IsPendingJusticeDeathCaptureIdentityCompatible(player);
+    }
+
     private bool TryResolveJusticePendingWalPoliceDeathHoldingIntent(
         Ped player,
         out int ownerSlot,
@@ -3467,7 +4213,11 @@ public sealed partial class DonJEnemySpawner
         ownerSlot = -1;
         ownerModel = 0;
         JusticeWalRecord record = _justicePendingDeathFrontWalRecord;
-        if (record == null || !IsJusticeDeathFrontWalRecordExact(record) ||
+        if (record == null)
+        {
+            return false;
+        }
+        if (!IsJusticeDeathFrontWalRecordExact(record) ||
             !string.Equals(
                 ReadWalString(record, "mode", string.Empty),
                 JusticePoliceDeathFrontMode,
@@ -3504,6 +4254,53 @@ public sealed partial class DonJEnemySpawner
         return true;
     }
 
+    private bool TryResolveJusticeCustodyRebindHoldingIntentFromState(
+        Ped player,
+        out int ownerSlot,
+        out int ownerModel)
+    {
+        ownerSlot = -1;
+        ownerModel = 0;
+        bool durableCustodyPhase = _justiceCaseState != null &&
+            (_justiceCaseState.Phase == JusticePhase.Incarcerated ||
+             _justiceCaseState.Phase == JusticePhase.Escaping);
+        bool validSite = _justiceCustodySite == JusticeCustodySite.MissionRow ||
+            _justiceCustodySite == JusticeCustodySite.Bolingbroke;
+        if (!durableCustodyPhase || !_justiceCaseState.Enabled ||
+            string.IsNullOrWhiteSpace(_justiceCaseState.CustodyEpisodeId) ||
+            !_justiceCustodyRuntimeActive ||
+            !_justiceCustodyWaitingForRespawn ||
+            !validSite ||
+            !IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot) ||
+            _justiceCustodyPlayerSlot != _justiceActivePlayerProfileSlot ||
+            _justiceCustodyPlayerModelHash == 0 ||
+            !Entity.Exists(player) || player.IsDead)
+        {
+            return false;
+        }
+
+        int currentSlot = GetCurrentSinglePlayerCashSlotSafe();
+        int currentModel = GetJusticePedModelHashSafe(player);
+        bool unboundRespawnIdentity = _justiceCustodyDeathRebindPending &&
+            ((currentSlot == _justiceCustodyPlayerSlot && currentModel != 0) ||
+             (currentSlot == -1 &&
+              currentModel == _justiceCustodyPlayerModelHash));
+        bool adoptedRespawnIdentity = !_justiceCustodyDeathRebindPending &&
+            CanRebindJusticeCustodyAdoptedRespawnIdentity(player);
+        if (!unboundRespawnIdentity && !adoptedRespawnIdentity)
+        {
+            return false;
+        }
+
+        // Je peux avoir déjà confirmé et retiré le WAL avant le premier tick vivant,
+        // ou ne plus être ouvert après un reload. Les latches persistés d'une
+        // phase de détention stable reconstruisent alors le même holding, sans
+        // confondre le Transporting d'une première capture policière.
+        ownerSlot = _justiceCustodyPlayerSlot;
+        ownerModel = _justiceCustodyPlayerModelHash;
+        return true;
+    }
+
     private bool TryResolveJusticePendingWalCustodyRebindHoldingIntent(
         Ped player,
         out int ownerSlot,
@@ -3512,7 +4309,14 @@ public sealed partial class DonJEnemySpawner
         ownerSlot = -1;
         ownerModel = 0;
         JusticeWalRecord record = _justicePendingDeathFrontWalRecord;
-        if (record == null || !IsJusticeDeathFrontWalRecordExact(record) ||
+        if (record == null)
+        {
+            return TryResolveJusticeCustodyRebindHoldingIntentFromState(
+                player,
+                out ownerSlot,
+                out ownerModel);
+        }
+        if (!IsJusticeDeathFrontWalRecordExact(record) ||
             !string.Equals(
                 ReadWalString(record, "mode", string.Empty),
                 JusticeCustodyDeathFrontMode,
@@ -4027,9 +4831,15 @@ public sealed partial class DonJEnemySpawner
 
     private bool IsJusticeCapturePrecommitConfirmedForCurrentEpisode()
     {
+        return _justiceCaseState != null &&
+               _justiceCaseState.Phase == JusticePhase.Captured &&
+               HasJusticeCapturePrecommitConfirmationForCurrentEpisode();
+    }
+
+    private bool HasJusticeCapturePrecommitConfirmationForCurrentEpisode()
+    {
         return _justiceCapturePrecommitConfirmed &&
                _justiceCaseState != null &&
-               _justiceCaseState.Phase == JusticePhase.Captured &&
                _justiceCapturePrecommitConfirmedOwnerSlot ==
                    _justiceCustodyPlayerSlot &&
                _justiceCapturePrecommitConfirmedOwnerSlot ==
@@ -4205,6 +5015,21 @@ public sealed partial class DonJEnemySpawner
         {
             return false;
         }
+        if (_justiceCustodyRespawnMaskNeedsRearm)
+        {
+            // Je garde la protection et les contrôles, mais je refuse toute
+            // coordonnée tant que GTA n'a pas confirmé le fondu noir réel.
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+
+        if (_justicePreJudgmentHoldingPositionApplied &&
+            !IsJusticeTeleportVerified(player, targetPosition, 8.0f))
+        {
+            // Je réarme immédiatement le déplacement si GTA ou un autre script a
+            // sorti le ped du holding après une première téléportation validée.
+            _justicePreJudgmentHoldingPositionApplied = false;
+        }
 
         try
         {
@@ -4303,8 +5128,16 @@ public sealed partial class DonJEnemySpawner
         if (!EnsureJusticePreJudgmentHoldingStreamingState(
                 player,
                 safeTarget,
-                heading) ||
-            !TryJusticeEmergencyTeleport(
+                heading))
+        {
+            return false;
+        }
+        if (_justiceCustodyRespawnMaskNeedsRearm)
+        {
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+        if (!TryJusticeEmergencyTeleport(
                 player,
                 targetPosition,
                 heading,
@@ -4618,24 +5451,6 @@ public sealed partial class DonJEnemySpawner
         {
             return false;
         }
-        bool holdingOwnerCompatible =
-            _justicePoliceDeathPreJudgmentHoldingEstablished &&
-            IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player);
-        bool insideHolding =
-            _justicePoliceDeathPreJudgmentHoldingEstablished &&
-            IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position);
-        if (ShouldKeepJusticePreJudgmentHoldingVisible(
-                _justicePoliceDeathPreJudgmentHoldingEstablished,
-                _justicePreJudgmentHoldingStreamingPending,
-                playerAlive,
-                holdingOwnerCompatible,
-                insideHolding))
-        {
-            // Je peux déjà avoir Captured/waiting durable tandis que le transfert
-            // normal attend encore; le suspect reste visible dans toute l'enceinte
-            // provisoire jusqu'à sa vérification physique.
-            return false;
-        }
         if (CanMaskJusticePoliceDeathRespawnOrigin(player))
         {
             return true;
@@ -4654,38 +5469,20 @@ public sealed partial class DonJEnemySpawner
         {
             return false;
         }
-        if (!JusticePolicy.CanRebindCustodyRespawnSlot(
+        bool canBindRespawnIdentity = _justiceCustodyDeathRebindPending
+            ? JusticePolicy.CanRebindCustodyRespawnSlot(
                 _justiceCustodyPlayerSlot,
                 currentSlot,
                 _justiceLastCanonicalPlayerSlot,
                 _justiceActivePlayerProfileSlot,
-                _justiceCustodyDeathRebindPending))
+                true)
+            : CanRebindJusticeCustodyAdoptedRespawnIdentity(player);
+        if (!canBindRespawnIdentity)
         {
-            return false;
-        }
-
-        if (_justiceCustodyPersistenceOutageHoldingEstablished &&
-            IsInsideJusticeCustody(player.Position))
-        {
-            // La corruption durable suspend la peine, mais ne doit pas remettre
-            // l'écran au noir tant que le même détenu reste dans son enceinte.
             return false;
         }
 
         return GetJusticePedModelHashSafe(player) != 0;
-    }
-
-    internal static bool ShouldKeepJusticePreJudgmentHoldingVisible(
-        bool holdingEstablished,
-        bool streamingPending,
-        bool playerAlive,
-        bool ownerCompatible,
-        bool insideHolding)
-    {
-        // Je garde cette décision sans accès GTA afin que l'armement du front et
-        // le contrôleur de respawn partagent exactement le même invariant.
-        return holdingEstablished && !streamingPending && playerAlive &&
-               ownerCompatible && insideHolding;
     }
 
     private bool CanMaskJusticePoliceDeathRespawnOrigin(Ped player)
@@ -4712,9 +5509,9 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        // Je ne réarme le masque d'un suspect déjà visible dans toute l'enceinte
-        // provisoire que s'il en sort réellement.
-        return !IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position);
+        // Je ne traite plus le holding physique comme frontière de restitution :
+        // tant que l'admission atomique échoue, ce propriétaire exact reste masqué.
+        return true;
     }
 
     private bool HasJusticeCustodyRespawnChangedCanonicalPlayer(Ped player)
@@ -4772,12 +5569,15 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
-        if (!JusticePolicy.CanRebindCustodyRespawnSlot(
+        bool canAdoptRespawnIdentity = _justiceCustodyDeathRebindPending
+            ? JusticePolicy.CanRebindCustodyRespawnSlot(
                 _justiceCustodyPlayerSlot,
                 currentSlot,
                 _justiceLastCanonicalPlayerSlot,
                 _justiceActivePlayerProfileSlot,
-                _justiceCustodyDeathRebindPending))
+                true)
+            : CanRebindJusticeCustodyAdoptedRespawnIdentity(player);
+        if (!canAdoptRespawnIdentity)
         {
             // Je peux reconnaître une tenue custom après une mort uniquement
             // grâce au profil canonique déjà observé. Un autre héros connu ne
@@ -4806,17 +5606,16 @@ public sealed partial class DonJEnemySpawner
         int previousModelHash = _justiceCustodyPlayerModelHash;
         int previousSlot = _justiceCustodyPlayerSlot;
         bool previousDeathRebindPending = _justiceCustodyDeathRebindPending;
+        bool previousRebindConfirmation =
+            _justiceCustodyRespawnIdentityRebindConfirmed;
+        if (!CanPrepareJusticeCustodyPlayerWhileProtected(player))
+        {
+            return false;
+        }
         _justiceCustodyPlayerHandle = player.Handle;
         _justiceCustodyPlayerModelHash = modelHash;
         _justiceCustodyDeathRebindPending = false;
-        if (!EnsureJusticePlayerIsMortal(player))
-        {
-            _justiceCustodyPlayerHandle = previousHandle;
-            _justiceCustodyPlayerModelHash = previousModelHash;
-            _justiceCustodyPlayerSlot = previousSlot;
-            _justiceCustodyDeathRebindPending = previousDeathRebindPending;
-            return false;
-        }
+        _justiceCustodyRespawnIdentityRebindConfirmed = false;
         JusticeMarkStateDirty();
         if (!JusticeFlushStateNow())
         {
@@ -4824,24 +5623,75 @@ public sealed partial class DonJEnemySpawner
             _justiceCustodyPlayerModelHash = previousModelHash;
             _justiceCustodyPlayerSlot = previousSlot;
             _justiceCustodyDeathRebindPending = previousDeathRebindPending;
+            _justiceCustodyRespawnIdentityRebindConfirmed =
+                previousRebindConfirmation;
             JusticeMarkStateDirty();
             return false;
         }
 
+        // Je consomme le droit large dans le même snapshot que le modèle adopté.
+        // La preuve volatile évite un second rebind dans cette session; après un
+        // reload, la branche stricte exige exactement ce profil et ce modèle.
+        _justiceCustodyRespawnIdentityRebindConfirmed = true;
         _justiceCustodyGuardDeathCauseEvaluated = false;
         _justiceCustodyGuardDeathPenaltyPending = false;
         LogInfo("Justice.Detention", "Identité du protagoniste reliée après son respawn.");
         return true;
     }
 
+    private bool IsJusticeCustodyRespawnIdentityRebindConfirmedFor(Ped player)
+    {
+        if (!_justiceCustodyRespawnIdentityRebindConfirmed ||
+            !Entity.Exists(player) || player.IsDead)
+        {
+            return false;
+        }
+
+        int currentModelHash = GetJusticePedModelHashSafe(player);
+        int currentSlot = GetCurrentSinglePlayerCashSlotSafe();
+        return _justiceCustodyPlayerHandle != 0 &&
+               player.Handle == _justiceCustodyPlayerHandle &&
+               _justiceCustodyPlayerModelHash != 0 &&
+               currentModelHash == _justiceCustodyPlayerModelHash &&
+               JusticePolicy.IsCustodyLiveIdentityCompatible(
+                   _justiceCustodyPlayerSlot,
+                   currentSlot,
+                   _justiceCustodyPlayerHandle,
+                   player.Handle,
+                   _justiceCustodyPlayerModelHash,
+                   currentModelHash);
+    }
+
+    private bool CanRebindJusticeCustodyAdoptedRespawnIdentity(Ped player)
+    {
+        if (!_justiceCustodyWaitingForRespawn ||
+            _justiceCustodyDeathRebindPending ||
+            !Entity.Exists(player) || player.IsDead ||
+            !IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot) ||
+            _justiceCustodyPlayerSlot != _justiceActivePlayerProfileSlot ||
+            _justiceCustodyPlayerSlot != _justiceLastCanonicalPlayerSlot ||
+            _justiceCustodyPlayerModelHash == 0)
+        {
+            return false;
+        }
+
+        int currentSlot = GetCurrentSinglePlayerCashSlotSafe();
+        int currentModelHash = GetJusticePedModelHashSafe(player);
+        // Je ne réutilise jamais le droit large déjà consommé : après un reload,
+        // seuls le profil canonique et le modèle adopté au premier rebind peuvent
+        // reconstruire le handle volatile volontairement absent du XML.
+        return currentModelHash == _justiceCustodyPlayerModelHash &&
+               (currentSlot == _justiceCustodyPlayerSlot || currentSlot == -1);
+    }
+
     private bool CanRebindJusticeCustodyIdentityAfterInitialRespawn()
     {
         return _justiceCustodyWaitingForRespawn &&
                (_justiceCustodyDeathRebindPending ||
-                (!_justiceInventoryRemoved &&
-                 !_justiceWeaponControlsLocked &&
-                 _justiceWeaponSnapshot == null &&
-                 !_justiceCustodyPlayerStateStored));
+                (IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot) &&
+                 _justiceCustodyPlayerSlot == _justiceActivePlayerProfileSlot &&
+                 _justiceCustodyPlayerSlot == _justiceLastCanonicalPlayerSlot &&
+                 _justiceCustodyPlayerModelHash != 0));
     }
 
     private bool RememberJusticeCustodyPlayerSlot()
@@ -4975,6 +5825,13 @@ public sealed partial class DonJEnemySpawner
 
     private void ArmJusticeCustodyResidualMissionFlagBypass()
     {
+        if (_justiceCustodyResidualMissionFlagBypassArmed &&
+            _justiceCustodyResidualMissionFlagObservationDeadlineMs == 0L)
+        {
+            // Je ne remplace jamais une observation BUSTED déjà prouvée par une
+            // nouvelle fenêtre qui pourrait expirer au milieu du même transfert.
+            return;
+        }
         // Le flag mission de la séquence BUSTED peut apparaître juste après le
         // téléport validé. J'ouvre une courte fenêtre d'observation : dès qu'il
         // est vu, le bypass reste valable uniquement jusqu'à sa première chute.
@@ -4982,6 +5839,164 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyResidualMissionFlagObservationDeadlineMs =
             _justiceMonotonicTimeMs +
             JusticeCustodyResidualMissionFlagObservationWindowMs;
+    }
+
+    private void ArmJusticeCustodyResidualMissionFlagBypassObserved()
+    {
+        // Je réserve zéro à une observation déjà qualifiée par le contrôleur de
+        // suspension : aucune attente supplémentaire ne recrée le verrou circulaire.
+        _justiceCustodyResidualMissionFlagBypassArmed = true;
+        _justiceCustodyResidualMissionFlagObservationDeadlineMs = 0L;
+    }
+
+    private bool TryArmJusticeCustodyDeathResidualMissionFlagBypassAfterHolding(
+        Ped player)
+    {
+        bool custodyPhase = _justiceCaseState != null &&
+            (_justiceCaseState.Phase == JusticePhase.Incarcerated ||
+             _justiceCaseState.Phase == JusticePhase.Escaping);
+        bool unboundRespawnIdentity = _justiceCustodyDeathRebindPending;
+        bool adoptedRespawnIdentity = !_justiceCustodyDeathRebindPending &&
+            CanRebindJusticeCustodyAdoptedRespawnIdentity(player);
+        if (!_justiceRuntimeSuspendedByMissionFlagOnlyCached ||
+            !_justiceEnabled || !custodyPhase || !_justiceCustodyRuntimeActive ||
+            !_justiceCustodyWaitingForRespawn ||
+            (!unboundRespawnIdentity && !adoptedRespawnIdentity) ||
+            _justiceCustodyDeathStatePersistencePending ||
+            _justicePendingDeathFrontWalRecord != null ||
+            _justiceBackupRepairPending || _justiceProfileContextBlocked ||
+            _justiceProfileSelectionPending ||
+            _justiceProfileSwitchPersistencePending ||
+            _justiceActiveProfileResetPending || _justiceAmnestyPending ||
+            _justiceLegalReleaseFinalizationPending ||
+            _justiceCustodyTransferRollbackFinalizationPending ||
+            IsJusticeSentencePolicyRecoveryBlockingActiveProfile() ||
+            _justicePreJudgmentHoldingSource !=
+                JusticePreJudgmentHoldingSource.PendingWalCustodyRebind ||
+            !_justicePoliceDeathPreJudgmentHoldingEstablished ||
+            !Entity.Exists(player) || player.IsDead ||
+            !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player) ||
+            !IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position) ||
+            !IsJusticeCustodyDeathFrontResultDurable())
+        {
+            return false;
+        }
+
+        // Je qualifie le latch de respawn en détention seulement après le WAL de
+        // mort, l'identité initiale ou adoptée, et le holding physique. Une mission
+        // ordinaire hors de cette enceinte ne peut jamais ouvrir cette exception.
+        ArmJusticeCustodyResidualMissionFlagBypassObserved();
+        return true;
+    }
+
+    private bool HasExactJusticePendingPoliceDeathCaptureOwner()
+    {
+        int ownerSlot = _justiceSuspendedPursuitDeathPlayerSlot;
+        if (!_justicePursuitDeathObservedDuringSuspension ||
+            !IsJusticeCanonicalProfileSlot(ownerSlot) ||
+            ownerSlot != _justiceActivePlayerProfileSlot ||
+            _justiceSuspendedPursuitDeathPlayerModelHash == 0 ||
+            _justicePlayerProfiles == null ||
+            ownerSlot >= _justicePlayerProfiles.Length)
+        {
+            return false;
+        }
+
+        JusticePlayerProfileState owner = _justicePlayerProfiles[ownerSlot];
+        return owner != null && owner.PendingDeathCapture &&
+               owner.PendingDeathCapturePlayerSlot == ownerSlot &&
+               owner.PendingDeathCapturePlayerModel ==
+                   _justiceSuspendedPursuitDeathPlayerModelHash;
+    }
+
+    private bool IsJusticePendingPoliceDeathNoCellLegalRelease()
+    {
+        return _justiceLegalReleaseFinalizationPending &&
+            _justiceLegalReleaseFinalizationSite == JusticeCustodySite.None &&
+            _justiceLegalReleaseSelectedWeaponHash == 0 &&
+            _justiceCaseState != null && _justiceCaseState.Enabled &&
+            _justiceCaseState.Phase == JusticePhase.AtLarge &&
+            !IsLoadedJusticeCaseActive(_justiceCaseState) &&
+            HasExactJusticePendingPoliceDeathCaptureOwner() &&
+            IsJusticePoliceDeathFrontResultDurable();
+    }
+
+    private bool HasJusticePreJudgmentHoldingProtectionForPlayer(Ped player)
+    {
+        return Entity.Exists(player) && !player.IsDead &&
+            _justicePreJudgmentHoldingStreamingPending &&
+            _justicePreJudgmentHoldingProtectionOwned &&
+            player.Handle == _justicePreJudgmentHoldingStreamingPlayerHandle &&
+            GetJusticePedModelHashSafe(player) ==
+                _justicePreJudgmentHoldingStreamingPlayerModelHash &&
+            _justicePreJudgmentHoldingStreamingOwnerSlot ==
+                _justicePoliceDeathPreJudgmentHoldingOwnerSlot &&
+            _justicePreJudgmentHoldingStreamingOwnerModelHash ==
+                _justicePoliceDeathPreJudgmentHoldingOwnerModelHash;
+    }
+
+    private bool IsJusticeProtectedPoliceDeathNoCellLegalRelease(Ped player)
+    {
+        bool compatibleSource = _justicePreJudgmentHoldingSource ==
+                JusticePreJudgmentHoldingSource.DurablePoliceDeath ||
+            _justicePreJudgmentHoldingSource ==
+                JusticePreJudgmentHoldingSource.Captured;
+        if (!IsJusticePendingPoliceDeathNoCellLegalRelease() ||
+            !compatibleSource ||
+            !_justicePoliceDeathPreJudgmentHoldingEstablished ||
+            !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player) ||
+            !HasJusticePreJudgmentHoldingProtectionForPlayer(player))
+        {
+            return false;
+        }
+        if (IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position))
+        {
+            return true;
+        }
+
+        JusticeCustodyLayout layout = GetJusticeCustodyLayoutForSite(
+            _justicePoliceDeathPreJudgmentHoldingSite);
+        // Je conserve le même owner custom après sa sortie physique : le masque,
+        // la protection et la position extérieure exacte autorisent les paliers
+        // persistants suivants sans attendre la chute du flag BUSTED résiduel.
+        // Une native FADE_IN peut accepter, refuser ou interrompre le fondu et
+        // consommer le latch générique : la transaction dédiée reste alors la
+        // preuve qui permet à Resume de réarmer ou d'achever ce même owner.
+        return _justicePoliceDeathNoCellReleaseExitApplied &&
+            layout != null &&
+            IsJusticeTeleportVerified(player, layout.ReleasePosition, 8.0f) &&
+            ((_justicePoliceDeathNoCellReleaseProtectionRestorePending &&
+              _justicePoliceDeathRespawnMaskIntentPending) ||
+             (_justiceCustodyRespawnTransferPending &&
+              IsJusticeCustodyRespawnTransferMaskActive()));
+    }
+
+    private bool TryArmJusticePoliceDeathNoCellLegalReleaseResidualMissionFlagBypassAfterHolding(
+        Ped player)
+    {
+        if (!_justiceRuntimeSuspendedByMissionFlagOnlyCached ||
+            !IsJusticePendingPoliceDeathNoCellLegalRelease() ||
+            _justiceBackupRepairPending || _justiceProfileContextBlocked ||
+            _justiceProfileSelectionPending ||
+            _justiceProfileSwitchPersistencePending ||
+            _justiceActiveProfileResetPending || _justiceAmnestyPending ||
+            _justiceVoluntaryFinePaymentIntent != null ||
+            _justiceFineDebitIntent != null ||
+            _justiceCustodyTransferRollbackFinalizationPending ||
+            _justiceCustodyDeathStatePersistencePending ||
+            _justicePendingDeathFrontWalRecord != null ||
+            IsJusticeSentencePolicyRecoveryBlockingActiveProfile() ||
+            HasJusticeDeferredRuntimeFronts() ||
+            !IsJusticeRuntimeProfileContextCompatible() ||
+            !IsJusticeProtectedPoliceDeathNoCellLegalRelease(player))
+        {
+            return false;
+        }
+
+        // Je reconstruis le seul droit volatile perdu au reload depuis le couple
+        // durable PendingDeath+LegalRelease et son holding physique exact.
+        ArmJusticeCustodyResidualMissionFlagBypassObserved();
+        return true;
     }
 
     private void UpdateJusticeCustodyResidualMissionFlagBypass(
@@ -5054,8 +6069,6 @@ public sealed partial class DonJEnemySpawner
             _justiceProfileSelectionPending ||
             _justiceProfileSwitchPersistencePending ||
             !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot) ||
-            _justiceCustodyWaitingForRespawn ||
-            _justiceCustodyDeathRebindPending ||
             _justiceCustodyDeathStatePersistencePending ||
             _justiceCustodyTransferRollbackFinalizationPending ||
             !Entity.Exists(player) || player.IsDead)
@@ -5072,16 +6085,125 @@ public sealed partial class DonJEnemySpawner
             _justiceCustodyContainmentEstablished &&
             (_justiceCaseState.Phase == JusticePhase.Incarcerated ||
              _justiceCaseState.Phase == JusticePhase.Escaping);
-        bool releaseFinalization =
+        bool releaseFinalizationUnblocked =
             _justiceLegalReleaseFinalizationPending &&
-            _justiceLegalReleaseFinalizationSite != JusticeCustodySite.None;
-        if (!stableCustody && !releaseFinalization)
+            !_justiceBackupRepairPending &&
+            !_justiceActiveProfileResetPending && !_justiceAmnestyPending &&
+            _justiceVoluntaryFinePaymentIntent == null &&
+            _justiceFineDebitIntent == null &&
+            _justicePendingDeathFrontWalRecord == null &&
+            !IsJusticeSentencePolicyRecoveryBlockingActiveProfile() &&
+            !HasJusticeDeferredRuntimeFronts();
+        bool noCellReleaseFormalities = releaseFinalizationUnblocked &&
+            _justiceLegalReleaseFinalizationSite == JusticeCustodySite.None &&
+            _justiceCaseState.Phase == JusticePhase.AtLarge &&
+            !IsLoadedJusticeCaseActive(_justiceCaseState) &&
+            _justiceLegalReleaseSelectedWeaponHash == 0;
+        bool releaseFinalization = releaseFinalizationUnblocked &&
+            (_justiceLegalReleaseFinalizationSite != JusticeCustodySite.None ||
+             noCellReleaseFormalities);
+        bool capturedDeathRebindHandoff =
+            !_justiceCustodyRuntimeActive &&
+            !_justiceCustodyTransferPending &&
+            !_justiceCustodyResumePending &&
+            _justiceCaseState.Phase == JusticePhase.Captured &&
+            _justiceCustodyWaitingForRespawn &&
+            _justicePreJudgmentHoldingSource ==
+                JusticePreJudgmentHoldingSource.Captured &&
+            _justicePoliceDeathPreJudgmentHoldingEstablished &&
+            IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position) &&
+            HasJusticeCapturePrecommitConfirmationForCurrentEpisode() &&
+            HasExactJusticePendingPoliceDeathCaptureOwner() &&
+            IsJusticePoliceDeathFrontResultDurable();
+        bool initialCaptureAdmissionRetry =
+            _justiceCaseState.Phase == JusticePhase.Incarcerated &&
+            _justiceCustodyTransferPending &&
+            _justiceCustodyRespawnTransferPending &&
+            !_justiceCustodyRespawnRestorePending &&
+            _justicePreJudgmentHoldingSource ==
+                JusticePreJudgmentHoldingSource.Captured &&
+            _justicePoliceDeathPreJudgmentHoldingEstablished &&
+            IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position);
+        // Je garde le bypass après la qualification physique du DeathFront : le
+        // rebind durable peut remplacer le modèle de mort par celui du respawn,
+        // tandis que le front reste la preuve de reprise jusqu'au FadeIn final.
+        bool initialRespawnHandoff =
+            _justiceCustodyRuntimeActive &&
+            (_justiceCaseState.Phase == JusticePhase.Transporting ||
+             initialCaptureAdmissionRetry) &&
+            _justiceCustodyWaitingForRespawn &&
+            _justicePreJudgmentHoldingSource ==
+                JusticePreJudgmentHoldingSource.Captured &&
+            _justicePoliceDeathPreJudgmentHoldingEstablished &&
+            IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position) &&
+            (HasJusticeCapturePrecommitConfirmationForCurrentEpisode() ||
+             (!_justicePursuitDeathObservedDuringSuspension &&
+              _justiceCustodyResidualMissionFlagBypassArmed));
+        bool custodyDeathHandoff =
+            _justiceCustodyRuntimeActive &&
+            (_justiceCaseState.Phase == JusticePhase.Incarcerated ||
+             _justiceCaseState.Phase == JusticePhase.Escaping) &&
+            (_justiceCustodyWaitingForRespawn ||
+             _justiceCustodyDeathRebindPending ||
+             _justiceCustodyTransferPending ||
+             _justiceCustodyResumePending ||
+             _justiceCustodyRespawnTransferPending) &&
+            _justicePreJudgmentHoldingSource ==
+                JusticePreJudgmentHoldingSource.PendingWalCustodyRebind &&
+            _justicePoliceDeathPreJudgmentHoldingEstablished &&
+            IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position) &&
+            IsJusticeCustodyDeathFrontResultDurable();
+        bool admissionHandoff = capturedDeathRebindHandoff ||
+            initialRespawnHandoff || custodyDeathHandoff;
+        if (!stableCustody && !releaseFinalization && !admissionHandoff)
         {
             return false;
         }
 
         int currentSlot = GetJusticeCanonicalPlayerSlotSafe();
         int currentModelHash = GetJusticePedModelHashSafe(player);
+        if (admissionHandoff)
+        {
+            if (!IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot) ||
+                _justiceCustodyPlayerSlot != _justiceActivePlayerProfileSlot ||
+                currentModelHash == 0 || _justiceCustodyPlayerModelHash == 0)
+            {
+                return false;
+            }
+
+            // Je permets l'adoption par le slot durable avant le premier rebind. Dès
+            // qu'elle est persistée, le modèle devient immuable et seul le handle
+            // confirmé dans cette session, ou sa reconstruction stricte au reload,
+            // peut poursuivre l'admission.
+            bool canRebindDeathIdentity = _justiceCustodyDeathRebindPending &&
+                !_justiceCustodyRespawnIdentityRebindConfirmed &&
+                JusticePolicy.CanRebindCustodyRespawnSlot(
+                       _justiceCustodyPlayerSlot,
+                       currentSlot,
+                       _justiceLastCanonicalPlayerSlot,
+                       _justiceActivePlayerProfileSlot,
+                       true);
+            bool canRebindAdoptedIdentity =
+                !_justiceCustodyDeathRebindPending &&
+                !_justiceCustodyRespawnIdentityRebindConfirmed &&
+                CanRebindJusticeCustodyAdoptedRespawnIdentity(player);
+            return canRebindDeathIdentity || canRebindAdoptedIdentity ||
+                JusticePolicy.IsCustodyLiveIdentityCompatible(
+                    _justiceCustodyPlayerSlot,
+                    currentSlot,
+                    _justiceCustodyPlayerHandle,
+                    player.Handle,
+                    _justiceCustodyPlayerModelHash,
+                    currentModelHash);
+        }
+        if (noCellReleaseFormalities &&
+            IsJusticeProtectedPoliceDeathNoCellLegalRelease(player))
+        {
+            // Je garde le bypass mission-only pour un respawn custom dont le
+            // holding prouve encore exactement le handle, le modèle, le profil,
+            // la position et la protection après l'effacement du snapshot custody.
+            return true;
+        }
         if (IsJusticeCanonicalProfileSlot(_justiceCustodyPlayerSlot))
         {
             return _justiceCustodyPlayerSlot == _justiceActivePlayerProfileSlot &&
@@ -5183,11 +6305,22 @@ public sealed partial class DonJEnemySpawner
 
     private void ResetJusticeCustodyClock(int now)
     {
+        if (_justiceCustodyTransferPending || _justiceCustodyResumePending ||
+            _justiceCustodyWaitingForRespawn ||
+            _justiceCustodyAdmissionFadeInRequested)
+        {
+            // Je n'arme aucune origine temporelle avant la restitution exacte de
+            // l'écran. Le finalizer posera le premier tick de peine sur FADED_IN.
+            _justiceCustodyLastTickAt = 0;
+        }
+        else
+        {
+            _justiceCustodyLastTickAt = now;
+        }
         // Je rebascule l'origine sur le tick courant sans récupérer le temps passé
         // dans le gate. En revanche je conserve les millisecondes de gameplay déjà
         // réellement observées avant la suspension. Les effacer à chaque micro-gate
         // pouvait empêcher indéfiniment d'atteindre une seconde complète.
-        _justiceCustodyLastTickAt = now;
         if (_justiceCustodyElapsedRemainderMs < 0 ||
             _justiceCustodyElapsedRemainderMs >= 1000)
         {
@@ -5201,20 +6334,15 @@ public sealed partial class DonJEnemySpawner
         if (!Entity.Exists(player) || player.IsDead ||
             _justiceCaseState == null ||
             _justiceCaseState.Phase != JusticePhase.Incarcerated ||
-            _justiceCustodyTransferPending || _justiceCustodyResumePending ||
-            !JusticeCustodyHasReached(now, _justiceNextPoliceSuppressionAt))
+            _justiceCustodyTransferPending || _justiceCustodyResumePending)
         {
             return;
         }
 
-        _justiceNextPoliceSuppressionAt = JusticeCustodyFutureTime(
-            now,
-            JusticeCustodyPoliceSuppressionIntervalMs);
-        SetJusticeCustodyPoliceSuppression(true);
         if (_justiceCustodyGuardRetaliationActive)
         {
-            // Je réaffirme seulement un plancher : un wanted 3 à 5 n'est jamais
-            // diminué par la riposte interne des gardiens.
+            // Je n'autorise comme exception au wanted zéro que la riposte locale
+            // née après l'admission; son plancher revient sans réactiver le dispatch.
             SetJusticeWantedMinimum(JusticeCustodyGuardWantedMinimum);
         }
         else if (GetJusticeWantedLevelSafe() > 0)
@@ -5223,9 +6351,18 @@ public sealed partial class DonJEnemySpawner
                 "maintien de la suppression policière en détention");
             ClearJusticeWantedLevelOnce();
         }
+
+        if (!JusticeCustodyHasReached(now, _justiceNextPoliceSuppressionAt))
+        {
+            return;
+        }
+        _justiceNextPoliceSuppressionAt = JusticeCustodyFutureTime(
+            now,
+            JusticeCustodyPoliceSuppressionIntervalMs);
+        SetJusticeCustodyPoliceSuppression(true);
     }
 
-    private void SetJusticeCustodyPoliceSuppression(bool suppress)
+    private bool SetJusticeCustodyPoliceSuppression(bool suppress)
     {
         bool restorationWasTracked = _justicePoliceIgnoreApplied ||
             _justicePoliceDispatchDisabled ||
@@ -5236,9 +6373,10 @@ public sealed partial class DonJEnemySpawner
         {
             if (restorationWasTracked)
             {
-                SetJusticeCustodyPoliceSuppression(false);
+                return SetJusticeCustodyPoliceSuppression(false);
             }
-            return;
+            _justicePoliceSuppressionApplyConfirmed = false;
+            return true;
         }
         if (suppress && !CanJusticeMutateGlobalPoliceState())
         {
@@ -5248,17 +6386,19 @@ public sealed partial class DonJEnemySpawner
             {
                 SetJusticeCustodyPoliceSuppression(false);
             }
-            return;
+            _justicePoliceSuppressionApplyConfirmed = false;
+            return false;
         }
         if (suppress &&
             _justicePoliceIntegrationMode ==
                 JusticePoliceIntegrationMode.FreeroamBestEffort &&
             _justicePoliceIgnoreApplied && _justicePoliceDispatchDisabled &&
+            _justicePoliceSuppressionApplyConfirmed &&
             !_justicePoliceSuppressionRestorePending)
         {
             // Le mode par défaut applique une fois puis laisse les autres mods
             // reprendre la main; seul Force réaffirme les natives au cadenceur.
-            return;
+            return true;
         }
         if (suppress &&
             (!_justicePoliceIgnoreApplied || !_justicePoliceDispatchDisabled))
@@ -5277,8 +6417,9 @@ public sealed partial class DonJEnemySpawner
                 _justicePoliceDispatchDisabled = previousDispatchDisabled;
                 _justicePoliceSuppressionActive =
                     previousIgnoreApplied || previousDispatchDisabled;
+                _justicePoliceSuppressionApplyConfirmed = false;
                 JusticeMarkStateDirty();
-                return;
+                return false;
             }
         }
 
@@ -5301,7 +6442,10 @@ public sealed partial class DonJEnemySpawner
             {
                 LogWarning(
                     "Justice.Detention",
-                    "Restauration du statut policier à retenter : " + ex.GetType().Name + ".");
+                    (suppress
+                        ? "Application du statut policier à retenter : "
+                        : "Restauration du statut policier à retenter : ") +
+                    ex.GetType().Name + ".");
             }
         }
 
@@ -5323,7 +6467,10 @@ public sealed partial class DonJEnemySpawner
             {
                 LogWarning(
                     "Justice.Detention",
-                    "Restauration du dispatch policier à retenter : " + ex.GetType().Name + ".");
+                    (suppress
+                        ? "Application de la suspension du dispatch à retenter : "
+                        : "Restauration du dispatch policier à retenter : ") +
+                    ex.GetType().Name + ".");
             }
         }
 
@@ -5331,6 +6478,7 @@ public sealed partial class DonJEnemySpawner
             _justicePoliceIgnoreApplied || _justicePoliceDispatchDisabled;
         _justicePoliceSuppressionRestorePending = !suppress && _justicePoliceSuppressionActive;
         _justicePoliceSuppressionFailureLogged = failed;
+        _justicePoliceSuppressionApplyConfirmed = suppress && !failed;
         if (_justicePoliceSuppressionRestorePending)
         {
             _justiceNextPoliceSuppressionRestoreAt = JusticeCustodyFutureTime(
@@ -5355,7 +6503,7 @@ public sealed partial class DonJEnemySpawner
                 LogWarning(
                     "Justice.Detention",
                     "Nettoyage des jetons police d'un profil inactif à retenter.");
-                return;
+                return false;
             }
             JusticeMarkStateDirty();
             if (!PersistJusticeCriticalPrecommitRedundantly())
@@ -5368,12 +6516,15 @@ public sealed partial class DonJEnemySpawner
                     Game.GameTime,
                     JusticeCustodyPoliceSuppressionIntervalMs);
                 JusticeMarkStateDirty();
-                return;
+                return false;
             }
 
             _justiceNextPoliceSuppressionRestoreAt = 0;
             _justicePoliceSuppressionFailureLogged = false;
         }
+        return suppress
+            ? _justicePoliceSuppressionApplyConfirmed
+            : !_justicePoliceSuppressionRestorePending && !failed;
     }
 
     private void RetryJusticePoliceSuppressionRestore(Ped player, int now)
@@ -5393,12 +6544,23 @@ public sealed partial class DonJEnemySpawner
     private bool CanJusticeMutateGlobalPoliceState()
     {
         Ped player = Game.Player.Character;
-        return Entity.Exists(player) && !player.IsDead &&
-               _justiceCaseState != null &&
-               _justiceCaseState.Phase == JusticePhase.Incarcerated &&
-               !_justiceCustodyTransferPending && !_justiceCustodyResumePending &&
-               IsJusticeCustodyPlayerIdentityCompatible(player) &&
-               !IsJusticeCustodyRuntimeSuspended(player);
+        if (!Entity.Exists(player) || player.IsDead || _justiceCaseState == null ||
+            !IsJusticeCustodyPlayerIdentityCompatible(player) ||
+            IsJusticeCustodyRuntimeSuspended(player))
+        {
+            return false;
+        }
+
+        bool stableCustody =
+            _justiceCaseState.Phase == JusticePhase.Incarcerated &&
+            !_justiceCustodyTransferPending && !_justiceCustodyResumePending;
+        bool protectedAdmission =
+            _justiceCustodyRuntimeActive &&
+            (_justiceCustodyTransferPending || _justiceCustodyResumePending) &&
+            _justiceCustodyAdmissionPositionEstablished &&
+            (_justiceCaseState.Phase == JusticePhase.Transporting ||
+             _justiceCaseState.Phase == JusticePhase.Incarcerated);
+        return stableCustody || protectedAdmission;
     }
 
     private string GetJusticePoliceIntegrationModeDisplay()
@@ -5913,7 +7075,9 @@ public sealed partial class DonJEnemySpawner
         _justiceLegalReleaseFinalizationSite = releaseSite;
         _justiceLegalReleaseSelectedWeaponHash = selectedWeaponToRestore;
         _justiceLegalReleaseWantedClearAttempted = false;
+        _justiceLegalReleaseWantedClearExecutionPending = false;
         _justiceLegalReleaseWeaponSelectionApplied = false;
+        ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
         _justiceNextLegalReleaseWantedClearAt = 0;
         JusticeMarkStateDirty();
         ResumeJusticeLegalReleaseFinalization(player, now);
@@ -5921,6 +7085,28 @@ public sealed partial class DonJEnemySpawner
 
     private bool ResumeJusticeLegalReleaseFinalization(Ped player, int now)
     {
+        if (IsJusticeCriticalBarrierPending(
+                JusticeLegalReleaseAcknowledgementBarrier))
+        {
+            // Je peux avoir le snapshot ACK sur le writer alors que la mémoire a
+            // été restaurée à true. Pour une mort policière sans cellule, je
+            // refais d'abord la preuve physique sous les latches encore durables.
+            bool pendingPoliceDeathNoCellRelease =
+                IsJusticePendingPoliceDeathNoCellLegalRelease();
+            if (pendingPoliceDeathNoCellRelease &&
+                !CompleteJusticeLegalReleasePhysicalProtection(
+                    player,
+                    true))
+            {
+                return false;
+            }
+            if (!CommitJusticeLegalReleaseFinalizationAcknowledgement(player))
+            {
+                return false;
+            }
+            return FinalizeJusticeLegalReleasePhysicalProtectionAfterAcknowledgement(
+                pendingPoliceDeathNoCellRelease);
+        }
         if (!_justiceLegalReleaseFinalizationPending)
         {
             return true;
@@ -5937,7 +7123,8 @@ public sealed partial class DonJEnemySpawner
 
         // Ce premier flush est volontaire même après un reload : il garantit que
         // le WAL de sortie et son snapshot sont durables avant la restitution.
-        if (!PersistJusticeLegalReleaseBarrier())
+        if (!PersistJusticeLegalReleaseBarrier(
+                JusticeLegalReleasePrepareBarrier))
         {
             return false;
         }
@@ -5948,6 +7135,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         if (_justiceCustodyWaitingForRespawn &&
+            !IsJusticeCustodyRespawnIdentityRebindConfirmedFor(player) &&
             (_justiceCustodyDeathRebindPending ||
              !IsJusticeCustodyPlayerIdentityCompatible(player)) &&
             !TryRebindJusticeCustodyIdentityAfterRespawn(player))
@@ -5981,13 +7169,22 @@ public sealed partial class DonJEnemySpawner
             _justiceOutsideCustodySinceAt = 0;
             CleanupJusticeCustodyEntitiesAndGroups();
             _justiceCustodyPlayerStateStored = false;
+            bool preserveResidualMissionFlagBypass =
+                _justiceCustodyResidualMissionFlagBypassArmed &&
+                _justiceCustodyResidualMissionFlagObservationDeadlineMs == 0L;
+            long preservedResidualMissionFlagDeadlineMs =
+                _justiceCustodyResidualMissionFlagObservationDeadlineMs;
             ResetJusticeCustodyPersistentFields();
             JusticePrepareLegalReleaseState();
+            RestoreJusticeCustodyResidualMissionFlagBypassForLegalRelease(
+                preserveResidualMissionFlagBypass,
+                preservedResidualMissionFlagDeadlineMs);
 
             // Le dossier libéré et la détention vide doivent être durables avant
             // la téléportation. En cas d'échec, le latch reste armé et le tick
             // suivant reprend exactement à ce palier.
-            if (!PersistJusticeLegalReleaseBarrier())
+            if (!PersistJusticeLegalReleaseBarrier(
+                    JusticeLegalReleaseCaseClearedBarrier))
             {
                 return false;
             }
@@ -6002,8 +7199,22 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
+        bool policeDeathNoCellRelease =
+            IsJusticePendingPoliceDeathNoCellLegalRelease();
         JusticeCustodyLayout layout = GetJusticeCustodyLayoutForSite(
             _justiceLegalReleaseFinalizationSite);
+        if (layout == null && policeDeathNoCellRelease)
+        {
+            // Je conserve le site None comme contrat XML des formalités sans
+            // cellule. Le DeathFront exact prouve toutefois un holding Mission Row dont je
+            // dois utiliser la sortie, sans fabriquer une détention persistée.
+            JusticeCustodySite holdingSite =
+                _justicePoliceDeathPreJudgmentHoldingSite ==
+                    JusticeCustodySite.Bolingbroke
+                    ? JusticeCustodySite.Bolingbroke
+                    : JusticeCustodySite.MissionRow;
+            layout = GetJusticeCustodyLayoutForSite(holdingSite);
+        }
         if (layout != null && IsInsideJusticeCustodyLayout(layout, player.Position))
         {
             if (!JusticeCustodyHasReached(now, _justiceNextReleaseTeleportAttemptAt))
@@ -6020,7 +7231,30 @@ public sealed partial class DonJEnemySpawner
             {
                 _activeInteriorSession = null;
                 ClearInteriorRenderingFocusSafe(player);
-                TeleportPlayerWithFadeSafe(player, layout.ReleasePosition, layout.ReleaseHeading);
+                if (policeDeathNoCellRelease)
+                {
+                    // Je garde le masque de mort comme unique propriétaire de l'image :
+                    // ce déplacement sans fondu ne peut pas réafficher le joueur
+                    // avant le wanted zéro et l'ACK durable.
+                    if (_justiceCustodyRespawnMaskNeedsRearm ||
+                        !HasJusticePreJudgmentHoldingProtectionForPlayer(player))
+                    {
+                        EnforceJusticePreJudgmentHoldingControlLock(player);
+                        return false;
+                    }
+                    releasedOutside = TryJusticeEmergencyTeleport(
+                        player,
+                        layout.ReleasePosition,
+                        layout.ReleaseHeading,
+                        false);
+                }
+                else
+                {
+                    TeleportPlayerWithFadeSafe(
+                        player,
+                        layout.ReleasePosition,
+                        layout.ReleaseHeading);
+                }
                 releasedOutside = IsJusticeTeleportVerified(player, layout.ReleasePosition, 8.0f);
             }
             catch (Exception ex)
@@ -6032,7 +7266,8 @@ public sealed partial class DonJEnemySpawner
                 releasedOutside = TryJusticeEmergencyTeleport(
                     player,
                     layout.ReleasePosition,
-                    layout.ReleaseHeading);
+                    layout.ReleaseHeading,
+                    !policeDeathNoCellRelease);
             }
 
             if (!releasedOutside)
@@ -6045,8 +7280,10 @@ public sealed partial class DonJEnemySpawner
                 _justiceNextReleaseTeleportAttemptAt = JusticeCustodyFutureTime(now, retryDelay);
                 bool timedOut = unchecked((uint)(now - _justiceReleaseTeleportStartedAt)) >=
                                 (uint)JusticeCustodyReleaseTeleportTimeoutMs;
-                if (!timedOut)
+                if (policeDeathNoCellRelease || !timedOut)
                 {
+                    // Je ne transforme jamais une sortie sans cellule après décès
+                    // policier en libération sur place dans l'enceinte.
                     return false;
                 }
 
@@ -6057,11 +7294,22 @@ public sealed partial class DonJEnemySpawner
                     "Justice.Liberation",
                     "Téléportation de sortie abandonnée après timeout; libération finalisée sans soft-lock.");
             }
+            else if (policeDeathNoCellRelease)
+            {
+                _justicePoliceDeathNoCellReleaseExitApplied = true;
+                ReassertJusticeCustodyRespawnTransferMask();
+                EnforceJusticePreJudgmentHoldingControlLock(player);
+                if (_justiceCustodyRespawnMaskNeedsRearm)
+                {
+                    return false;
+                }
+            }
         }
 
         // Je n'acquitte jamais la sortie tant qu'un téléporteur ou une ancienne
         // sauvegarde laisse encore le joueur invincible.
-        if (!EnsureJusticePlayerIsMortal(player))
+        if (!policeDeathNoCellRelease &&
+            !EnsureJusticePlayerIsMortal(player))
         {
             _justiceNextReleaseTeleportAttemptAt = JusticeCustodyFutureTime(
                 now,
@@ -6081,16 +7329,36 @@ public sealed partial class DonJEnemySpawner
             // WAL : elle ne peut ni forcer l'arme chaque frame, ni effacer les
             // étoiles d'un nouveau crime commis après la sortie.
             _justiceLegalReleaseWantedClearAttempted = true;
+            _justiceLegalReleaseWantedClearExecutionPending = true;
             JusticeMarkStateDirty();
-            if (!PersistJusticeLegalReleaseBarrier())
+            if (!PersistJusticeLegalReleaseBarrier(
+                    JusticeLegalReleaseWantedPreparedBarrier))
             {
-                _justiceLegalReleaseWantedClearAttempted = false;
-                JusticeMarkStateDirty();
                 _justiceNextLegalReleaseWantedClearAt =
                     JusticeCustodyFutureTime(now, JusticeCustodyFineCashReadRetryMs);
                 return false;
             }
+        }
 
+        bool mustApplyWantedClearInThisSession =
+            _justiceLegalReleaseWantedClearExecutionPending ||
+            policeDeathNoCellRelease;
+        if (mustApplyWantedClearInThisSession)
+        {
+            if (!JusticeCustodyHasReached(now, _justiceNextLegalReleaseWantedClearAt))
+            {
+                return false;
+            }
+            if (policeDeathNoCellRelease &&
+                (!_justicePoliceDeathNoCellReleaseExitApplied ||
+                 _justiceCustodyRespawnMaskNeedsRearm ||
+                 !HasJusticePreJudgmentHoldingProtectionForPlayer(player)))
+            {
+                // Je n'autorise le retry wanted après reload que sous le même
+                // masque, la même identité et la même protection physique.
+                EnforceJusticePreJudgmentHoldingControlLock(player);
+                return false;
+            }
             if (!_justiceLegalReleaseWeaponSelectionApplied)
             {
                 try
@@ -6114,6 +7382,17 @@ public sealed partial class DonJEnemySpawner
                 "libération judiciaire légitime");
             JusticeWantedClearResult clearResult =
                 ClearJusticeWantedLevelOnceDetailed();
+            _justiceLegalReleaseWantedClearExecutionPending = false;
+            if (policeDeathNoCellRelease &&
+                clearResult != JusticeWantedClearResult.Succeeded)
+            {
+                _justiceNextLegalReleaseWantedClearAt =
+                    JusticeCustodyFutureTime(now, JusticeCustodyFineCashReadRetryMs);
+                LogWarning(
+                    "Justice.Liberation",
+                    "Wanted GTA non confirmé à zéro pendant la sortie de mort policière; maintien protégé et nouvel essai.");
+                return false;
+            }
             if (clearResult == JusticeWantedClearResult.Rejected)
             {
                 LogWarning(
@@ -6130,7 +7409,20 @@ public sealed partial class DonJEnemySpawner
         _justiceNextLegalReleaseWantedClearAt = 0;
         _justiceLegalReleaseWeaponSelectionApplied = false;
 
-        if (!CommitJusticeLegalReleaseFinalizationAcknowledgement())
+        if (policeDeathNoCellRelease &&
+            !CompleteJusticeLegalReleasePhysicalProtection(
+                player,
+                true))
+        {
+            return false;
+        }
+
+        if (!CommitJusticeLegalReleaseFinalizationAcknowledgement(player))
+        {
+            return false;
+        }
+        if (!FinalizeJusticeLegalReleasePhysicalProtectionAfterAcknowledgement(
+                policeDeathNoCellRelease))
         {
             return false;
         }
@@ -6162,34 +7454,763 @@ public sealed partial class DonJEnemySpawner
 
     private bool PersistJusticeLegalReleaseBarrier()
     {
-        JusticeMarkStateDirty();
-        return PersistJusticeCriticalPrecommitRedundantly();
+        return PersistJusticeLegalReleaseBarrier(
+            JusticeLegalReleasePrepareBarrier);
     }
 
-    private bool CommitJusticeLegalReleaseFinalizationAcknowledgement()
+    private bool PersistJusticeLegalReleaseBarrier(string caller)
     {
+        JusticeMarkStateDirty();
+        if (_justiceCriticalBarrierRevision > 0L &&
+            IsJusticeLegalReleaseBarrierCaller(_justiceCriticalBarrierCaller) &&
+            !string.Equals(
+                _justiceCriticalBarrierCaller,
+                JusticeLegalReleaseAcknowledgementBarrier,
+                StringComparison.Ordinal))
+        {
+            // Je fais reprendre chaque tentative par Prepare. Si un palier
+            // ultérieur attend le writer, je termine ce caller au lieu de recréer le palier
+            // initial et de boucler entre deux snapshots incompatibles.
+            bool completedPreviousStage =
+                PersistJusticeCriticalPrecommitRedundantly(
+                    _justiceCriticalBarrierCaller);
+            return completedPreviousStage &&
+                !string.Equals(
+                    caller,
+                    JusticeLegalReleaseAcknowledgementBarrier,
+                    StringComparison.Ordinal);
+        }
+
+        return PersistJusticeCriticalPrecommitRedundantly(caller);
+    }
+
+    private static bool IsJusticeLegalReleaseBarrierCaller(string caller)
+    {
+        return !string.IsNullOrWhiteSpace(caller) &&
+            caller.StartsWith(
+                JusticeLegalReleaseBarrierPrefix,
+                StringComparison.Ordinal);
+    }
+
+    private bool CommitJusticeLegalReleaseFinalizationAcknowledgement(
+        Ped releasePlayer)
+    {
+        bool completesPoliceDeathNoCellRelease =
+            IsJusticePendingPoliceDeathNoCellLegalRelease();
+        if (completesPoliceDeathNoCellRelease)
+        {
+            JusticeCustodyLayout releaseLayout =
+                GetJusticeCustodyLayoutForSite(
+                    _justicePoliceDeathPreJudgmentHoldingSite);
+            if (!_justicePoliceDeathNoCellReleaseExitApplied ||
+                !_justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement ||
+                releaseLayout == null || !Entity.Exists(releasePlayer) ||
+                releasePlayer.IsDead ||
+                !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(
+                    releasePlayer) ||
+                !IsJusticeTeleportVerified(
+                    releasePlayer,
+                    releaseLayout.ReleasePosition,
+                    8.0f))
+            {
+                // Je ne laisse jamais une preuve physique devenue obsolète
+                // survivre jusqu'au prochain tick : je reprends sous noir et
+                // protection avant de conserver les deux latches durables.
+                ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                    releasePlayer,
+                    GetJusticeRawGameTimeSafe());
+                return false;
+            }
+
+            bool residualArrestActive;
+            if (!TryGetJusticePlayerBeingArrestedSafe(
+                    out residualArrestActive) || residualArrestActive)
+            {
+                // Je garde les deux latches durables tant que GTA n'a pas
+                // explicitement abaissé son front BUSTED. Un reload reprend alors
+                // la même sortie au lieu de recréer une arrestation acquittée.
+                ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                    releasePlayer,
+                    GetJusticeRawGameTimeSafe());
+                _justiceNextLegalReleaseWantedClearAt =
+                    JusticeCustodyFutureTime(
+                        GetJusticeRawGameTimeSafe(),
+                        JusticeCustodyFineCashReadRetryMs);
+                return false;
+            }
+
+            // Je revérifie zéro juste avant le snapshot ACK, dans le même tick que
+            // la restitution physique. Si le writer refuse, je remasque aussitôt.
+            SuppressJusticeRecognitionWantedLoss(
+                "acquittement final de mort policière sans cellule");
+            if (ClearJusticeWantedLevelOnceDetailed() !=
+                    JusticeWantedClearResult.Succeeded)
+            {
+                ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                    releasePlayer,
+                    GetJusticeRawGameTimeSafe());
+                _justiceNextLegalReleaseWantedClearAt =
+                    JusticeCustodyFutureTime(
+                        GetJusticeRawGameTimeSafe(),
+                        JusticeCustodyFineCashReadRetryMs);
+                return false;
+            }
+        }
+
+        EnsureJusticePlayerProfilesInitialized();
+        JusticePlayerProfileState activeProfile =
+            IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot) &&
+            _justiceActivePlayerProfileSlot < _justicePlayerProfiles.Length
+                ? _justicePlayerProfiles[_justiceActivePlayerProfileSlot]
+                : null;
+
+        if (IsJusticeCriticalBarrierPending(
+                JusticeLegalReleaseAcknowledgementBarrier))
+        {
+            if (!PersistJusticeLegalReleaseBarrier(
+                    JusticeLegalReleaseAcknowledgementBarrier))
+            {
+                if (completesPoliceDeathNoCellRelease)
+                {
+                    ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                        releasePlayer,
+                        GetJusticeRawGameTimeSafe());
+                }
+                return false;
+            }
+
+            // Je n'aligne les caches restaurés à true qu'après la confirmation du
+            // snapshot false/false; la preuve physique a été refaite juste avant.
+            ApplyJusticeLegalReleaseAcknowledgedState(
+                completesPoliceDeathNoCellRelease,
+                activeProfile);
+            return true;
+        }
+
         JusticeCustodySite completedSite = _justiceLegalReleaseFinalizationSite;
         int completedWeapon = _justiceLegalReleaseSelectedWeaponHash;
         bool completedWantedClearAttempted =
             _justiceLegalReleaseWantedClearAttempted;
-        _justiceLegalReleaseFinalizationPending = false;
-        _justiceLegalReleaseFinalizationSite = JusticeCustodySite.None;
-        _justiceLegalReleaseSelectedWeaponHash = JusticeUnarmedHash;
-        _justiceLegalReleaseWantedClearAttempted = false;
-        if (PersistJusticeLegalReleaseBarrier())
+        bool profilePendingLegalRelease = activeProfile != null &&
+            activeProfile.PendingLegalReleaseFinalization;
+        int profilePendingLegalReleaseSite = activeProfile == null
+            ? 0
+            : activeProfile.PendingLegalReleaseSite;
+        int profilePendingLegalReleaseWeapon = activeProfile == null
+            ? 0
+            : activeProfile.PendingLegalReleaseSelectedWeapon;
+        bool profilePendingDeath = activeProfile != null &&
+            activeProfile.PendingDeathCapture;
+        int profilePendingDeathSlot = activeProfile == null
+            ? -1
+            : activeProfile.PendingDeathCapturePlayerSlot;
+        int profilePendingDeathModel = activeProfile == null
+            ? 0
+            : activeProfile.PendingDeathCapturePlayerModel;
+        int completedDeathSlot = _justiceSuspendedPursuitDeathPlayerSlot;
+        int completedDeathModel = _justiceSuspendedPursuitDeathPlayerModelHash;
+
+        ApplyJusticeLegalReleaseAcknowledgedState(
+            completesPoliceDeathNoCellRelease,
+            activeProfile);
+        if (PersistJusticeLegalReleaseBarrier(
+                JusticeLegalReleaseAcknowledgementBarrier))
         {
             return true;
         }
 
-        // Le XML contient encore le latch=true. Je le restaure aussi en mémoire
-        // afin que le tick répète uniquement les effets de sortie idempotents.
+        // Je restaure ensemble le runtime et le cache de profil quand le XML
+        // durable contient encore les deux latches à true; le tick suivant peut
+        // ainsi reprendre le même owner exact.
         _justiceLegalReleaseFinalizationPending = true;
         _justiceLegalReleaseFinalizationSite = completedSite;
         _justiceLegalReleaseSelectedWeaponHash = completedWeapon;
         _justiceLegalReleaseWantedClearAttempted =
             completedWantedClearAttempted;
+        if (completesPoliceDeathNoCellRelease)
+        {
+            _justicePursuitDeathObservedDuringSuspension = true;
+            _justiceSuspendedPursuitDeathPlayerSlot = completedDeathSlot;
+            _justiceSuspendedPursuitDeathPlayerModelHash = completedDeathModel;
+        }
+        if (activeProfile != null)
+        {
+            activeProfile.PendingLegalReleaseFinalization =
+                profilePendingLegalRelease;
+            activeProfile.PendingLegalReleaseSite = profilePendingLegalReleaseSite;
+            activeProfile.PendingLegalReleaseSelectedWeapon =
+                profilePendingLegalReleaseWeapon;
+            activeProfile.PendingDeathCapture = profilePendingDeath;
+            activeProfile.PendingDeathCapturePlayerSlot = profilePendingDeathSlot;
+            activeProfile.PendingDeathCapturePlayerModel = profilePendingDeathModel;
+        }
         JusticeMarkStateDirty();
+        if (completesPoliceDeathNoCellRelease)
+        {
+            // Je replace le joueur sous la même protection dès ce tick : le
+            // snapshot durable contient encore LegalRelease+DeathFront à true.
+            ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                releasePlayer,
+                GetJusticeRawGameTimeSafe());
+        }
         return false;
+    }
+
+    private void ApplyJusticeLegalReleaseAcknowledgedState(
+        bool clearPoliceDeath,
+        JusticePlayerProfileState activeProfile)
+    {
+        _justiceLegalReleaseFinalizationPending = false;
+        _justiceLegalReleaseFinalizationSite = JusticeCustodySite.None;
+        _justiceLegalReleaseSelectedWeaponHash = JusticeUnarmedHash;
+        _justiceLegalReleaseWantedClearAttempted = false;
+        if (clearPoliceDeath)
+        {
+            _justicePursuitDeathObservedDuringSuspension = false;
+            _justiceSuspendedPursuitDeathPlayerSlot = -1;
+            _justiceSuspendedPursuitDeathPlayerModelHash = 0;
+        }
+        if (activeProfile != null)
+        {
+            activeProfile.PendingLegalReleaseFinalization = false;
+            activeProfile.PendingLegalReleaseSite = 0;
+            activeProfile.PendingLegalReleaseSelectedWeapon = 0;
+            if (clearPoliceDeath)
+            {
+                activeProfile.PendingDeathCapture = false;
+                activeProfile.PendingDeathCapturePlayerSlot = -1;
+                activeProfile.PendingDeathCapturePlayerModel = 0;
+            }
+        }
+    }
+
+    private bool CompleteJusticeLegalReleasePhysicalProtection(
+        Ped player,
+        bool completedPoliceDeathNoCellRelease)
+    {
+        if (!completedPoliceDeathNoCellRelease)
+        {
+            return true;
+        }
+        if (_justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement)
+        {
+            // Je refuse de réutiliser une frontière mortelle qui aurait
+            // survécu à un appel précédent sans son ACK durable.
+            ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                player,
+                GetJusticeRawGameTimeSafe());
+            return false;
+        }
+
+        if (!_justicePoliceDeathNoCellReleaseProtectionRestorePending)
+        {
+            // Je n'arme cette fenêtre qu'une fois. LegalRelease et DeathFront
+            // restent vrais sur disque pendant la stabilité wanted et le FadeIn.
+            _justicePoliceDeathNoCellReleaseProtectionRestorePending = true;
+            _justicePoliceDeathNoCellReleaseFadeInRequested = false;
+            _justicePoliceDeathNoCellReleaseWantedStabilityStarted = false;
+            _justicePoliceDeathNoCellReleaseWantedStableSinceAt = 0;
+            _justiceNextPoliceDeathNoCellReleaseWantedObservationAt = 0;
+            _justicePoliceDeathRespawnMaskIntentPending = true;
+        }
+        return TryCompleteJusticePoliceDeathNoCellReleaseProtectionRestore(
+            player,
+            GetJusticeRawGameTimeSafe());
+    }
+
+    private bool FinalizeJusticeLegalReleasePhysicalProtectionAfterAcknowledgement(
+        bool completedPoliceDeathNoCellRelease)
+    {
+        _justiceCustodyResidualMissionFlagBypassArmed = false;
+        _justiceCustodyResidualMissionFlagObservationDeadlineMs = 0L;
+        _justiceLegalReleaseWantedClearExecutionPending = false;
+        _justiceLegalReleaseWeaponSelectionApplied = false;
+        if (!completedPoliceDeathNoCellRelease)
+        {
+            ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
+            return true;
+        }
+
+        if (!_justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement)
+        {
+            return false;
+        }
+
+        ResetJusticePoliceDeathPreJudgmentHoldingState();
+        ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
+        _justicePoliceDeathRespawnMaskIntentPending = false;
+        _justiceReleaseTeleportStartedAt = 0;
+        _justiceNextReleaseTeleportAttemptAt = 0;
+        _justiceReleaseTeleportFailureCount = 0;
+        _justiceNextLegalReleaseWantedClearAt = 0;
+        ShowStatus(
+            "Justice : arrestation acquittée, dossier actif clos.",
+            5200);
+        LogInfo(
+            "Justice.Liberation",
+            "Sortie sans cellule acquittée après stabilité wanted et FadeIn strict.");
+        return true;
+    }
+
+    private void ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+        Ped player,
+        int now)
+    {
+        _justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement = false;
+        JusticeCustodyLayout layout = GetJusticeCustodyLayoutForSite(
+            _justicePoliceDeathPreJudgmentHoldingSite);
+        if (layout != null && Entity.Exists(player) && !player.IsDead)
+        {
+            EnsureJusticePreJudgmentHoldingStreamingState(
+                player,
+                layout.ReleasePosition,
+                layout.ReleaseHeading);
+        }
+        RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+    }
+
+    private void MaintainJusticePoliceDeathNoCellReleaseProtectionRestore(
+        Ped player,
+        int now)
+    {
+        if (!_justicePoliceDeathNoCellReleaseProtectionRestorePending)
+        {
+            return;
+        }
+        if (_justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement)
+        {
+            // Je ne laisse jamais la frontière mortelle survivre au même appel
+            // Resume qui devait écrire l'ACK.
+            ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                player,
+                now);
+            return;
+        }
+        if (HasJusticePoliceDeathPreJudgmentHoldingChangedCanonicalPlayer(player))
+        {
+            ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
+            _justicePoliceDeathRespawnMaskIntentPending = false;
+            ResetJusticePoliceDeathPreJudgmentHoldingState();
+            if (_justiceCustodyRespawnTransferPending ||
+                _justiceCustodyRespawnRestorePending)
+            {
+                TryRestoreJusticeCustodyRespawnTransferMask();
+            }
+            return;
+        }
+
+        if ((_justiceRuntimeSuspendedCached &&
+             !_justiceRuntimeSuspendedByMissionFlagOnlyCached) ||
+            _justiceProfileContextBlocked ||
+            _justiceProfileSelectionPending ||
+            _justiceProfileSwitchPersistencePending ||
+            _justiceBackupRepairPending)
+        {
+            if (_justicePoliceDeathNoCellReleaseFadeInRequested)
+            {
+                RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+            }
+            else
+            {
+                ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+                EnforceJusticePreJudgmentHoldingControlLock(player);
+            }
+            return;
+        }
+
+        JusticeCustodyLayout layout = GetJusticeCustodyLayoutForSite(
+            _justicePoliceDeathPreJudgmentHoldingSite);
+        if (layout == null || !Entity.Exists(player) || player.IsDead ||
+            !_justicePoliceDeathNoCellReleaseExitApplied ||
+            !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player) ||
+            !IsJusticeTeleportVerified(player, layout.ReleasePosition, 8.0f) ||
+            !HasJusticePreJudgmentHoldingProtectionForPlayer(player))
+        {
+            if (_justicePoliceDeathNoCellReleaseFadeInRequested)
+            {
+                ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                    player,
+                    now);
+            }
+            else
+            {
+                EnforceJusticePreJudgmentHoldingControlLock(player);
+            }
+            return;
+        }
+
+        if (!_justicePoliceDeathNoCellReleaseFadeInRequested)
+        {
+            _justiceCustodyRespawnTransferPending = true;
+            if (!IsJusticeCustodyRespawnTransferMaskActive())
+            {
+                _justiceCustodyRespawnRestorePending = false;
+                ReassertJusticeCustodyRespawnTransferMask();
+                ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+            }
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return;
+        }
+
+        bool residualArrestActive;
+        int wantedDuringFade;
+        if (!TryGetJusticePlayerBeingArrestedSafe(out residualArrestActive) ||
+            residualArrestActive ||
+            !TryReadJusticeWantedLevel(out wantedDuringFade) ||
+            wantedDuringFade != 0)
+        {
+            RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+            return;
+        }
+        if (!IsJusticeCustodyRespawnTransferMaskFullyRestored())
+        {
+            if (!IsJusticeCustodyRespawnTransferMaskRestoring())
+            {
+                RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+                return;
+            }
+        }
+
+        // Je garde le joueur gelé et invincible même lorsque FADED_IN est déjà
+        // vrai; seul Resume enchaînera libération physique et ACK dans ce tick.
+        EnforceJusticePreJudgmentHoldingControlLock(player);
+    }
+
+    private bool TryCompleteJusticePoliceDeathNoCellReleaseProtectionRestore(
+        Ped player,
+        int now)
+    {
+        if (_justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement)
+        {
+            ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                player,
+                now);
+            return false;
+        }
+        if (!_justicePoliceDeathNoCellReleaseProtectionRestorePending)
+        {
+            return true;
+        }
+
+        if (HasJusticePoliceDeathPreJudgmentHoldingChangedCanonicalPlayer(player))
+        {
+            // Je ne touche jamais au wanted du héros entrant. Je lui rends
+            // seulement l'écran et abandonne l'owner physique de l'ancien ped.
+            ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
+            _justicePoliceDeathRespawnMaskIntentPending = false;
+            ResetJusticePoliceDeathPreJudgmentHoldingState();
+            if (_justiceCustodyRespawnTransferPending ||
+                _justiceCustodyRespawnRestorePending)
+            {
+                TryRestoreJusticeCustodyRespawnTransferMask();
+            }
+            return false;
+        }
+
+        if (_justiceRuntimeSuspendedCached &&
+            !_justiceRuntimeSuspendedByMissionFlagOnlyCached)
+        {
+            // Je ne termine jamais la restitution pendant une pause, un
+            // chargement ou une cinématique. Une vraie bascule a été traitée
+            // juste au-dessus sans toucher au wanted du héros entrant.
+            if (_justicePoliceDeathNoCellReleaseFadeInRequested)
+            {
+                RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+            }
+            else
+            {
+                ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+                EnforceJusticePreJudgmentHoldingControlLock(player);
+            }
+            return false;
+        }
+
+        JusticeCustodyLayout layout = GetJusticeCustodyLayoutForSite(
+            _justicePoliceDeathPreJudgmentHoldingSite);
+        bool compatibleSource = _justicePreJudgmentHoldingSource ==
+                JusticePreJudgmentHoldingSource.DurablePoliceDeath ||
+            _justicePreJudgmentHoldingSource ==
+                JusticePreJudgmentHoldingSource.Captured;
+        if (!_justicePoliceDeathNoCellReleaseExitApplied ||
+            !compatibleSource || layout == null ||
+            !Entity.Exists(player) || player.IsDead ||
+            !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player) ||
+            !IsJusticeTeleportVerified(player, layout.ReleasePosition, 8.0f))
+        {
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+            return false;
+        }
+        if (!HasJusticePreJudgmentHoldingProtectionForPlayer(player) &&
+            (!EnsureJusticePreJudgmentHoldingStreamingState(
+                 player,
+                 layout.ReleasePosition,
+                 layout.ReleaseHeading) ||
+             !HasJusticePreJudgmentHoldingProtectionForPlayer(player)))
+        {
+            // Je réacquiers aussi la protection si une restauration physique
+            // partielle l'a perdue avant que GTA confirme l'état mortel.
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+            return false;
+        }
+
+        bool residualArrestActive;
+        if (!TryGetJusticePlayerBeingArrestedSafe(
+                out residualArrestActive) || residualArrestActive)
+        {
+            // Je ne rends jamais l'écran si GTA réarme BUSTED avant l'ACK. Le
+            // même owner reste protégé et recommence toute sa preuve de sûreté.
+            if (_justicePoliceDeathNoCellReleaseFadeInRequested)
+            {
+                RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+            }
+            else
+            {
+                ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+                EnforceJusticePreJudgmentHoldingControlLock(player);
+            }
+            return false;
+        }
+
+        if (_justicePoliceDeathNoCellReleaseFadeInRequested)
+        {
+            return TryFinishJusticePoliceDeathNoCellReleaseFadeIn(
+                player,
+                layout,
+                now);
+        }
+
+        _justiceCustodyRespawnTransferPending = true;
+        bool maskActive = IsJusticeCustodyRespawnTransferMaskActive();
+        _justiceCustodyRespawnMaskNeedsRearm = !maskActive;
+        if (!maskActive)
+        {
+            // Je réarme le noir avant toute écriture wanted si GTA a rouvert
+            // l'écran entre l'ACK et la restitution physique.
+            _justiceCustodyRespawnRestorePending = false;
+            ReassertJusticeCustodyRespawnTransferMask();
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+            return false;
+        }
+
+        if (!JusticeCustodyHasReached(
+                now,
+                _justiceNextPoliceDeathNoCellReleaseWantedObservationAt))
+        {
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+
+        int wantedBeforeClear;
+        bool wantedBeforeClearKnown = TryReadJusticeWantedLevel(
+            out wantedBeforeClear);
+        if (_justicePoliceDeathNoCellReleaseWantedStabilityStarted &&
+            (!wantedBeforeClearKnown || wantedBeforeClear != 0))
+        {
+            ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+        }
+
+        SuppressJusticeRecognitionWantedLoss(
+            "restitution protégée après mort policière sans cellule");
+        JusticeWantedClearResult clearResult =
+            ClearJusticeWantedLevelOnceDetailed();
+        int wantedAfterClear;
+        if (clearResult != JusticeWantedClearResult.Succeeded ||
+            !TryReadJusticeWantedLevel(out wantedAfterClear) ||
+            wantedAfterClear != 0)
+        {
+            ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+
+        if (!_justicePoliceDeathNoCellReleaseWantedStabilityStarted)
+        {
+            _justicePoliceDeathNoCellReleaseWantedStabilityStarted = true;
+            _justicePoliceDeathNoCellReleaseWantedStableSinceAt = now;
+            _justiceNextPoliceDeathNoCellReleaseWantedObservationAt =
+                JusticeCustodyFutureTime(
+                    now,
+                    JusticeCustodyAdmissionWantedObservationMs);
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+
+        uint stableFor = unchecked((uint)(now -
+            _justicePoliceDeathNoCellReleaseWantedStableSinceAt));
+        if (stableFor < (uint)JusticeCustodyAdmissionWantedStabilityMs)
+        {
+            int remaining = JusticeCustodyAdmissionWantedStabilityMs -
+                (int)stableFor;
+            _justiceNextPoliceDeathNoCellReleaseWantedObservationAt =
+                JusticeCustodyFutureTime(
+                    now,
+                    Math.Min(
+                        JusticeCustodyAdmissionWantedObservationMs,
+                        remaining));
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+
+        if (!TryRestoreJusticeCustodyRespawnTransferMask())
+        {
+            // Je recommence une fenêtre complète après chaque FadeIn refusé :
+            // une étoile moteur apparue pendant l'attente ne sera jamais cachée.
+            ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+        _justicePoliceDeathNoCellReleaseFadeInRequested = true;
+        return TryFinishJusticePoliceDeathNoCellReleaseFadeIn(
+            player,
+            layout,
+            now);
+    }
+
+    private bool TryFinishJusticePoliceDeathNoCellReleaseFadeIn(
+        Ped player,
+        JusticeCustodyLayout layout,
+        int now)
+    {
+        int wantedDuringFade;
+        bool wantedKnown = TryReadJusticeWantedLevel(out wantedDuringFade);
+        if (!wantedKnown || wantedDuringFade != 0)
+        {
+            // Je referme immédiatement l'image si GTA réarme le wanted pendant
+            // les 350 ms du fondu, puis je repars d'une seconde stable complète.
+            RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+            SuppressJusticeRecognitionWantedLoss(
+                "rebond wanted pendant le FadeIn sans cellule");
+            ClearJusticeWantedLevelOnceDetailed();
+            return false;
+        }
+
+        SuppressJusticeRecognitionWantedLoss(
+            "vérification finale du FadeIn sans cellule");
+        JusticeWantedClearResult clearResult =
+            ClearJusticeWantedLevelOnceDetailed();
+        int wantedAfterClear;
+        if (clearResult != JusticeWantedClearResult.Succeeded ||
+            !TryReadJusticeWantedLevel(out wantedAfterClear) ||
+            wantedAfterClear != 0)
+        {
+            RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+            return false;
+        }
+
+        if (!IsJusticeCustodyRespawnTransferMaskFullyRestored())
+        {
+            if (!IsJusticeCustodyRespawnTransferMaskRestoring())
+            {
+                // Je traite un fondu interrompu comme un refus : le joueur
+                // redevient noir et protégé avant une nouvelle fenêtre wanted.
+                RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+                return false;
+            }
+
+            EnforceJusticePreJudgmentHoldingControlLock(player);
+            return false;
+        }
+
+        if (!CompleteJusticePreJudgmentHoldingStreamingProtection(player))
+        {
+            // Je remasque dans le même tick si la restitution physique échoue
+            // après le début du fondu, puis je reprends toutes les preuves.
+            RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+            return false;
+        }
+
+        if (!EnsureJusticePlayerIsMortal(player) ||
+            !EnsureJusticePlayerMobilityCore(player))
+        {
+            EnsureJusticePreJudgmentHoldingStreamingState(
+                player,
+                layout.ReleasePosition,
+                layout.ReleaseHeading);
+            RearmJusticePoliceDeathNoCellReleaseMask(player, now);
+            return false;
+        }
+
+        bool residualArrestAfterRestore;
+        int wantedAfterRestore;
+        SuppressJusticeRecognitionWantedLoss(
+            "preuve physique finale avant acquittement sans cellule");
+        if (!TryGetJusticePlayerBeingArrestedSafe(
+                out residualArrestAfterRestore) ||
+            residualArrestAfterRestore ||
+            !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player) ||
+            !IsJusticeTeleportVerified(
+                player,
+                layout.ReleasePosition,
+                8.0f) ||
+            ClearJusticeWantedLevelOnceDetailed() !=
+                JusticeWantedClearResult.Succeeded ||
+            !TryReadJusticeWantedLevel(out wantedAfterRestore) ||
+            wantedAfterRestore != 0)
+        {
+            // Je réacquiers la protection avant de quitter ce tick : l'ACK et les
+            // deux marqueurs durables restent intacts pour la reprise suivante.
+            ReacquireJusticePoliceDeathNoCellReleaseProtectionAndRearm(
+                player,
+                now);
+            return false;
+        }
+
+        _justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement = true;
+        return true;
+    }
+
+    private void RearmJusticePoliceDeathNoCellReleaseMask(
+        Ped player,
+        int now)
+    {
+        _justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement = false;
+        _justicePoliceDeathNoCellReleaseFadeInRequested = false;
+        _justiceCustodyRespawnTransferPending = true;
+        _justiceCustodyRespawnRestorePending = false;
+        ReassertJusticeCustodyRespawnTransferMask();
+        ResetJusticePoliceDeathNoCellReleaseWantedStability(now);
+        EnforceJusticePreJudgmentHoldingControlLock(player);
+    }
+
+    private void ResetJusticePoliceDeathNoCellReleaseWantedStability(int now)
+    {
+        _justicePoliceDeathNoCellReleaseWantedStabilityStarted = false;
+        _justicePoliceDeathNoCellReleaseWantedStableSinceAt = 0;
+        _justiceNextPoliceDeathNoCellReleaseWantedObservationAt =
+            JusticeCustodyFutureTime(
+                now,
+                JusticeCustodyAdmissionWantedObservationMs);
+    }
+
+    private void ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState()
+    {
+        _justicePoliceDeathNoCellReleaseProtectionRestorePending = false;
+        _justicePoliceDeathNoCellReleaseFadeInRequested = false;
+        _justicePoliceDeathNoCellReleasePhysicalReadyForAcknowledgement = false;
+        _justicePoliceDeathNoCellReleaseWantedStabilityStarted = false;
+        _justicePoliceDeathNoCellReleaseWantedStableSinceAt = 0;
+        _justiceNextPoliceDeathNoCellReleaseWantedObservationAt = 0;
+        _justicePoliceDeathNoCellReleaseExitApplied = false;
+    }
+
+    private void RestoreJusticeCustodyResidualMissionFlagBypassForLegalRelease(
+        bool wasArmed,
+        long observationDeadlineMs)
+    {
+        if (!wasArmed || !_justiceLegalReleaseFinalizationPending)
+        {
+            return;
+        }
+
+        // Je transmets ce droit volatile uniquement à la transaction de sortie
+        // créée par la détention courante. Les resets, switches et arrêts qui
+        // n'appellent pas ce relais conservent le nettoyage fail-closed global.
+        _justiceCustodyResidualMissionFlagBypassArmed = true;
+        _justiceCustodyResidualMissionFlagObservationDeadlineMs =
+            observationDeadlineMs;
     }
 
     private string BuildJusticeReleaseFineStage()
@@ -6439,6 +8460,42 @@ public sealed partial class DonJEnemySpawner
         return true;
     }
 
+    private bool IsJusticeInventoryRemovalVerifiedForCurrentTransfer(Ped player)
+    {
+        return Entity.Exists(player) && _justiceCaseState != null &&
+            !string.IsNullOrWhiteSpace(_justiceCaseState.CustodyEpisodeId) &&
+            player.Handle == _justiceInventoryRemovalVerifiedPlayerHandle &&
+            GetJusticePedModelHashSafe(player) ==
+                _justiceInventoryRemovalVerifiedPlayerModelHash &&
+            string.Equals(
+                _justiceInventoryRemovalVerifiedEpisodeId,
+                _justiceCaseState.CustodyEpisodeId,
+                StringComparison.Ordinal);
+    }
+
+    private void ConfirmJusticeInventoryRemovalForCurrentTransfer(Ped player)
+    {
+        if (!Entity.Exists(player) || _justiceCaseState == null ||
+            string.IsNullOrWhiteSpace(_justiceCaseState.CustodyEpisodeId))
+        {
+            ResetJusticeInventoryRemovalRuntimeConfirmation();
+            return;
+        }
+
+        _justiceInventoryRemovalVerifiedPlayerHandle = player.Handle;
+        _justiceInventoryRemovalVerifiedPlayerModelHash =
+            GetJusticePedModelHashSafe(player);
+        _justiceInventoryRemovalVerifiedEpisodeId =
+            _justiceCaseState.CustodyEpisodeId;
+    }
+
+    private void ResetJusticeInventoryRemovalRuntimeConfirmation()
+    {
+        _justiceInventoryRemovalVerifiedPlayerHandle = 0;
+        _justiceInventoryRemovalVerifiedPlayerModelHash = 0;
+        _justiceInventoryRemovalVerifiedEpisodeId = string.Empty;
+    }
+
     private JusticeInventoryPreparationResult EnsureJusticeInventoryReadyForCustodyTransfer(
         Ped player,
         int now)
@@ -6468,12 +8525,24 @@ public sealed partial class DonJEnemySpawner
             _justiceInventoryRemoved &&
             ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot))
         {
-            // Après un reload, je réapplique le retrait idempotent avant le
-            // téléport. Une restitution provisoire d'OnAborted ne fuit pas en prison.
+            if (IsJusticeInventoryRemovalVerifiedForCurrentTransfer(player))
+            {
+                return JusticeInventoryPreparationResult.Ready;
+            }
+
+            // Je vérifie d'abord sans effet le nouveau ped ou le runtime rechargé.
+            // Je ne rappelle RemoveAll que si des armes sont réellement revenues.
+            if (VerifyJusticePlayerHasNoWeapons(player))
+            {
+                ConfirmJusticeInventoryRemovalForCurrentTransfer(player);
+                return JusticeInventoryPreparationResult.Ready;
+            }
+
             JusticeInventoryRemovalResult removalResult =
                 RemoveJusticePlayerWeaponsSafe(player);
             if (removalResult == JusticeInventoryRemovalResult.RemovedVerified)
             {
+                ConfirmJusticeInventoryRemovalForCurrentTransfer(player);
                 return JusticeInventoryPreparationResult.Ready;
             }
 
@@ -6558,6 +8627,7 @@ public sealed partial class DonJEnemySpawner
         _justiceInventoryRemoved = true;
         _justiceWeaponControlsLocked = false;
         _justiceInventoryRemovalFailureCount = 0;
+        ConfirmJusticeInventoryRemovalForCurrentTransfer(player);
         JusticeMarkStateDirty();
         return JusticeInventoryPreparationResult.Ready;
     }
@@ -6640,6 +8710,7 @@ public sealed partial class DonJEnemySpawner
         _justiceWeaponControlsLocked = false;
         _justiceInventoryRemovalFailureCount = 0;
         _justiceNextInventoryPersistenceRetryAt = 0;
+        ConfirmJusticeInventoryRemovalForCurrentTransfer(player);
         JusticeMarkStateDirty();
         LogInfo("Justice.Inventaire", "Snapshot persisté au retry, confiscation appliquée.");
         return JusticeInventoryPreparationResult.Ready;
@@ -7874,25 +9945,60 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
-    private void UpdateJusticeCustodyGuardRetaliation(Ped player, int now)
+    private void PrimeJusticeCustodyGuardDamageFrontsForAdmission(Ped player)
     {
-        if (_justiceCaseState == null || !_justiceCustodyRuntimeActive ||
-            (_justiceCaseState.Phase != JusticePhase.Incarcerated &&
-             _justiceCaseState.Phase != JusticePhase.Escaping) ||
-            !Entity.Exists(player) ||
-            !IsJusticeCustodyDeathIdentityCompatible(player))
+        if (!Entity.Exists(player))
         {
             return;
         }
 
-        if (player.IsDead)
+        int count = _justiceCustodyGuards == null
+            ? 0
+            : Math.Min(
+                JusticeCustodyMaximumGuardCount,
+                _justiceCustodyGuards.Count);
+        for (int index = 0; index < count; index++)
         {
-            // Je prends une dernière photo bornée des fronts garde vers joueur :
-            // le coup fatal peut tomber pendant les 175 ms séparant deux scans.
-            CaptureJusticeCustodyGuardDamageFrontsAtDeath(player);
-            // Je fige ensuite le tueur : un tiers valide reste une preuve
-            // négative, même si un garde avait aussi infligé des dégâts récents.
-            FreezeJusticeCustodyGuardDeathPenalty(player);
+            Ped guard = _justiceCustodyGuards[index];
+            if (!IsJusticeCustodyPedOwnershipValid(guard))
+            {
+                continue;
+            }
+
+            // Je consomme l'historique des deux directions sous écran noir. La
+            // baseline remise à false reconnaîtra ensuite le premier vrai coup.
+            SynchronizeJusticeDamagePair(guard, player);
+            SynchronizeJusticeDamagePair(player, guard);
+        }
+        FlushJusticeConsumedDamageFronts();
+        _justiceNextCustodyGuardRetaliationScanAt = JusticeCustodyFutureTime(
+            GetJusticeRawGameTimeSafe(),
+            JusticeCustodyGuardRetaliationScanMs);
+    }
+
+    private bool CanObserveJusticeCustodyGuardRetaliation(Ped player)
+    {
+        bool liveCustodyPhase = _justiceCaseState != null &&
+            (_justiceCaseState.Phase == JusticePhase.Incarcerated ||
+             _justiceCaseState.Phase == JusticePhase.Escaping);
+        return _justiceCaseState != null && _justiceCustodyRuntimeActive &&
+               liveCustodyPhase &&
+               !_justiceCustodyTransferPending && !_justiceCustodyResumePending &&
+               !_justiceCustodyWaitingForRespawn &&
+               !_justiceCustodyDeathRebindPending &&
+               !_justiceCustodyRespawnTransferPending &&
+               !_justiceCustodyRespawnRestorePending &&
+               (_justiceCaseState.Phase == JusticePhase.Escaping ||
+                _justiceCustodyContainmentEstablished) &&
+               Entity.Exists(player) && !player.IsDead &&
+               IsJusticeCustodyDeathIdentityCompatible(player) &&
+               JusticeCustodyCanMutateWorld(player);
+    }
+
+    private void UpdateJusticeCustodyGuardRetaliation(Ped player, int now)
+    {
+        if (!CanObserveJusticeCustodyGuardRetaliation(player))
+        {
             return;
         }
         if (!JusticeCustodyHasReached(
@@ -9899,6 +12005,7 @@ public sealed partial class DonJEnemySpawner
         _justicePoliceIgnoreApplied = false;
         _justicePoliceDispatchDisabled = false;
         _justicePoliceSuppressionActive = false;
+        _justicePoliceSuppressionApplyConfirmed = false;
         _justicePoliceSuppressionRestorePending = false;
         _justicePoliceSuppressionFailureLogged = false;
         _justiceNextPoliceSuppressionAt = 0;
@@ -10057,6 +12164,7 @@ public sealed partial class DonJEnemySpawner
         _justiceDeferredInventoryRestore = deferredInventoryRestore;
         _justiceCustodyWaitingForRespawn = waitingForRespawn;
         _justiceCustodyDeathRebindPending = deathRebindPending;
+        _justiceCustodyRespawnIdentityRebindConfirmed = false;
         _justiceCustodyGuardRetaliationActive = guardRetaliationActive;
         _justiceLegalReleaseWantedClearAttempted =
             legalReleaseWantedClearAttempted;
@@ -10130,6 +12238,9 @@ public sealed partial class DonJEnemySpawner
         _justicePoliceDispatchDisabled = policeDispatchDisabled;
         _justicePoliceSuppressionActive =
             policeSuppressionApplied || policeDispatchDisabled;
+        // Je traite les jetons comme preuve qu'une restauration pourra être faite.
+        // Après un chargement, je réapplique donc toujours les natives au runtime.
+        _justicePoliceSuppressionApplyConfirmed = false;
         _justicePoliceSuppressionRestorePending =
             _justicePoliceSuppressionActive &&
             (!savedActive ||
@@ -10832,7 +12943,9 @@ public sealed partial class DonJEnemySpawner
         return Math.Max(minimum, Math.Min(maximum, value));
     }
 
-    private void ResetJusticeCustodyPersistentFields(bool preserveDeferredRestore = true)
+    private void ResetJusticeCustodyPersistentFields(
+        bool preserveDeferredRestore = true,
+        bool preservePoliceDeathLegalReleaseProtection = false)
     {
         JusticeWeaponSnapshot deferredSnapshot = preserveDeferredRestore &&
             _justiceDeferredInventoryRestore
@@ -10859,25 +12972,51 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyTransferPending = false;
         _justiceCustodyResumePending = false;
         _justiceCustodyWaitingForRespawn = false;
-        if (_justiceCustodyRespawnTransferPending ||
-            _justiceCustodyRespawnRestorePending)
+        if (preservePoliceDeathLegalReleaseProtection)
         {
-            // Une amnistie, une libération ou l'arrêt du script ne doit jamais
-            // laisser GTA sous le fondu qui protégeait l'origine du respawn.
-            TryRestoreJusticeCustodyRespawnTransferMask();
+            // Je n'utilise cette option qu'après qualification exacte du
+            // DeathFront policier sans cellule. Je vide le snapshot de détention,
+            // mais garde le masque et l'owner physique jusqu'à l'ACK commun.
+            _justiceCustodyRespawnTransferPending = true;
+            _justiceCustodyRespawnRestorePending = false;
+            _justicePoliceDeathRespawnMaskIntentPending = true;
         }
-        if (!_justiceCustodyRespawnRestorePending)
+        else
         {
-            _justiceCustodyRespawnTransferPending = false;
-            _justiceCustodyRespawnMaskNeedsRearm = false;
+            if (_justiceCustodyRespawnTransferPending ||
+                _justiceCustodyRespawnRestorePending)
+            {
+                // Je ne laisse jamais une amnistie, une libération ou l'arrêt du
+                // script conserver le fondu qui protégeait l'origine du respawn.
+                TryRestoreJusticeCustodyRespawnTransferMask();
+            }
+            if (!_justiceCustodyRespawnRestorePending)
+            {
+                _justiceCustodyRespawnTransferPending = false;
+                _justiceCustodyRespawnMaskNeedsRearm = false;
+            }
+            _justicePoliceDeathRespawnMaskIntentPending = false;
         }
-        _justicePoliceDeathRespawnMaskIntentPending = false;
         ClearAllJusticeRepairArrestPreJudgmentHoldingIntents();
-        ResetJusticePoliceDeathPreJudgmentHoldingState();
+        if (!preservePoliceDeathLegalReleaseProtection)
+        {
+            ResetJusticePoliceDeathPreJudgmentHoldingState();
+        }
         ResetJusticeCapturePrecommitConfirmation();
         _justiceCustodyPersistenceOutageHoldingEstablished = false;
         _justiceCustodyContainmentEstablished = false;
+        _justiceCustodyAdmissionPositionEstablished = false;
+        _justiceCustodyAdmissionReturnToCell = false;
+        _justiceCustodyAdmissionWantedStabilityStarted = false;
+        _justiceCustodyAdmissionWantedStableSinceAt = 0;
+        _justiceCustodyAdmissionFadeInRequested = false;
+        _justicePoliceSuppressionApplyConfirmed = false;
+        // Je ferme le droit volatile lié au latch BUSTED avec la détention qui
+        // l'a créé : un changement de profil ne doit jamais pouvoir le réutiliser.
+        _justiceCustodyResidualMissionFlagBypassArmed = false;
+        _justiceCustodyResidualMissionFlagObservationDeadlineMs = 0L;
         _justiceCustodyDeathRebindPending = false;
+        _justiceCustodyRespawnIdentityRebindConfirmed = false;
         _justiceCustodyDeathStatePersistencePending = false;
         _justiceCustodyDeathPersistenceRevision = 0L;
         _justiceCustodyDeathPersistenceWriteFailures = 0L;
@@ -10910,6 +13049,7 @@ public sealed partial class DonJEnemySpawner
         _justiceInventoryCustodyState = JusticeInventoryCustodyState.None;
         _justiceInventoryCaptureFailureCount = 0;
         _justiceInventoryRemovalFailureCount = 0;
+        ResetJusticeInventoryRemovalRuntimeConfirmation();
         _justiceWeaponSnapshot = null;
         _justiceDeferredInventoryRestore = false;
         _justiceNextDeferredInventoryRestoreAt = 0;
@@ -10928,6 +13068,8 @@ public sealed partial class DonJEnemySpawner
         _justiceReleaseSelectedWeaponHash = JusticeUnarmedHash;
         _justiceLegalReleaseWantedClearAttempted =
             preserveLegalReleaseWantedClearAttempt;
+        _justiceLegalReleaseWantedClearExecutionPending = false;
+        ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
         _justiceAmnestyWantedClearAttempted =
             preserveAmnestyWantedClearAttempt;
 
@@ -10994,6 +13136,20 @@ public sealed partial class DonJEnemySpawner
             ResetJusticeCapturePrecommitConfirmation();
             _justiceCustodyPersistenceOutageHoldingEstablished = false;
             _justiceCustodyContainmentEstablished = false;
+            _justiceCustodyAdmissionPositionEstablished = false;
+            _justiceCustodyAdmissionReturnToCell = false;
+            _justiceCustodyAdmissionWantedStabilityStarted = false;
+            _justiceCustodyAdmissionWantedStableSinceAt = 0;
+            _justiceCustodyAdmissionFadeInRequested = false;
+            _justicePoliceSuppressionApplyConfirmed = false;
+            // Je détruis aussi ce droit lors d'un unload, même si l'arrêt partiel
+            // ne passe pas par le reset persistant d'une détention normale.
+            _justiceCustodyResidualMissionFlagBypassArmed = false;
+            _justiceCustodyResidualMissionFlagObservationDeadlineMs = 0L;
+            _justiceLegalReleaseWantedClearExecutionPending = false;
+            ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
+            _justiceCustodyRespawnIdentityRebindConfirmed = false;
+            ResetJusticeInventoryRemovalRuntimeConfirmation();
             ResetJusticeCustodyTransferRetryState();
         }
     }

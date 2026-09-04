@@ -307,14 +307,19 @@ public sealed class JusticeCustodyHardeningTests
         Assert.AreEqual(540, state.SentenceSeconds);
 
         string transfer = ExtractMethodBody(ReadCustodySource(), "CompleteJusticeCustodyTransfer");
+        string move = ExtractMethodBody(
+            ReadCustodySource(),
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback");
         AssertOrdered(
             transfer,
             "ShouldReturnCustodyTransferToCell",
             "transferPosition",
             "StoreJusticeCustodyPlayerState(player)",
-            "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)",
-            "IsJusticeTeleportVerified(player, transferPosition",
-            "TryJusticeEmergencyTeleport(");
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
+            "IsInsideJusticeCustodyLayout(layout, player.Position)",
+            "TrySecureJusticeCustodyAdmission(player, now)");
+        StringAssert.Contains(move, "TryJusticeEmergencyTeleport(");
+        Assert.IsFalse(move.Contains("DO_SCREEN_FADE_IN"));
         Assert.IsFalse(transfer.Contains("_justiceCaseState.SentenceSeconds ="));
     }
 
@@ -478,22 +483,160 @@ public sealed class JusticeCustodyHardeningTests
             "_justicePoliceSuppressionRestorePending");
     }
 
+#if DONJ_STUB_API
+    [TestMethod]
+    public void PoliceSuppression_FreeroamRetriesAfterAnAmbiguousNativeFailure()
+    {
+        StubRuntime.Reset();
+        try
+        {
+            Ped player = Game.Player.Character;
+            player.Handle = 101;
+            player.Model = new Model("player_zero");
+            player.IsDead = false;
+
+            object script = FormatterServices.GetUninitializedObject(ScriptType);
+            SetField(script, "_justiceCaseState", new JusticeCaseState
+            {
+                Enabled = true,
+                Phase = JusticePhase.Incarcerated,
+                CustodyEpisodeId = "custody:police-retry"
+            });
+            SetField(script, "_justiceActivePlayerProfileSlot", 0);
+            SetField(script, "_justiceCustodyPlayerSlot", 0);
+            SetField(script, "_justiceCustodyPlayerHandle", player.Handle);
+            SetField(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+            SetField(
+                script,
+                "_justicePoliceIntegrationMode",
+                JusticePoliceIntegrationMode.FreeroamBestEffort);
+
+            // Je reproduis l'état ambigu réel : les jetons de restauration sont
+            // durables, mais la première application native n'a pas été prouvée.
+            SetField(script, "_justicePoliceIgnoreApplied", true);
+            SetField(script, "_justicePoliceDispatchDisabled", true);
+            SetField(script, "_justicePoliceSuppressionActive", true);
+            SetField(script, "_justicePoliceSuppressionRestorePending", false);
+            SetField(script, "_justicePoliceSuppressionFailureLogged", true);
+            SetField(script, "_justicePoliceSuppressionApplyConfirmed", false);
+
+            StubRuntime.NativeCallHandler = (hash, arguments) => false;
+
+            object result = Invoke(
+                script,
+                "SetJusticeCustodyPoliceSuppression",
+                true);
+
+            Assert.AreEqual(true, result);
+            Assert.AreEqual(
+                1,
+                CountNativeCalls(ReadPrivateStaticField<ulong>(
+                    "JusticeNativeSetPoliceIgnorePlayer")));
+            Assert.AreEqual(
+                1,
+                CountNativeCalls(ReadPrivateStaticField<ulong>(
+                    "JusticeNativeSetDispatchCopsForPlayer")));
+            Assert.IsTrue(GetField<bool>(
+                script,
+                "_justicePoliceSuppressionApplyConfirmed"));
+            Assert.IsFalse(GetField<bool>(
+                script,
+                "_justicePoliceSuppressionFailureLogged"));
+        }
+        finally
+        {
+            StubRuntime.Reset();
+        }
+    }
+#endif
+
+    [TestMethod]
+    public void CustodyAdmission_DefersFadeInUntilPoliceAndGuardSafetyAreConfirmed()
+    {
+        string source = ReadCustodySource();
+        string transfer = ExtractMethodBody(
+            source,
+            "CompleteJusticeCustodyTransfer");
+        string admission = ExtractMethodBody(
+            source,
+            "TrySecureJusticeCustodyAdmission");
+        string fadeIn = ExtractMethodBody(
+            source,
+            "TryFinishJusticeCustodyAdmissionFadeIn");
+        string finalization = ExtractMethodBody(
+            source,
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn");
+        string move = ExtractMethodBody(
+            source,
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback");
+
+        Assert.IsFalse(move.Contains("DO_SCREEN_FADE_IN"));
+        Assert.IsFalse(move.Contains("TeleportPlayerWithFadeSafe("));
+        AssertOrdered(
+            transfer,
+            "ReassertJusticeCustodyRespawnTransferMask()",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
+            "TrySecureJusticeCustodyAdmission(player, now)",
+            "EnsureJusticeCustodyRelationshipGroups()",
+            "EnsureJusticeCustodyScene(now)",
+            "PrimeJusticeCustodyGuardDamageFrontsForAdmission(player)",
+            "PersistJusticeCriticalPrecommitRedundantly(",
+            "RestoreJusticeCustodyRespawnTransferMask()",
+            "_justiceCustodyAdmissionFadeInRequested = true",
+            "TryFinishJusticeCustodyAdmissionFadeIn(",
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn(layout, now)");
+        AssertOrdered(
+            fadeIn,
+            "ClearJusticeWantedLevelOnceDetailed()",
+            "SetJusticeCustodyPoliceSuppression(true)",
+            "IsJusticeCustodyRespawnTransferMaskFullyRestored()",
+            "CompleteJusticePreJudgmentHoldingStreamingProtection(player)",
+            "EnsureJusticeCustodyPlayerMobility(player)",
+            "return true");
+        AssertOrdered(
+            finalization,
+            "_justiceCustodyRespawnTransferPending = false",
+            "ClearPendingJusticeDeathCapture()",
+            "ResetJusticePoliceDeathPreJudgmentHoldingState()",
+            "_justiceCustodyTransferPending = false",
+            "_justiceCustodyLastTickAt = now");
+        AssertOrdered(
+            admission,
+            "ClearJusticeWantedLevelOnceDetailed()",
+            "SetJusticeCustodyPoliceSuppression(true)",
+            "return true");
+        Assert.IsFalse(admission.Contains("DO_SCREEN_FADE_IN"));
+        Assert.IsFalse(admission.Contains("EnsureJusticeCustodyScene"));
+        Assert.IsFalse(admission.Contains("TryRestoreJusticeCustodyRespawnTransferMask"));
+    }
+
     [TestMethod]
     public void CustodyMobility_IsVerifiedAfterTeleportAndRepairedBeforeSentenceProgress()
     {
         string source = ReadCustodySource();
         string transfer = ExtractMethodBody(source, "CompleteJusticeCustodyTransfer");
+        string fadeIn = ExtractMethodBody(
+            source,
+            "TryFinishJusticeCustodyAdmissionFadeIn");
+        string finalization = ExtractMethodBody(
+            source,
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn");
         string update = ExtractMethodBody(source, "JusticeUpdateCustody");
         string mobility = ExtractMethodBody(source, "EnsureJusticeCustodyPlayerMobility");
 
         AssertOrdered(
             transfer,
-            "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)",
-            "IsJusticeTeleportVerified(player, transferPosition, 8.0f)",
-            "TryJusticeEmergencyTeleport(",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
+            "IsInsideJusticeCustodyLayout(layout, player.Position)",
+            "TrySecureJusticeCustodyAdmission(player, now)",
+            "TryFinishJusticeCustodyAdmissionFadeIn(",
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn(layout, now)");
+        AssertOrdered(
+            fadeIn,
             "(!CompleteJusticePreJudgmentHoldingStreamingProtection(player) ||",
-            "!EnsureJusticeCustodyPlayerMobility(player))",
-            "if (!transferred)",
+            "!EnsureJusticeCustodyPlayerMobility(player))");
+        AssertOrdered(
+            finalization,
             "_justiceCustodyTransferPending = false");
         AssertOrdered(
             update,
@@ -521,14 +664,24 @@ public sealed class JusticeCustodyHardeningTests
         string failure = ExtractMethodBody(source, "HandleJusticeCustodyTransferFailure");
 
         Assert.AreEqual(
-            6,
+            8,
             CountOccurrences(transfer, "HandleJusticeCustodyTransferFailure(player, now)"),
-            "Le snapshot joueur, les deux reprises WAL, le fallback durable, l'inventaire et le téléport doivent partager le même retry.");
+            "Le snapshot joueur, les reprises WAL, le fallback, l'inventaire, le déplacement et le commit final doivent partager le même retry avant la frontière FadeIn.");
+        StringAssert.Contains(
+            transfer,
+            "RearmJusticeCustodyAdmissionMask(",
+            "La restauration du masque dispose de son retry strict après le commit métier.");
         Assert.IsFalse(transfer.Contains("RegisterJusticeCustodyTransferFailure(now)"));
         AssertOrdered(
             failure,
             "RegisterJusticeCustodyTransferFailure(now)",
-            "EnsureJusticeCustodyPlayerMobility(player)");
+            "EnforceJusticePreJudgmentHoldingControlLock(player)");
+        Assert.IsFalse(
+            failure.Contains("TryRestoreJusticeCustodyRespawnTransferMask"),
+            "Un retry d'admission ne doit jamais rendre l'image avant la validation complète.");
+        Assert.IsFalse(
+            failure.Contains("_justiceCustodyRespawnTransferPending = false"),
+            "Un échec technique doit conserver le masque de transfert actif.");
         Assert.IsFalse(
             failure.Contains("TryRollbackJusticeCustodyTransfer"),
             "Une panne technique ne doit jamais libérer le détenu sous mandat.");
@@ -557,7 +710,7 @@ public sealed class JusticeCustodyHardeningTests
             "_justiceCustodyFallbackPrecommitPending = true",
             "\"CompleteJusticeCustodyTransfer\"",
             "_justiceCustodyFallbackPrecommitPending = false",
-            "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)");
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(");
 
         object script = FormatterServices.GetUninitializedObject(ScriptType);
         SetField(script, "_justiceCustodyTransferPrecommitConfirmed", true);
@@ -815,7 +968,7 @@ public sealed class JusticeCustodyHardeningTests
             "JusticeInventoryPreparationResult inventoryPreparation",
             "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
             "inventoryPreparation != JusticeInventoryPreparationResult.Ready",
-            "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)");
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(");
 
         CollectionAssert.AreEqual(
             new[]
@@ -894,6 +1047,80 @@ public sealed class JusticeCustodyHardeningTests
     }
 
 #if DONJ_STUB_API
+    [TestMethod]
+    public void RemovedVerifiedInventory_DoesNotRepeatNativeVerificationForSameTransfer()
+    {
+        StubRuntime.Reset();
+        int weaponProbeCount = 0;
+        int removeAllCount = 0;
+        StubRuntime.NativeCallHandler = (hash, arguments) =>
+        {
+            if (hash == (ulong)Hash.HAS_PED_GOT_WEAPON)
+            {
+                weaponProbeCount++;
+                return false;
+            }
+            if (hash == (ulong)Hash.REMOVE_ALL_PED_WEAPONS)
+            {
+                removeAllCount++;
+            }
+
+            return null;
+        };
+
+        object script = FormatterServices.GetUninitializedObject(ScriptType);
+        Ped player = new Ped
+        {
+            Handle = 191,
+            Model = new Model(9191)
+        };
+        JusticeCaseState state = new JusticeCaseState
+        {
+            Enabled = true,
+            Phase = JusticePhase.Transporting,
+            CustodyEpisodeId = "custody:inventory-runtime-proof"
+        };
+        SetField(script, "_justiceCaseState", state);
+        SetField(script, "_justiceWeaponSnapshot", CreateValidatedEmptyWeaponSnapshot());
+        SetField(
+            script,
+            "_justiceInventoryCustodyState",
+            Enum.Parse(GetNestedType("JusticeInventoryCustodyState"), "RemovedVerified"));
+        SetField(script, "_justiceInventoryRemoved", true);
+
+        object first = Invoke(
+            script,
+            "EnsureJusticeInventoryReadyForCustodyTransfer",
+            player,
+            1000);
+        int probesAfterFirstProof = weaponProbeCount;
+        object second = Invoke(
+            script,
+            "EnsureJusticeInventoryReadyForCustodyTransfer",
+            player,
+            1100);
+
+        Assert.AreEqual("Ready", first.ToString());
+        Assert.AreEqual("Ready", second.ToString());
+        Assert.IsTrue(
+            probesAfterFirstProof > 0,
+            "Je vérifie réellement le runtime une fois après un reload simulé.");
+        Assert.AreEqual(
+            probesAfterFirstProof,
+            weaponProbeCount,
+            "Je ne rescane pas les armes après la preuve handle/modèle/épisode.");
+        Assert.AreEqual(0, removeAllCount);
+        Assert.AreEqual(
+            player.Handle,
+            GetField<int>(script, "_justiceInventoryRemovalVerifiedPlayerHandle"));
+        Assert.AreEqual(
+            player.Model.Hash,
+            GetField<int>(script, "_justiceInventoryRemovalVerifiedPlayerModelHash"));
+        Assert.AreEqual(
+            state.CustodyEpisodeId,
+            GetField<string>(script, "_justiceInventoryRemovalVerifiedEpisodeId"));
+    }
+
     [TestMethod]
     public void RemoveAllAppliedButPostCheckFails_ReturnsAmbiguousInsteadOfPreserved()
     {
@@ -1086,7 +1313,13 @@ public sealed class JusticeCustodyHardeningTests
         AssertOrdered(
             transfer,
             "bool resumingCustody = _justiceCustodyResumePending",
-            "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn(");
+        string admissionFinalization = ExtractMethodBody(
+            source,
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn");
+        AssertOrdered(
+            admissionFinalization,
             "_justiceCustodyResumePending = false");
 
         string release = ExtractMethodBody(source, "ResumeJusticeLegalReleaseFinalization");
@@ -1209,6 +1442,28 @@ public sealed class JusticeCustodyHardeningTests
         Assert.IsNotNull(field, "Champ privé introuvable : " + fieldName);
         return (T)field.GetValue(instance);
     }
+
+#if DONJ_STUB_API
+    private static T ReadPrivateStaticField<T>(string fieldName)
+    {
+        FieldInfo field = ScriptType.GetField(fieldName, PrivateStatic);
+        Assert.IsNotNull(field, "Champ statique privé introuvable : " + fieldName);
+        return (T)field.GetValue(null);
+    }
+
+    private static int CountNativeCalls(ulong nativeHash)
+    {
+        int count = 0;
+        foreach (StubNativeInvocation invocation in StubRuntime.NativeCalls)
+        {
+            if (invocation.Hash == nativeHash)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+#endif
 
     private static object CreateValidatedEmptyWeaponSnapshot()
     {

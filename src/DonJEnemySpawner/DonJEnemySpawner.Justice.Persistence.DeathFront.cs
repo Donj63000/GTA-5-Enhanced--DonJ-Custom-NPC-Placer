@@ -510,6 +510,7 @@ public sealed partial class DonJEnemySpawner
             {
                 _justiceCustodyWaitingForRespawn = true;
                 _justiceCustodyDeathRebindPending = true;
+                _justiceCustodyRespawnIdentityRebindConfirmed = false;
                 _justiceCustodyPlayerSlot = playerSlot;
                 _justiceCustodyPlayerModelHash = playerModel;
                 _justiceCustodyContainmentEstablished = false;

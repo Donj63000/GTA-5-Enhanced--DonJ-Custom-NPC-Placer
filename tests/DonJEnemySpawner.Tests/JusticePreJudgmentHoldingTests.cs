@@ -18,7 +18,7 @@ public sealed class JusticePreJudgmentHoldingTests
         BindingFlags.NonPublic | BindingFlags.Static;
 
     [TestMethod]
-    public void PreJudgmentHolding_LeavesBusinessStateUntouchedAndOrdersVisualProofs()
+    public void PreJudgmentHolding_LeavesBusinessStateUntouchedAndKeepsAdmissionMasked()
     {
         string custodySource = ReadSource(
             "src",
@@ -33,6 +33,12 @@ public sealed class JusticePreJudgmentHoldingTests
         string moveWithFallback = ReadMethod(
             custodySource,
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback");
+        string streamingProtection = ReadMethod(
+            custodySource,
+            "CompleteJusticePreJudgmentHoldingStreamingProtection");
+        string persistenceOutage = ReadMethod(
+            custodySource,
+            "TryMaintainJusticeCustodyDuringPermanentPersistenceOutage");
 
         AssertDoesNotContain(holding, "JusticeMarkStateDirty");
         AssertDoesNotContain(holding, "JusticeFlushStateNow");
@@ -43,10 +49,40 @@ public sealed class JusticePreJudgmentHoldingTests
         AssertDoesNotContain(holding, "_justiceCaseState.SentenceSeconds =");
         AssertDoesNotContain(holding, "_justiceCaseState.CustodyEpisodeId =");
         AssertDoesNotContain(holding, "_justiceCustodySite =");
+        AssertDoesNotContain(holding, "DO_SCREEN_FADE_IN");
+        Assert.AreEqual(
+            1,
+            CountOccurrences(
+                holding,
+                "TryRestoreJusticeCustodyRespawnTransferMask()"),
+            "Seule une divergence canonique peut rendre le masque avant admission.");
+        AssertOrdered(
+            holding,
+            "HasJusticePoliceDeathPreJudgmentHoldingChangedCanonicalPlayer(player)",
+            "ResetJusticePoliceDeathPreJudgmentHoldingState()",
+            "TryRestoreJusticeCustodyRespawnTransferMask()",
+            "return false;",
+            "JusticeCustodySite requiredSite");
         AssertDoesNotContain(move, "DO_SCREEN_FADE_IN");
         AssertDoesNotContain(move, "TeleportPlayerWithFadeSafe(");
         AssertDoesNotContain(move, "TryJusticeEmergencyTeleport(");
         AssertDoesNotContain(move, "Wait(");
+        AssertDoesNotContain(streamingProtection, "DO_SCREEN_FADE_IN");
+        AssertDoesNotContain(
+            streamingProtection,
+            "TryRestoreJusticeCustodyRespawnTransferMask(");
+        AssertDoesNotContain(
+            persistenceOutage,
+            "CompleteJusticePreJudgmentHoldingStreamingProtection(");
+        AssertDoesNotContain(
+            persistenceOutage,
+            "EnsureJusticeCustodyPlayerMobility(");
+        AssertDoesNotContain(
+            persistenceOutage,
+            "TryRestoreJusticeCustodyRespawnTransferMask(");
+        StringAssert.Contains(
+            persistenceOutage,
+            "EnforceJusticePreJudgmentHoldingControlLock(player)");
         AssertOrdered(
             move,
             "REQUEST_COLLISION_AT_COORD",
@@ -65,9 +101,17 @@ public sealed class JusticePreJudgmentHoldingTests
             "ReassertJusticeCustodyRespawnTransferMask()",
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
             "IsInsideJusticeCustodyLayout(layout, player.Position)",
-            "CompleteJusticePreJudgmentHoldingStreamingProtection(player)",
-            "EnsureJusticePlayerIsMortal(player)",
-            "EnsureJusticePlayerMobilityCore(player)",
+            "_justicePoliceDeathPreJudgmentHoldingEstablished = true;",
+            "EnforceJusticePreJudgmentHoldingControlLock(player);",
+            "TryArmPendingJusticeDeathCaptureForTransfer();",
+            "return mustBlockLate ||");
+
+        int ownerHoldingStart = holding.IndexOf(
+            "JusticeCustodySite requiredSite",
+            StringComparison.Ordinal);
+        Assert.IsTrue(ownerHoldingStart >= 0);
+        AssertDoesNotContain(
+            holding.Substring(ownerHoldingStart),
             "TryRestoreJusticeCustodyRespawnTransferMask()");
     }
 
@@ -104,7 +148,7 @@ public sealed class JusticePreJudgmentHoldingTests
             "RefreshJusticePreJudgmentHoldingIntent(player)");
         StringAssert.Contains(
             holding,
-            "MustBlockJusticeLateForPreJudgmentHolding()");
+            "MustBlockJusticeLateForPreJudgmentHolding(player)");
         StringAssert.Contains(
             holding,
             "_justicePoliceDeathPreJudgmentHoldingEstablished");
@@ -113,8 +157,14 @@ public sealed class JusticePreJudgmentHoldingTests
                 custodySource,
                 "RefreshJusticePreJudgmentHoldingIntent"),
             "JusticePreJudgmentHoldingSource.Captured");
+        string policeDeathMask = ReadMethod(
+            custodySource,
+            "CanMaskJusticePoliceDeathRespawnOrigin");
         StringAssert.Contains(
-            ReadMethod(custodySource, "CanMaskJusticeCustodyRespawnOrigin"),
+            policeDeathMask,
+            "JusticePolicy.IsPoliceDeathRespawnIdentityCompatible(");
+        AssertDoesNotContain(
+            policeDeathMask,
             "IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position)");
 
         string custodyUpdate = ReadMethod(
@@ -245,12 +295,30 @@ public sealed class JusticePreJudgmentHoldingTests
         string transfer = ReadMethod(
             custodySource,
             "CompleteJusticeCustodyTransfer");
+        string finalization = ReadMethod(
+            custodySource,
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn");
         AssertOrdered(
             transfer,
             "!transferred",
-            "TryRestoreJusticeCustodyRespawnTransferMask()",
+            "TrySecureJusticeCustodyAdmission(player, now)",
+            "RestoreJusticeCustodyRespawnTransferMask()",
+            "TryFinishJusticeCustodyAdmissionFadeIn(",
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn(layout, now)");
+        AssertOrdered(
+            finalization,
+            "_justiceCustodyRespawnTransferPending = false",
+            "ClearPendingJusticeDeathCapture()",
             "ResetJusticePoliceDeathPreJudgmentHoldingState()",
-            "_justicePoliceDeathRespawnMaskIntentPending = false");
+            "_justicePoliceDeathRespawnMaskIntentPending = false",
+            "_justiceCustodyTransferPending = false",
+            "_justiceCustodyLastTickAt = now");
+        Assert.AreEqual(
+            1,
+            CountOccurrences(
+                transfer,
+                "RestoreJusticeCustodyRespawnTransferMask()"),
+            "Seule l'admission finale rend le masque dans le transfert réussi.");
 
         StringAssert.Contains(
             ReadMethod(
@@ -264,7 +332,7 @@ public sealed class JusticePreJudgmentHoldingTests
             ReadMethod(custodySource, "JusticeShutdownCustody"),
             "ResetJusticePoliceDeathPreJudgmentHoldingState()");
         StringAssert.Contains(
-            transfer,
+            finalization,
             "ResetJusticeCapturePrecommitConfirmation()");
     }
 
@@ -317,8 +385,9 @@ public sealed class JusticePreJudgmentHoldingTests
             script,
             "IsInsideJusticePoliceDeathPreJudgmentHolding",
             player.Position));
-        Assert.IsFalse(player.FreezePosition);
-        Assert.IsFalse(GetField<bool>(
+        Assert.IsTrue(player.FreezePosition);
+        Assert.IsTrue(player.IsInvincible);
+        Assert.IsTrue(GetField<bool>(
             script,
             "_justiceCustodyRespawnTransferPending"));
 
@@ -337,23 +406,17 @@ public sealed class JusticePreJudgmentHoldingTests
         Assert.IsFalse(GetField<bool>(script, "_justiceInventoryRemoved"));
         Assert.IsFalse(GetField<bool>(script, "_justiceWeaponControlsLocked"));
 
-        int fadeOutIndex = GTA.StubRuntime.NativeCalls
-            .Select((call, index) => new { call, index })
-            .First(pair => pair.call.Hash ==
-                (ulong)GTA.Native.Hash.DO_SCREEN_FADE_OUT)
-            .index;
-        int fadeInIndex = GTA.StubRuntime.NativeCalls
-            .Select((call, index) => new { call, index })
-            .Last(pair => pair.call.Hash ==
-                (ulong)GTA.Native.Hash.DO_SCREEN_FADE_IN)
-            .index;
         Assert.IsTrue(
-            fadeOutIndex < fadeInIndex,
-            "Le masque doit précéder le déplacement et sa restitution vérifiée.");
+            CountNative(GTA.Native.Hash.DO_SCREEN_FADE_OUT) >= 1,
+            "Le maintien arme le masque avant de déplacer le respawn policier.");
+        Assert.AreEqual(
+            0,
+            CountNative(GTA.Native.Hash.DO_SCREEN_FADE_IN),
+            "Le holding ne rend jamais l'écran avant l'admission complète.");
     }
 
     [TestMethod]
-    public void PreJudgmentHolding_KeepsWholeEnclosureVisibleAndReholdsDuringCapturedWaiting()
+    public void PreJudgmentHolding_KeepsWholeEnclosureMaskedAndReholdsDuringCapturedWaiting()
     {
         GTA.StubRuntime.Reset();
         GTA.Ped player = GTA.Game.Player.Character;
@@ -392,9 +455,16 @@ public sealed class JusticePreJudgmentHoldingTests
             fadeInInside,
             CountNative(GTA.Native.Hash.DO_SCREEN_FADE_IN),
             "Je ne relance jamais la restitution après le premier maintien vérifié.");
-        Assert.AreEqual(1760.0f, player.Position.X, 0.001f);
-        Assert.AreEqual(2700.0f, player.Position.Y, 0.001f);
-        Assert.IsFalse(player.IsInvincible);
+        Assert.IsTrue((bool)Invoke(
+            script,
+            "IsInsideJusticePoliceDeathPreJudgmentHolding",
+            player.Position));
+        Assert.AreNotEqual(
+            1760.0f,
+            player.Position.X,
+            "Je replace immédiatement dans la cellule un ped sorti de la position de holding.");
+        Assert.IsTrue(player.FreezePosition);
+        Assert.IsTrue(player.IsInvincible);
 
         // Je simule le précommit Capture : le latch brut est consommé, mais le
         // transfert normal n'a pas encore été vérifié.
@@ -410,7 +480,7 @@ public sealed class JusticePreJudgmentHoldingTests
             script,
             "UpdateJusticePoliceDeathPreJudgmentHolding",
             player,
-            3000);
+            40000);
         Assert.IsFalse(
             blocksNormalController,
             "Le holding maintient l'enceinte sans affamer le transfert normal Captured/waiting.");
@@ -643,7 +713,7 @@ public sealed class JusticePreJudgmentHoldingTests
     }
 
     [TestMethod]
-    public void BolingbrokeHolding_WaitsForGroundAndCollisionBeforeFadeIn()
+    public void BolingbrokeHolding_WaitsForGroundAndCollisionWithoutRenderingAdmission()
     {
         GTA.StubRuntime.Reset();
         GTA.Ped player = GTA.Game.Player.Character;
@@ -705,16 +775,22 @@ public sealed class JusticePreJudgmentHoldingTests
         Assert.IsTrue(GetField<bool>(
             script,
             "_justicePoliceDeathPreJudgmentHoldingEstablished"));
-        Assert.IsFalse(GetField<bool>(
+        Assert.IsTrue(GetField<bool>(
             script,
             "_justicePreJudgmentHoldingStreamingPending"));
-        Assert.IsFalse(player.FreezePosition);
-        Assert.IsFalse(player.IsInvincible);
+        Assert.IsTrue(player.FreezePosition);
+        Assert.IsTrue(player.IsInvincible);
+        Assert.IsTrue(GetField<bool>(
+            script,
+            "_justiceCustodyRespawnTransferPending"));
         Assert.IsTrue((bool)Invoke(
             script,
             "IsInsideJusticePoliceDeathPreJudgmentHolding",
             player.Position));
-        Assert.AreEqual(1, CountNative(GTA.Native.Hash.DO_SCREEN_FADE_IN));
+        Assert.AreEqual(
+            0,
+            CountNative(GTA.Native.Hash.DO_SCREEN_FADE_IN),
+            "Même après streaming vérifié, seul le transfert final peut rendre l'image.");
     }
 
     [DataTestMethod]

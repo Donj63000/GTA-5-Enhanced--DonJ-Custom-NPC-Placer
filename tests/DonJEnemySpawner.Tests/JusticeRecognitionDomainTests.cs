@@ -778,9 +778,19 @@ public sealed class JusticeRecognitionDomainTests
         StringAssert.Contains(
             custody,
             "EnsureJusticeRecognitionCaptureResetDurable(");
-        StringAssert.Contains(custody, "entrée en détention confirmée");
+        StringAssert.Contains(custody, "barrière d'admission en détention");
+        StringAssert.Contains(
+            custody,
+            "TrySecureJusticeCustodyAdmission(player, now)");
+        StringAssert.Contains(
+            custody,
+            "ClearJusticeWantedLevelOnceDetailed()");
+        StringAssert.Contains(
+            custody,
+            "JusticeCustodyAdmissionWantedStabilityMs");
         StringAssert.Contains(profiles, "ClearJusticeRecognitionProfile(");
         StringAssert.Contains(integration, "gameplaySuspended = IsJusticeRuntimeSuspended(");
+        StringAssert.Contains(integration, "JusticeIsCustodyActive");
 
         int toggleStart = justice.IndexOf("private void RequestJusticeToggle()", StringComparison.Ordinal);
         int toggleEnd = justice.IndexOf("private bool IsJusticePauseTemporarilyUnsafe()", toggleStart, StringComparison.Ordinal);

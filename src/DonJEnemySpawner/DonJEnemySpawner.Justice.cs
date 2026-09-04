@@ -550,6 +550,35 @@ public sealed partial class DonJEnemySpawner
             {
                 _justiceWantedLossPending = false;
             }
+            TryArmJusticeCustodyDeathResidualMissionFlagBypassAfterHolding(
+                player);
+            TryArmJusticePoliceDeathNoCellLegalReleaseResidualMissionFlagBypassAfterHolding(
+                player);
+            TryPrepareJusticePendingPoliceDeathFineResumeDuringResidualMissionFlag(
+                player);
+            TryFinalizeJusticePendingPoliceDeathCaptureDuringResidualMissionFlag(
+                player);
+            _justiceLastWantedLevel = wantedLevel;
+            return;
+        }
+
+        if (IsJusticePendingPoliceDeathNoCellLegalRelease() ||
+            _justicePoliceDeathNoCellReleaseProtectionRestorePending)
+        {
+            // Je réserve ce tick à la transaction de sortie déjà prouvée. Une
+            // dernière frame BUSTED/arrested ne peut ni recréer une charge, ni
+            // rejuger le dossier AtLarge avant la reprise du contrôleur Late.
+            if (_justicePoliceDeathNoCellReleaseProtectionRestorePending)
+            {
+                MaintainJusticePoliceDeathNoCellReleaseProtectionRestore(
+                    player,
+                    GetJusticeRawGameTimeSafe());
+            }
+            if (arrestStateValid)
+            {
+                _justiceWasBeingArrested = arrested;
+            }
+            _justiceWasDead = dead;
             _justiceLastWantedLevel = wantedLevel;
             return;
         }
@@ -669,7 +698,8 @@ public sealed partial class DonJEnemySpawner
         // transitions judiciaires : évasion, libération, arrestation, etc.
 
         if (_justiceEnabled && _justicePursuitDeathObservedDuringSuspension &&
-            !JusticeIsCustodyActive)
+            !JusticeIsCustodyActive &&
+            !IsJusticePendingPoliceDeathNoCellLegalRelease())
         {
             if (!IsJusticePoliceDeathFrontResultDurable())
             {
@@ -704,9 +734,7 @@ public sealed partial class DonJEnemySpawner
                 }
                 if (BeginJusticeCapture(true))
                 {
-                    ClearPendingJusticeDeathCapture();
-                    JusticeMarkStateDirty();
-                    JusticeFlushStateNow();
+                    TryArmPendingJusticeDeathCaptureForTransfer();
                 }
                 else
                 {
@@ -750,14 +778,13 @@ public sealed partial class DonJEnemySpawner
                 if (retryWasDeathCapture &&
                     _justicePursuitDeathObservedDuringSuspension &&
                     IsJusticeCapturePrecommitConfirmedForCurrentEpisode() &&
-                    JusticeIsCustodyActive)
+                    _justiceCustodyRuntimeActive &&
+                    _justiceCustodyTransferPending)
                 {
-                    // Je consomme le marqueur seulement après le précommit
-                    // redondant et l'armement réel du transfert. Le retry ne doit
-                    // pas laisser PendingDeathCapture survivre à la capture.
-                    ClearPendingJusticeDeathCapture();
-                    JusticeMarkStateDirty();
-                    JusticeFlushStateNow();
+                    // Je qualifie le marqueur seulement après le précommit
+                    // redondant et l'armement réel du transfert. Son acquittement
+                    // durable attendra l'admission visible et entièrement sûre.
+                    TryArmPendingJusticeDeathCaptureForTransfer();
                 }
                 _justiceCaptureRetryPending = false;
                 _justiceCaptureRetryDeath = false;
@@ -885,6 +912,204 @@ public sealed partial class DonJEnemySpawner
             _justiceWasDead = dead;
         }
         _justiceLastWantedLevel = wantedLevel;
+    }
+
+    private bool TryFinalizeJusticePendingPoliceDeathCaptureDuringResidualMissionFlag(
+        Ped player)
+    {
+        bool capturedWithoutActiveTransfer = _justiceCaseState != null &&
+            _justiceCaseState.Phase == JusticePhase.Captured &&
+            !_justiceCustodyRuntimeActive && !_justiceCustodyTransferPending;
+        bool captureTransferInProgress = _justiceCaseState != null &&
+            _justiceCustodyRuntimeActive && _justiceCustodyTransferPending &&
+            (_justiceCaseState.Phase == JusticePhase.Transporting ||
+             _justiceCaseState.Phase == JusticePhase.Incarcerated) &&
+            HasJusticeCapturePrecommitConfirmationForCurrentEpisode();
+        bool canStartOrResumeCapture = !JusticeIsCustodyActive ||
+            capturedWithoutActiveTransfer || captureTransferInProgress;
+        if (!_justiceRuntimeSuspendedByMissionFlagOnlyCached || !_justiceEnabled ||
+            !_justicePursuitDeathObservedDuringSuspension ||
+            !canStartOrResumeCapture ||
+            _justiceCaseState == null || !Entity.Exists(player) || player.IsDead ||
+            _justiceBackupRepairPending || _justiceProfileContextBlocked ||
+            _justiceProfileSelectionPending || _justiceProfileSwitchPersistencePending ||
+            _justiceActiveProfileResetPending || _justiceAmnestyPending ||
+            _justiceVoluntaryFinePaymentIntent != null || _justiceFineDebitIntent != null ||
+            _justiceLegalReleaseFinalizationPending ||
+            _justiceCustodyTransferRollbackFinalizationPending ||
+            _justiceCustodyDeathStatePersistencePending ||
+            IsJusticeSentencePolicyRecoveryBlockingActiveProfile() ||
+            HasJusticeDeferredRuntimeFronts() ||
+            !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot) ||
+            !IsJusticeRuntimeProfileContextCompatible() ||
+            (!IsPendingJusticeDeathCaptureIdentityCompatible(player) &&
+             !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player)) ||
+            !_justicePoliceDeathPreJudgmentHoldingEstablished ||
+            !IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position) ||
+            !IsJusticePoliceDeathFrontResultDurable())
+        {
+            return false;
+        }
+
+        EnsureJusticePlayerProfilesInitialized();
+        JusticePlayerProfileState owner =
+            _justiceActivePlayerProfileSlot < _justicePlayerProfiles.Length
+                ? _justicePlayerProfiles[_justiceActivePlayerProfileSlot]
+                : null;
+        if (owner == null || !owner.PendingDeathCapture ||
+            owner.PendingDeathCapturePlayerSlot !=
+                _justiceSuspendedPursuitDeathPlayerSlot ||
+            owner.PendingDeathCapturePlayerModel !=
+                _justiceSuspendedPursuitDeathPlayerModelHash)
+        {
+            return false;
+        }
+
+        if (!capturedWithoutActiveTransfer && !captureTransferInProgress &&
+            !EnsureJusticeCaseForPoliceCustody(
+                true,
+                "mort policière confirmée pendant le latch BUSTED résiduel"))
+        {
+            return false;
+        }
+        if (_justiceCaseState.Phase == JusticePhase.AtLarge)
+        {
+            _justiceCaseState.Phase = JusticePhase.Wanted;
+        }
+
+        bool captureAlreadyPrecommitted =
+            (capturedWithoutActiveTransfer || captureTransferInProgress) &&
+            HasJusticeCapturePrecommitConfirmationForCurrentEpisode();
+        if (!captureAlreadyPrecommitted && !BeginJusticeCapture(true))
+        {
+            _justiceCaptureRetryPending = true;
+            _justiceCaptureRetryDeath = true;
+            return false;
+        }
+        if (!HasJusticeCapturePrecommitConfirmationForCurrentEpisode())
+        {
+            return false;
+        }
+
+        // Je n'ouvre ce bypass qu'après le maintien physique et le précommit
+        // redondant du jugement : il appartient à ce seul slot/modèle et ne
+        // couvre aucune suspension forte.
+        ArmJusticeCustodyResidualMissionFlagBypassObserved();
+        _justiceCaptureRetryPending = false;
+        _justiceCaptureRetryDeath = false;
+        _justiceProfileContextBlocked = false;
+        if (!_justiceCustodyRuntimeActive || !_justiceCustodyTransferPending)
+        {
+            // Je fais d'abord franchir le rebind durable à un ped custom et je conserve
+            // PendingDeathCapture jusqu'à ce que le transfert soit réellement
+            // armé, mais le latch mission qualifié ne peut plus bloquer ce rebind.
+            return _justiceCaseState.Phase == JusticePhase.Captured &&
+                   _justiceCustodyWaitingForRespawn;
+        }
+
+        TryArmPendingJusticeDeathCaptureForTransfer();
+        return true;
+    }
+
+    private bool TryPrepareJusticePendingPoliceDeathFineResumeDuringResidualMissionFlag(
+        Ped player)
+    {
+        JusticeFineDebitIntent intent = _justiceFineDebitIntent;
+        int currentSlot = GetCurrentSinglePlayerCashSlotSafe();
+        bool capturedBeforeTransfer = _justiceCaseState != null &&
+            _justiceCaseState.Phase == JusticePhase.Captured &&
+            !_justiceCustodyRuntimeActive && !_justiceCustodyTransferPending &&
+            !_justiceCustodyResumePending;
+        if (!_justiceRuntimeSuspendedByMissionFlagOnlyCached || !_justiceEnabled ||
+            !_justicePursuitDeathObservedDuringSuspension ||
+            !capturedBeforeTransfer || !_justiceCustodyWaitingForRespawn ||
+            intent == null || string.IsNullOrWhiteSpace(intent.EpisodeId) ||
+            !string.Equals(
+                intent.EpisodeId,
+                _justiceCaseState.CustodyEpisodeId,
+                StringComparison.Ordinal) ||
+            !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot) ||
+            intent.Slot != _justiceActivePlayerProfileSlot ||
+            _justiceCustodyPlayerSlot != _justiceActivePlayerProfileSlot ||
+            !JusticePolicy.CanRebindCustodyFineIntentSlot(
+                currentSlot,
+                intent.Slot,
+                _justiceCustodyPlayerSlot) ||
+            _justiceCustodyPlayerModelHash == 0 ||
+            _justiceBackupRepairPending || _justiceProfileContextBlocked ||
+            _justiceProfileSelectionPending || _justiceProfileSwitchPersistencePending ||
+            _justiceActiveProfileResetPending || _justiceAmnestyPending ||
+            _justiceVoluntaryFinePaymentIntent != null ||
+            _justiceLegalReleaseFinalizationPending ||
+            _justiceCustodyTransferRollbackFinalizationPending ||
+            _justiceCustodyDeathStatePersistencePending ||
+            _justicePendingDeathFrontWalRecord != null ||
+            IsJusticeSentencePolicyRecoveryBlockingActiveProfile() ||
+            HasJusticeDeferredRuntimeFronts() ||
+            !IsJusticeRuntimeProfileContextCompatible() ||
+            !HasExactJusticePendingPoliceDeathCaptureOwner() ||
+            _justicePreJudgmentHoldingSource !=
+                JusticePreJudgmentHoldingSource.Captured ||
+            !_justicePoliceDeathPreJudgmentHoldingEstablished ||
+            !Entity.Exists(player) || player.IsDead ||
+            !IsJusticeCustodyPlayerIdentityCompatible(player) ||
+            !IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player) ||
+            !IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position) ||
+            !IsJusticePoliceDeathFrontResultDurable())
+        {
+            return false;
+        }
+
+        if (!HasJusticeCapturePrecommitConfirmationForCurrentEpisode())
+        {
+            // Je reconstruis uniquement la preuve volatile du jugement déjà
+            // présent dans le snapshot. Le débit reste la responsabilité du
+            // contrôleur de détention et de ses barrières financières at-most-once.
+            ResetJusticeCapturePrecommitConfirmation();
+            JusticeMarkStateDirty();
+            if (!PersistJusticeCriticalPrecommitRedundantly())
+            {
+                return false;
+            }
+            ConfirmJusticeCapturePrecommit();
+        }
+        if (!HasJusticeCapturePrecommitConfirmationForCurrentEpisode())
+        {
+            return false;
+        }
+
+        // Je ne fais ici aucune mutation cash : ce relais exact ouvre seulement
+        // le contrôleur Late, qui reprendra FineDebitIntent puis le transfert.
+        ArmJusticeCustodyResidualMissionFlagBypassObserved();
+        _justiceCaptureRetryPending = false;
+        _justiceCaptureRetryDeath = false;
+        return true;
+    }
+
+    private bool TryArmPendingJusticeDeathCaptureForTransfer()
+    {
+        Ped player = Game.Player.Character;
+        if (!_justicePursuitDeathObservedDuringSuspension ||
+            !_justiceCustodyRuntimeActive || !_justiceCustodyTransferPending ||
+            !HasJusticeCapturePrecommitConfirmationForCurrentEpisode() ||
+            !HasExactJusticePendingPoliceDeathCaptureOwner() ||
+            _justicePreJudgmentHoldingSource !=
+                JusticePreJudgmentHoldingSource.Captured ||
+            !_justicePoliceDeathPreJudgmentHoldingEstablished ||
+            !Entity.Exists(player) || player.IsDead ||
+            (!IsJusticePoliceDeathPreJudgmentHoldingOwnerCompatible(player) &&
+             !IsJusticeCustodyRespawnIdentityRebindConfirmedFor(player)) ||
+            !IsInsideJusticePoliceDeathPreJudgmentHolding(player.Position) ||
+            !IsJusticePoliceDeathFrontResultDurable())
+        {
+            return false;
+        }
+
+        // Je qualifie la fenêtre qui couvrira un BUSTED apparaissant au tick
+        // suivant. Je conserve toutefois le DeathFront durable jusqu'au FADED_IN
+        // final : un crash ou un fondu interrompu doit pouvoir reprendre l'entrée.
+        ArmJusticeCustodyResidualMissionFlagBypass();
+        return true;
     }
 
     private bool HasJusticeDeferredRuntimeFronts()
@@ -4782,8 +5007,11 @@ public sealed partial class DonJEnemySpawner
             // ainsi jamais figer une tenue custom devenue un autre protagoniste.
             _justiceCustodyDeathRebindPending = true;
             _justiceCustodyWaitingForRespawn = true;
+            _justiceCustodyRespawnIdentityRebindConfirmed = false;
         }
         _justiceCaseState.HasWarrant = false;
+        _justiceCaseState.EscapeWantedMinimumPending = false;
+        _justiceCaseState.EscapeWantedMinimumAttempted = false;
         JusticeMarkStateDirty();
         if (!PersistJusticeCriticalPrecommitRedundantly())
         {
@@ -9526,7 +9754,6 @@ public sealed partial class DonJEnemySpawner
 
     private void NormalizeLoadedJusticeState()
     {
-        bool normalizedPendingDeathCapture = false;
         if (_justiceCaseState == null)
         {
             _justiceCaseState = new JusticeCaseState();
@@ -9585,22 +9812,9 @@ public sealed partial class DonJEnemySpawner
             _justiceCaseState.Phase = JusticePhase.AtLarge;
         }
 
-        if (_justicePursuitDeathObservedDuringSuspension && JusticeIsCustodyActive)
-        {
-            // Le précommit Capture a gagné la course contre l'effacement du
-            // marqueur. La détention est autoritaire et rend ce latch obsolète.
-            ClearPendingJusticeDeathCapture();
-            normalizedPendingDeathCapture = true;
-        }
-
+        // Je laisse le contrôleur du transfert consommer seul PendingDeathCapture.
+        // Une phase Captured chargée n'est pas encore une admission réellement armée.
         _justiceDetectionEpisodeId = _justiceCaseState.WantedEpisodeId ?? string.Empty;
-        // Je conserve une migration déjà marquée sale pendant l'activation du
-        // profil : la normalisation de démarrage ne doit pas perdre sa réécriture.
-        _justiceStateDirty = _justiceStateDirty || normalizedPendingDeathCapture;
-        if (normalizedPendingDeathCapture)
-        {
-            _justiceNextStateSaveAtMs = 0L;
-        }
     }
 
     private void ReconcileLoadedJusticePursuitState(int wantedLevel)

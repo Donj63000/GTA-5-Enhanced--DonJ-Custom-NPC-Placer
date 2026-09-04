@@ -1,11 +1,15 @@
 using System;
+using System.Collections;
 using System.IO;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
+using GTA;
+using GTA.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 [TestClass]
+[DoNotParallelize]
 public sealed class JusticeCustodyGuardRetaliationTests
 {
     private const BindingFlags PrivateStatic =
@@ -82,6 +86,116 @@ public sealed class JusticeCustodyGuardRetaliationTests
             ReadPrivateConstant<int>("JusticeCustodyGuardRetaliationScanMs"));
     }
 
+#if DONJ_STUB_API
+    [TestMethod]
+    public void AdmissionDamagePriming_IgnoresOldFrontThenRealAttackArmsTwoStars()
+    {
+        StubRuntime.Reset();
+        try
+        {
+            object script = FormatterServices.GetUninitializedObject(
+                typeof(DonJEnemySpawner));
+            InitializeCollectionField(script, "_justiceTrackedIdentities");
+            InitializeReusableListField(
+                script,
+                "_justiceDamagePairBaselines",
+                8);
+            InitializeCollectionField(script, "_justiceDamageFrontsToConsume");
+            InitializeCollectionField(script, "_justiceCustodyGuards");
+
+            Ped player = Game.Player.Character;
+            player.Handle = 101;
+            player.Model = new Model("player_zero");
+            player.IsDead = false;
+            Ped guard = new Ped(202)
+            {
+                Model = new Model(12345),
+                IsDead = false
+            };
+            ((IList)GetPrivateField(script, "_justiceCustodyGuards")).Add(guard);
+
+            SetPrivateField(script, "_justiceCaseState", new JusticeCaseState
+            {
+                Enabled = true,
+                Phase = JusticePhase.Incarcerated,
+                CustodyEpisodeId = "custody:guard-front"
+            });
+            SetPrivateField(script, "_justiceCustodyRuntimeActive", true);
+            SetPrivateField(script, "_justiceActivePlayerProfileSlot", 0);
+            SetPrivateField(script, "_justiceCustodyPlayerSlot", 0);
+            SetPrivateField(script, "_justiceCustodyPlayerHandle", player.Handle);
+            SetPrivateField(
+                script,
+                "_justiceCustodyPlayerModelHash",
+                player.Model.Hash);
+
+            Assert.AreEqual(
+                true,
+                InvokePrivate(script, "RememberJusticeCustodyPedOwnership", guard));
+
+            bool damageFrontActive = true;
+            StubRuntime.DamageHandler = (victim, attacker) =>
+                damageFrontActive &&
+                ReferenceEquals(victim, guard) &&
+                ReferenceEquals(attacker, player);
+            StubRuntime.NativeCallHandler = (hash, arguments) =>
+            {
+                if (hash == (ulong)Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY)
+                {
+                    damageFrontActive = false;
+                }
+                return null;
+            };
+
+            InvokePrivate(
+                script,
+                "PrimeJusticeCustodyGuardDamageFrontsForAdmission",
+                player);
+
+            Assert.IsFalse(GetPrivateField<bool>(
+                script,
+                "_justiceCustodyGuardRetaliationActive"));
+            Assert.IsFalse(
+                damageFrontActive,
+                "Le front hérité doit être consommé avant d'armer la détection.");
+            Assert.AreEqual(0, Game.Player.WantedLevel);
+
+            damageFrontActive = true;
+            SetPrivateField(script, "_justiceMonotonicTimeMs", 1000L);
+            Assert.AreEqual(
+                true,
+                InvokePrivate(
+                    script,
+                    "TryCaptureJusticeDamageFront",
+                    guard,
+                    player,
+                    false),
+                "Le premier front réellement apparu après l'admission doit être accepté.");
+            SetPrivateField(
+                script,
+                "_justiceCustodyGuardRetaliationActive",
+                true);
+            InvokePrivate(
+                script,
+                "MaintainJusticeCustodyPoliceSuppression",
+                player,
+                1000);
+
+            Assert.IsTrue(GetPrivateField<bool>(
+                script,
+                "_justiceCustodyGuardRetaliationActive"));
+            Assert.AreEqual(
+                2,
+                Game.Player.WantedLevel,
+                "Une nouvelle agression réelle après l'admission doit conserver la riposte locale.");
+        }
+        finally
+        {
+            StubRuntime.Reset();
+        }
+    }
+#endif
+
     [TestMethod]
     public void GuardDeathAttribution_RequiresExactOwnedGenerationOrStrictlyFreshDamage()
     {
@@ -95,9 +209,9 @@ public sealed class JusticeCustodyGuardRetaliationTests
         string deathSampling = ReadMethod(
             source,
             "CaptureJusticeCustodyGuardDamageFrontsAtDeath");
-        string update = ReadMethod(
+        string observedDeath = ReadMethod(
             source,
-            "UpdateJusticeCustodyGuardRetaliation");
+            "ObserveJusticeCustodyDeath");
 
         AssertOrdered(
             attribution,
@@ -116,9 +230,11 @@ public sealed class JusticeCustodyGuardRetaliationTests
             exactGuard,
             "GetJusticeEntityGeneration(guard) == generation");
         AssertOrdered(
-            update,
+            observedDeath,
             "CaptureJusticeCustodyGuardDamageFrontsAtDeath(player)",
-            "FreezeJusticeCustodyGuardDeathPenalty(player)");
+            "FreezeJusticeCustodyGuardDeathPenalty(player)",
+            "ResetJusticeCustodyGuardRetaliation(player, true, true)",
+            "TryPersistJusticeCustodyDeathFrontToWal(");
         StringAssert.Contains(
             deathSampling,
             "JusticeCustodyMaximumGuardCount");
@@ -227,13 +343,18 @@ public sealed class JusticeCustodyGuardRetaliationTests
             source,
             "ResetJusticeCustodyGuardRetaliation");
 
-        StringAssert.Contains(death, "FreezeJusticeCustodyGuardDeathPenalty(player)");
-        StringAssert.Contains(
+        AssertOrdered(
             death,
-            "ResetJusticeCustodyGuardRetaliation(player, true, true)");
-        StringAssert.Contains(
+            "CaptureJusticeCustodyGuardDamageFrontsAtDeath(player)",
+            "FreezeJusticeCustodyGuardDeathPenalty(player)",
+            "ResetJusticeCustodyGuardRetaliation(player, true, true)",
+            "TryPersistJusticeCustodyDeathFrontToWal(");
+        AssertOrdered(
             suspendedDeath,
-            "ResetJusticeCustodyGuardRetaliation(player, true, true)");
+            "CaptureJusticeCustodyGuardDamageFrontsAtDeath(player)",
+            "FreezeJusticeCustodyGuardDeathPenalty(player)",
+            "ResetJusticeCustodyGuardRetaliation(player, true, true)",
+            "TryPersistJusticeCustodyDeathFrontToWal(");
         StringAssert.Contains(
             cleanup,
             "ResetJusticeCustodyGuardRetaliation(player, true, false)");
@@ -249,6 +370,74 @@ public sealed class JusticeCustodyGuardRetaliationTests
         Assert.IsNotNull(field, "Constante privée absente : " + name);
         return (T)field.GetRawConstantValue();
     }
+
+    private static object InvokePrivate(
+        object target,
+        string methodName,
+        params object[] arguments)
+    {
+        MethodInfo method = typeof(DonJEnemySpawner).GetMethod(
+            methodName,
+            PrivateInstance);
+        Assert.IsNotNull(method, "Méthode privée absente : " + methodName);
+        return method.Invoke(target, arguments);
+    }
+
+    private static void SetPrivateField(
+        object target,
+        string fieldName,
+        object value)
+    {
+        FieldInfo field = typeof(DonJEnemySpawner).GetField(
+            fieldName,
+            PrivateInstance);
+        Assert.IsNotNull(field, "Champ privé absent : " + fieldName);
+        field.SetValue(target, value);
+    }
+
+    private static object GetPrivateField(object target, string fieldName)
+    {
+        FieldInfo field = typeof(DonJEnemySpawner).GetField(
+            fieldName,
+            PrivateInstance);
+        Assert.IsNotNull(field, "Champ privé absent : " + fieldName);
+        return field.GetValue(target);
+    }
+
+    private static T GetPrivateField<T>(object target, string fieldName)
+    {
+        return (T)GetPrivateField(target, fieldName);
+    }
+
+#if DONJ_STUB_API
+    private static void InitializeCollectionField(
+        object target,
+        string fieldName)
+    {
+        FieldInfo field = typeof(DonJEnemySpawner).GetField(
+            fieldName,
+            PrivateInstance);
+        Assert.IsNotNull(field, "Collection privée absente : " + fieldName);
+        field.SetValue(target, Activator.CreateInstance(field.FieldType));
+    }
+
+    private static void InitializeReusableListField(
+        object target,
+        string fieldName,
+        int itemCount)
+    {
+        InitializeCollectionField(target, fieldName);
+        FieldInfo field = typeof(DonJEnemySpawner).GetField(
+            fieldName,
+            PrivateInstance);
+        IList list = (IList)field.GetValue(target);
+        Type itemType = field.FieldType.GetGenericArguments()[0];
+        for (int index = 0; index < itemCount; index++)
+        {
+            list.Add(Activator.CreateInstance(itemType, true));
+        }
+    }
+#endif
 
     private static string ReadCustodySource()
     {

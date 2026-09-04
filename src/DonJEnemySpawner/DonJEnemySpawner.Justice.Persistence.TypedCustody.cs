@@ -662,6 +662,7 @@ public sealed partial class DonJEnemySpawner
         _justiceDeferredInventoryRestore = snapshot.DeferredInventoryRestore;
         _justiceCustodyWaitingForRespawn = snapshot.WaitingForRespawn;
         _justiceCustodyDeathRebindPending = snapshot.DeathRebindPending;
+        _justiceCustodyRespawnIdentityRebindConfirmed = false;
         _justiceCustodyPlayerStateStored = snapshot.PlayerStateStored;
         _justiceCustodyStoredInvincible = snapshot.StoredInvincible;
         _justiceCustodyStoredFrozen = snapshot.StoredFrozen;

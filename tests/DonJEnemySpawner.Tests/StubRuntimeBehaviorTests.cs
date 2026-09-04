@@ -338,6 +338,83 @@ public class StubRuntimeBehaviorTests
     }
 
     [TestMethod]
+    public void Detention_ChangementDeProfilNeReutilisePasLeBypassMissionResiduel()
+    {
+        object script = FormatterServices.GetUninitializedObject(typeof(DonJEnemySpawner));
+        Ped firstPlayer = new Ped
+        {
+            Handle = 144,
+            Model = new Model(123)
+        };
+        Game.Player.Character = firstPlayer;
+        SetPrivateField(
+            script,
+            "_justiceCaseState",
+            new JusticeCaseState
+            {
+                Enabled = true,
+                Phase = JusticePhase.Incarcerated,
+                SentenceSeconds = 90
+            });
+        SetPrivateField(script, "_justiceActivePlayerProfileSlot", 1);
+        SetPrivateField(script, "_justiceCustodyPlayerSlot", 1);
+        SetPrivateField(script, "_justiceCustodyPlayerHandle", firstPlayer.Handle);
+        SetPrivateField(script, "_justiceCustodyPlayerModelHash", firstPlayer.Model.Hash);
+        SetPrivateField(script, "_justiceCustodyRuntimeActive", true);
+        SetPrivateField(script, "_justiceCustodyContainmentEstablished", true);
+        SetPrivateField(script, "_justiceCustodyResidualMissionFlagBypassArmed", true);
+        SetPrivateField(script, "_justiceCustodyResidualMissionFlagObservationDeadlineMs", 0L);
+        SetPrivateField(script, "_justiceRuntimeSuspendedByMissionFlagOnlyCached", true);
+        SetPrivateField(
+            script,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => 1));
+
+        MethodInfo suspension = typeof(DonJEnemySpawner).GetMethod(
+            "IsJusticeCustodyRuntimeSuspended",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(Ped), typeof(bool) },
+            null);
+        MethodInfo reset = typeof(DonJEnemySpawner).GetMethod(
+            "ResetJusticeCustodyPersistentFields",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.IsNotNull(suspension);
+        Assert.IsNotNull(reset);
+        Assert.IsFalse((bool)suspension.Invoke(script, new object[] { firstPlayer, true }));
+
+        // Je simule la fermeture du profil P avant d'activer une détention stable
+        // appartenant au profil Q pendant que GTA garde son flag mission levé.
+        reset.Invoke(script, new object[] { false, false });
+        Assert.IsFalse(
+            GetPrivateField<bool>(script, "_justiceCustodyResidualMissionFlagBypassArmed"));
+        Assert.AreEqual(
+            0L,
+            GetPrivateField<long>(script, "_justiceCustodyResidualMissionFlagObservationDeadlineMs"));
+
+        Ped secondPlayer = new Ped
+        {
+            Handle = 245,
+            Model = new Model(456)
+        };
+        Game.Player.Character = secondPlayer;
+        SetPrivateField(script, "_justiceActivePlayerProfileSlot", 2);
+        SetPrivateField(script, "_justiceCustodyPlayerSlot", 2);
+        SetPrivateField(script, "_justiceCustodyPlayerHandle", secondPlayer.Handle);
+        SetPrivateField(script, "_justiceCustodyPlayerModelHash", secondPlayer.Model.Hash);
+        SetPrivateField(script, "_justiceCustodyRuntimeActive", true);
+        SetPrivateField(script, "_justiceCustodyContainmentEstablished", true);
+        SetPrivateField(
+            script,
+            "_justiceCanonicalPlayerSlotOverride",
+            new Func<int>(() => 2));
+
+        Assert.IsTrue(
+            (bool)suspension.Invoke(script, new object[] { secondPlayer, true }),
+            "Le latch BUSTED du profil P ne doit jamais autoriser le profil Q.");
+    }
+
+    [TestMethod]
     public void Detention_DegèleLeJoueurEtRépareLeSnapshotAprèsLeTransfert()
     {
         object script = FormatterServices.GetUninitializedObject(typeof(DonJEnemySpawner));

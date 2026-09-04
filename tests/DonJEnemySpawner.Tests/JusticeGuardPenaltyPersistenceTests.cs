@@ -114,6 +114,69 @@ public sealed class JusticeGuardPenaltyPersistenceTests
     }
 
     [TestMethod]
+    public void GuardDeathSnapshot_IsSemanticallyValidOnlyAfterRetaliationWasReset()
+    {
+        JusticeCaseState caseState = new JusticeCaseState
+        {
+            Enabled = true,
+            Phase = JusticePhase.Incarcerated,
+            CustodyEpisodeId = "custody:guard-death",
+            SentenceSeconds = 600,
+            CustodyGuardPenaltySeconds = 0L
+        };
+        JusticeRecordState recordState = new JusticeRecordState();
+
+        JusticeWalRecord guardDeath = CreateDeathFrontRecord(
+            "CustodyRebind",
+            0L,
+            60L,
+            false);
+        InvokePrivateStatic(
+            "ApplyJusticeCustodyGuardPenaltyFromDeathFront",
+            2,
+            caseState,
+            guardDeath);
+        InvokePrivateStatic(
+            "ApplyJusticeCustodyGuardPenaltyFromDeathFront",
+            2,
+            caseState,
+            guardDeath);
+        Assert.AreEqual(
+            60L,
+            caseState.CustodyGuardPenaltySeconds,
+            "Le replay du même décès causé par un garde doit ajouter soixante secondes une seule fois.");
+
+        JusticeCustodyPersistenceSnapshot unsafeSnapshot = CreateCustodySnapshot(
+            true,
+            true,
+            waitingForRespawn: true,
+            deathRebindPending: true);
+        Assert.IsFalse(
+            IsCustodySnapshotSemanticallyValid(
+                unsafeSnapshot,
+                caseState,
+                recordState),
+            "Une riposte active ne doit jamais être publiée avec un rebind de mort.");
+
+        JusticeCustodyPersistenceSnapshot safeSnapshot =
+            (JusticeCustodyPersistenceSnapshot)InvokePrivateStatic(
+                "CloneJusticeCustodyPersistenceSnapshotForDeathRebind",
+                2,
+                CreateCustodySnapshot(true, true),
+                456);
+
+        Assert.IsFalse(safeSnapshot.GuardRetaliationActive);
+        Assert.IsTrue(safeSnapshot.WaitingForRespawn);
+        Assert.IsTrue(safeSnapshot.DeathRebindPending);
+        Assert.IsTrue(
+            IsCustodySnapshotSemanticallyValid(
+                safeSnapshot,
+                caseState,
+                recordState),
+            "Le snapshot figé après reset de la riposte doit être rechargeable sans panne du writer.");
+    }
+
+    [TestMethod]
     public void TypedCustody_NormalizesLegacyStoredInvincibilityBeforeEveryWrite()
     {
         JusticeCustodyPersistenceSnapshot legacyTrue = CreateCustodySnapshot(
@@ -373,7 +436,9 @@ public sealed class JusticeGuardPenaltyPersistenceTests
         bool active,
         bool guardRetaliationActive,
         bool playerStateStored = false,
-        bool storedInvincible = false)
+        bool storedInvincible = false,
+        bool waitingForRespawn = false,
+        bool deathRebindPending = false)
     {
         return new JusticeCustodyPersistenceSnapshot(
             active,
@@ -388,8 +453,8 @@ public sealed class JusticeGuardPenaltyPersistenceTests
             0,
             0,
             false,
-            false,
-            false,
+            waitingForRespawn,
+            deathRebindPending,
             playerStateStored,
             storedInvincible,
             false,
@@ -406,6 +471,24 @@ public sealed class JusticeGuardPenaltyPersistenceTests
             false,
             new JusticeActivityCooldownPersistenceSnapshot[0],
             guardRetaliationActive);
+    }
+
+    private static bool IsCustodySnapshotSemanticallyValid(
+        JusticeCustodyPersistenceSnapshot snapshot,
+        JusticeCaseState caseState,
+        JusticeRecordState recordState)
+    {
+        XmlDocument document = new XmlDocument { XmlResolver = null };
+        document.LoadXml(
+            "<JusticeState>" +
+            DonJEnemySpawner.SerializeJusticeCustodyPersistenceSnapshot(snapshot) +
+            "</JusticeState>");
+        return (bool)InvokePrivateStatic(
+            "IsJusticeCustodyXmlSemanticallyValid",
+            3,
+            document.DocumentElement,
+            caseState,
+            recordState);
     }
 
     private static JusticeWalRecord CreateDeathFrontRecord(

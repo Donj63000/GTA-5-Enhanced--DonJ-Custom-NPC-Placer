@@ -4140,7 +4140,11 @@ public sealed class JusticePlayerProfilePersistenceTests
 
             // Je simule ici les effets monde déjà terminés : le commit final doit
             // rester rejouable sans ressusciter l'ancien casier après un crash.
-            Invoke(resumed, "ResetJusticeCustodyPersistentFields", false);
+            Invoke(
+                resumed,
+                "ResetJusticeCustodyPersistentFields",
+                false,
+                false);
             GetField<JusticeCaseState>(resumed, "_justiceCaseState").Phase = JusticePhase.AtLarge;
             InitializeProfileResetRuntimeCollections(resumed);
 #if DONJ_STUB_API
@@ -4530,7 +4534,8 @@ public sealed class JusticePlayerProfilePersistenceTests
                 new Func<int, bool>(attempt => true));
             Assert.IsFalse((bool)Invoke(
                 script,
-                "CommitJusticeLegalReleaseFinalizationAcknowledgement"));
+                "CommitJusticeLegalReleaseFinalizationAcknowledgement",
+                (object)null));
             Assert.IsTrue(GetField<bool>(script, "_justiceLegalReleaseFinalizationPending"));
             Assert.AreEqual(12345, GetField<int>(script, "_justiceLegalReleaseSelectedWeaponHash"));
 
@@ -4549,11 +4554,13 @@ public sealed class JusticePlayerProfilePersistenceTests
                 new Func<int, bool>(attempt => false));
             Assert.IsFalse((bool)Invoke(
                 script,
-                "CommitJusticeLegalReleaseFinalizationAcknowledgement"));
+                "CommitJusticeLegalReleaseFinalizationAcknowledgement",
+                (object)null));
             AwaitQueuedPersistence(script);
             Assert.IsTrue((bool)Invoke(
                 script,
-                "CommitJusticeLegalReleaseFinalizationAcknowledgement"));
+                "CommitJusticeLegalReleaseFinalizationAcknowledgement",
+                (object)null));
             Assert.IsFalse(GetField<bool>(script, "_justiceLegalReleaseFinalizationPending"));
             FlushAndAwait(script);
 

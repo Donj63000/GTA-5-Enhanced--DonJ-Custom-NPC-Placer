@@ -2458,6 +2458,7 @@ public sealed class JusticeRuntimeContractTests
         SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
         SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
         SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        SetFieldValue(script, "_justiceCustodyContainmentEstablished", true);
         SetFieldValue(
             script,
             "_justiceCanonicalPlayerSlotOverride",
@@ -2539,6 +2540,7 @@ public sealed class JusticeRuntimeContractTests
         SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
         SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
         SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        SetFieldValue(script, "_justiceCustodyContainmentEstablished", true);
         SetFieldValue(
             script,
             "_justiceCanonicalPlayerSlotOverride",
@@ -2628,6 +2630,8 @@ public sealed class JusticeRuntimeContractTests
         SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
         SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
         SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        SetFieldValue(script, "_justicePersistenceServicesUnavailable", true);
+        SetFieldValue(script, "_justicePersistenceInitializationFailurePermanent", true);
 
         GTA.Ped guard = new GTA.Ped
         {
@@ -2642,6 +2646,7 @@ public sealed class JusticeRuntimeContractTests
             script,
             "GetJusticeEntityGeneration",
             guard);
+        Assert.IsTrue(generation > 0);
 
         bool simultaneousDamage = false;
         GTA.StubRuntime.DamageHandler = (target, attacker) =>
@@ -2665,30 +2670,36 @@ public sealed class JusticeRuntimeContractTests
             SetFieldValue(script, "_justiceMonotonicTimeMs", 1100L);
             InvokeInstance(
                 script,
-                "UpdateJusticeCustodyGuardRetaliation",
+                "ObserveJusticeCustodyDeath",
                 player,
                 1100);
 
-            Assert.IsTrue(GetFieldValue<bool>(
+            Assert.IsFalse(GetFieldValue<bool>(
                 script,
-                "_justiceCustodyGuardRetaliationActive"));
+                "_justiceCustodyGuardRetaliationActive"),
+                "Le snapshot de mort doit être publié après extinction de la riposte runtime.");
             Assert.IsTrue(GetFieldValue<bool>(
                 script,
                 "_justiceCustodyGuardDeathCauseEvaluated"));
             Assert.IsTrue(GetFieldValue<bool>(
                 script,
                 "_justiceCustodyGuardDeathPenaltyPending"));
-            Assert.AreEqual(2, GTA.Game.Player.WantedLevel);
+            Assert.AreEqual(0, GTA.Game.Player.WantedLevel);
+            JusticeWalRecord pendingDeath = GetFieldValue<JusticeWalRecord>(
+                script,
+                "_justicePendingDeathFrontWalRecord");
+            Assert.IsNotNull(pendingDeath);
             Assert.AreEqual(
-                guard.Handle,
-                GetFieldValue<int>(
-                    script,
-                    "_justiceCustodyLastDamagingGuardHandle"));
-            Assert.AreEqual(
-                generation,
-                GetFieldValue<int>(
-                    script,
-                    "_justiceCustodyLastDamagingGuardGeneration"));
+                "60",
+                pendingDeath.Fields.Single(field =>
+                    field.Path == "custodyGuardPenaltyAfter").Value,
+                "La décision figée avant le reset doit transporter exactement la minute de peine.");
+            Assert.AreEqual(0, GetFieldValue<int>(
+                script,
+                "_justiceCustodyLastDamagingGuardHandle"));
+            Assert.AreEqual(0, GetFieldValue<int>(
+                script,
+                "_justiceCustodyLastDamagingGuardGeneration"));
             Assert.AreEqual(
                 2,
                 GTA.StubRuntime.NativeCalls.Count(call =>
@@ -2733,6 +2744,8 @@ public sealed class JusticeRuntimeContractTests
         SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
         SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
         SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        SetFieldValue(script, "_justicePersistenceServicesUnavailable", true);
+        SetFieldValue(script, "_justicePersistenceInitializationFailurePermanent", true);
 
         GTA.Ped guard = new GTA.Ped
         {
@@ -2747,6 +2760,7 @@ public sealed class JusticeRuntimeContractTests
             script,
             "GetJusticeEntityGeneration",
             guard);
+        Assert.IsTrue(generation > 0);
 
         bool guardDamagesPlayer = false;
         GTA.StubRuntime.DamageHandler = (target, attacker) =>
@@ -2768,7 +2782,7 @@ public sealed class JusticeRuntimeContractTests
             SetFieldValue(script, "_justiceMonotonicTimeMs", 1100L);
             InvokeInstance(
                 script,
-                "UpdateJusticeCustodyGuardRetaliation",
+                "ObserveJusticeCustodyDeath",
                 player,
                 1100);
 
@@ -2778,16 +2792,23 @@ public sealed class JusticeRuntimeContractTests
             Assert.IsTrue(GetFieldValue<bool>(
                 script,
                 "_justiceCustodyGuardDeathPenaltyPending"));
+            Assert.IsFalse(GetFieldValue<bool>(
+                script,
+                "_justiceCustodyGuardRetaliationActive"));
+            JusticeWalRecord pendingDeath = GetFieldValue<JusticeWalRecord>(
+                script,
+                "_justicePendingDeathFrontWalRecord");
+            Assert.IsNotNull(pendingDeath);
             Assert.AreEqual(
-                guard.Handle,
-                GetFieldValue<int>(
-                    script,
-                    "_justiceCustodyLastDamagingGuardHandle"));
-            Assert.AreEqual(
-                generation,
-                GetFieldValue<int>(
-                    script,
-                    "_justiceCustodyLastDamagingGuardGeneration"));
+                "60",
+                pendingDeath.Fields.Single(field =>
+                    field.Path == "custodyGuardPenaltyAfter").Value);
+            Assert.AreEqual(0, GetFieldValue<int>(
+                script,
+                "_justiceCustodyLastDamagingGuardHandle"));
+            Assert.AreEqual(0, GetFieldValue<int>(
+                script,
+                "_justiceCustodyLastDamagingGuardGeneration"));
             Assert.AreEqual(
                 1,
                 GTA.StubRuntime.NativeCalls.Count(call =>
@@ -2827,6 +2848,8 @@ public sealed class JusticeRuntimeContractTests
         SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
         SetFieldValue(script, "_justiceCustodyPlayerHandle", player.Handle);
         SetFieldValue(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        SetFieldValue(script, "_justicePersistenceServicesUnavailable", true);
+        SetFieldValue(script, "_justicePersistenceInitializationFailurePermanent", true);
 
         GTA.Ped guard = new GTA.Ped
         {
@@ -2861,16 +2884,13 @@ public sealed class JusticeRuntimeContractTests
             SetFieldValue(script, "_justiceMonotonicTimeMs", 2100L);
             InvokeInstance(
                 script,
-                "UpdateJusticeCustodyGuardRetaliation",
+                "ObserveJusticeCustodyDeath",
                 player,
                 2100);
 
-            Assert.AreEqual(
-                guard.Handle,
-                GetFieldValue<int>(
-                    script,
-                    "_justiceCustodyLastDamagingGuardHandle"),
-                "Le front garde doit être consommé même si le tueur exact est tiers.");
+            Assert.AreEqual(0, GetFieldValue<int>(
+                script,
+                "_justiceCustodyLastDamagingGuardHandle"));
             Assert.IsTrue(GetFieldValue<bool>(
                 script,
                 "_justiceCustodyGuardDeathCauseEvaluated"));
@@ -2879,6 +2899,21 @@ public sealed class JusticeRuntimeContractTests
                     script,
                     "_justiceCustodyGuardDeathPenaltyPending"),
                 "Un tueur tiers valide doit toujours interdire la minute supplémentaire.");
+            JusticeWalRecord pendingDeath = GetFieldValue<JusticeWalRecord>(
+                script,
+                "_justicePendingDeathFrontWalRecord");
+            Assert.IsNotNull(pendingDeath);
+            Assert.AreEqual(
+                "0",
+                pendingDeath.Fields.Single(field =>
+                    field.Path == "custodyGuardPenaltyAfter").Value,
+                "Le WAL ne doit jamais transporter la minute si GTA fournit un tueur tiers valide.");
+            Assert.AreEqual(
+                1,
+                GTA.StubRuntime.NativeCalls.Count(call =>
+                    call.Hash ==
+                        (ulong)GTA.Native.Hash.CLEAR_ENTITY_LAST_DAMAGE_ENTITY),
+                "Le front du garde doit être consommé avant le reset de la preuve volatile.");
         }
         finally
         {
@@ -3307,7 +3342,7 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void CustodyTeleportFailure_RestoresTransientStateThenRemasksAndKeepsStagesRetryable()
+    public void CustodyTransferFailure_KeepsMaskAndControlLockUntilAdmissionCanRetry()
     {
         string custodySource = File.ReadAllText(Path.Combine(
             GetRepositoryRoot(),
@@ -3315,26 +3350,32 @@ public sealed class JusticeRuntimeContractTests
             "DonJEnemySpawner",
             "DonJEnemySpawner.Justice.Custody.cs"));
         string transfer = ExecutableMethodBody(custodySource, "CompleteJusticeCustodyTransfer");
-        string emergency = ExecutableMethodBodyContaining(
+        string protectedMove = ExecutableMethodBody(
             custodySource,
-            "TryJusticeEmergencyTeleport",
-            "SetEntityCoordsNoOffsetSafe(");
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback");
 
         AssertOrdered(
             transfer,
-            "TeleportPlayerWithFadeSafe(player, transferPosition, transferHeading)",
-            "TryJusticeEmergencyTeleport(",
-            "if (maskRespawnOrigin)",
+            "ReassertJusticeCustodyRespawnTransferMask()",
+            "EnforceJusticePreJudgmentHoldingControlLock(player)",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
+            "if (transferred && !IsInsideJusticeCustodyLayout(layout, player.Position))",
+            "if (!transferred)",
             "ReassertJusticeCustodyRespawnTransferMask()",
             "HandleJusticeCustodyTransferFailure(player, now)",
-            "RestoreJusticeCustodyPlayerTransientState(player)",
+            "EnforceJusticePreJudgmentHoldingControlLock(player)",
             "return;");
         AssertOrdered(
-            emergency,
-            "SetEntityCoordsNoOffsetSafe(",
-            "IsJusticeTeleportVerified(player, targetPosition, 8.0f)",
-            "player.Position = targetPosition",
-            "DO_SCREEN_FADE_IN");
+            protectedMove,
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
+            "return true;",
+            "JusticeCustodyTransferTimeoutMs",
+            "TryJusticeEmergencyTeleport(",
+            "false)",
+            "_justicePreJudgmentHoldingPositionApplied =",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(");
+        Assert.IsFalse(transfer.Contains("TeleportPlayerWithFadeSafe("));
+        Assert.IsFalse(protectedMove.Contains("DO_SCREEN_FADE_IN"));
         Assert.IsFalse(custodySource.Contains("CompleteJusticeCustodyDiscipline"));
         Assert.IsFalse(custodySource.Contains("JusticeRegisterCustodyDisciplineCharge"));
     }
@@ -3397,26 +3438,38 @@ public sealed class JusticeRuntimeContractTests
             "ResumeJusticeLegalReleaseFinalization");
         AssertOrdered(
             resume,
-            "PersistJusticeLegalReleaseBarrier()",
+            "PersistJusticeLegalReleaseBarrier(",
+            "JusticeLegalReleasePrepareBarrier",
             "RestoreJusticeInventoryForLegalRelease(player, now)",
             "JusticePrepareLegalReleaseState()",
-            "PersistJusticeLegalReleaseBarrier()",
+            "JusticeLegalReleaseCaseClearedBarrier",
             "TeleportPlayerWithFadeSafe",
             "_justiceLegalReleaseWantedClearAttempted = true",
+            "JusticeLegalReleaseWantedPreparedBarrier",
             "ClearJusticeWantedLevelOnceDetailed()",
-            "CommitJusticeLegalReleaseFinalizationAcknowledgement()");
-        string barrier = ExecutableMethodBody(
+            "CompleteJusticeLegalReleasePhysicalProtection(",
+            "CommitJusticeLegalReleaseFinalizationAcknowledgement(player)",
+            "FinalizeJusticeLegalReleasePhysicalProtectionAfterAcknowledgement(");
+        string barrier = ExecutableMethodBodyContaining(
             custodySource,
-            "PersistJusticeLegalReleaseBarrier");
-        StringAssert.Contains(barrier, "PersistJusticeCriticalPrecommitRedundantly()");
+            "PersistJusticeLegalReleaseBarrier",
+            "PersistJusticeCriticalPrecommitRedundantly(caller)");
+        StringAssert.Contains(barrier, "PersistJusticeCriticalPrecommitRedundantly(caller)");
         string acknowledgement = ExecutableMethodBody(
             custodySource,
             "CommitJusticeLegalReleaseFinalizationAcknowledgement");
         AssertOrdered(
             acknowledgement,
-            "_justiceLegalReleaseFinalizationPending = false",
-            "PersistJusticeLegalReleaseBarrier()",
+            "ApplyJusticeLegalReleaseAcknowledgedState(",
+            "PersistJusticeLegalReleaseBarrier(",
             "_justiceLegalReleaseFinalizationPending = true");
+        string acknowledgedState = ExecutableMethodBody(
+            custodySource,
+            "ApplyJusticeLegalReleaseAcknowledgedState");
+        AssertOrdered(
+            acknowledgedState,
+            "_justiceLegalReleaseFinalizationPending = false",
+            "activeProfile.PendingLegalReleaseFinalization = false");
 
         string update = ExecutableMethodBody(ReadRuntimeSource(), "UpdateJusticeSystem");
         AssertOrdered(
@@ -3707,21 +3760,29 @@ public sealed class JusticeRuntimeContractTests
     }
 
     [TestMethod]
-    public void CustodyRespawn_RebindRequiresEitherPristineCaptureOrObservedCustodyDeath()
+    public void CustodyRespawn_RebindRequiresEitherAdoptedIdentityOrObservedCustodyDeath()
     {
         object script = CreateJusticeHeadlessScript();
         SetFieldValue(script, "_justiceCustodyWaitingForRespawn", true);
+        SetFieldValue(script, "_justiceCustodyPlayerSlot", 0);
+        SetFieldValue(script, "_justiceActivePlayerProfileSlot", 0);
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerModelHash", 12345);
 
         Assert.IsTrue((bool)InvokeInstance(script, "CanRebindJusticeCustodyIdentityAfterInitialRespawn"));
         SetFieldValue(script, "_justiceInventoryRemoved", true);
+        Assert.IsTrue(
+            (bool)InvokeInstance(script, "CanRebindJusticeCustodyIdentityAfterInitialRespawn"),
+            "L'identité déjà adoptée doit rester reconstructible même si l'inventaire est saisi.");
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 1);
         Assert.IsFalse((bool)InvokeInstance(script, "CanRebindJusticeCustodyIdentityAfterInitialRespawn"));
         SetFieldValue(script, "_justiceCustodyDeathRebindPending", true);
         Assert.IsTrue(
             (bool)InvokeInstance(script, "CanRebindJusticeCustodyIdentityAfterInitialRespawn"),
             "Une mort réellement observée doit permettre le remplacement du ped sans perdre le snapshot.");
         SetFieldValue(script, "_justiceCustodyDeathRebindPending", false);
-        SetFieldValue(script, "_justiceInventoryRemoved", false);
-        SetFieldValue(script, "_justiceCustodyPlayerStateStored", true);
+        SetFieldValue(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetFieldValue(script, "_justiceCustodyPlayerModelHash", 0);
         Assert.IsFalse((bool)InvokeInstance(script, "CanRebindJusticeCustodyIdentityAfterInitialRespawn"));
 
         string source = File.ReadAllText(Path.Combine(
@@ -3819,19 +3880,45 @@ public sealed class JusticeRuntimeContractTests
             custodyUpdate,
             "UpdateJusticeCustodyRespawnTransferMask(player)",
             "PersistJusticeCustodyDeathStateBeforeRespawn(now)",
-            "_justiceCustodyWaitingForRespawn = false",
+            "TryRebindJusticeCustodyIdentityAfterRespawn(player)",
+            "_justiceCustodyTransferPending = true",
             "JusticeFlushStateNow()",
             "CompleteJusticeCustodyTransfer(player, now)");
 
         string transfer = ExecutableMethodBody(custodySource, "CompleteJusticeCustodyTransfer");
+        string admissionFadeIn = ExecutableMethodBody(
+            custodySource,
+            "TryFinishJusticeCustodyAdmissionFadeIn");
+        string admissionFinalization = ExecutableMethodBody(
+            custodySource,
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn");
         AssertOrdered(
             transfer,
-            "bool maskRespawnOrigin = _justiceCustodyRespawnTransferPending",
+            "if (!_justiceCustodyRespawnTransferPending ||",
+            "_justiceCustodyRespawnTransferPending = true",
             "ReassertJusticeCustodyRespawnTransferMask()",
-            "TeleportPlayerWithFadeSafe",
+            "EnforceJusticePreJudgmentHoldingControlLock(player)",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
             "IsInsideJusticeCustodyLayout(layout, player.Position)",
-            "TryRestoreJusticeCustodyRespawnTransferMask()",
-            "_justiceCustodyContainmentEstablished = true");
+            "TrySecureJusticeCustodyAdmission(player, now)",
+            "_justiceCustodyContainmentEstablished = true",
+            "JusticeOperation enterOperation",
+            "PersistJusticeCriticalPrecommitRedundantly(",
+            "RestoreJusticeCustodyRespawnTransferMask()",
+            "TryFinishJusticeCustodyAdmissionFadeIn(",
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn(layout, now)");
+        AssertOrdered(
+            admissionFadeIn,
+            "CompleteJusticePreJudgmentHoldingStreamingProtection(player)",
+            "EnsureJusticeCustodyPlayerMobility(player)");
+        AssertOrdered(
+            admissionFinalization,
+            "_justiceCustodyWaitingForRespawn = false",
+            "_justiceCustodyDeathRebindPending = false",
+            "_justiceCustodyTransferPending = false",
+            "_justiceCustodyLastTickAt = now",
+            "JusticeFlushStateNow()");
+        Assert.IsFalse(transfer.Contains("TeleportPlayerWithFadeSafe("));
     }
 
     [TestMethod]
@@ -3891,20 +3978,46 @@ public sealed class JusticeRuntimeContractTests
         string transfer = ExecutableMethodBody(
             custodySource,
             "CompleteJusticeCustodyTransfer");
+        string admissionFadeIn = ExecutableMethodBody(
+            custodySource,
+            "TryFinishJusticeCustodyAdmissionFadeIn");
+        string admissionFinalization = ExecutableMethodBody(
+            custodySource,
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn");
+        string protectedMove = ExecutableMethodBody(
+            custodySource,
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback");
         AssertOrdered(
             transfer,
-            "IsJusticeTeleportVerified(player, transferPosition, 8.0f)",
-            "TryJusticeEmergencyTeleport(",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
             "IsInsideJusticeCustodyLayout(layout, player.Position)",
-            "EnsureJusticeCustodyPlayerMobility(player)",
             "if (!transferred)",
-            "if (maskRespawnOrigin)",
             "ReassertJusticeCustodyRespawnTransferMask()",
             "HandleJusticeCustodyTransferFailure(player, now)",
-            "RestoreJusticeCustodyPlayerTransientState(player)",
+            "EnforceJusticePreJudgmentHoldingControlLock(player)",
             "return;",
-            "if (maskRespawnOrigin)",
-            "TryRestoreJusticeCustodyRespawnTransferMask()");
+            "TrySecureJusticeCustodyAdmission(player, now)",
+            "JusticeOperation enterOperation",
+            "PersistJusticeCriticalPrecommitRedundantly(",
+            "RestoreJusticeCustodyRespawnTransferMask()",
+            "TryFinishJusticeCustodyAdmissionFadeIn(",
+            "FinalizeJusticeCustodyAdmissionAfterFadeIn(layout, now)");
+        AssertOrdered(
+            admissionFadeIn,
+            "CompleteJusticePreJudgmentHoldingStreamingProtection(player)",
+            "EnsureJusticeCustodyPlayerMobility(player)");
+        AssertOrdered(
+            admissionFinalization,
+            "_justiceCustodyTransferPending = false",
+            "_justiceCustodyLastTickAt = now",
+            "JusticeFlushStateNow()");
+        AssertOrdered(
+            protectedMove,
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
+            "JusticeCustodyTransferTimeoutMs",
+            "TryJusticeEmergencyTeleport(",
+            "false)");
+        Assert.IsFalse(protectedMove.Contains("DO_SCREEN_FADE_IN"));
         Assert.AreEqual(
             0,
             Regex.Matches(
@@ -3987,9 +4100,19 @@ public sealed class JusticeRuntimeContractTests
         AssertOrdered(
             beginTransfer,
             "bool waitForRespawn",
-            "if (!waitForRespawn)",
-            "if (!TryRestoreJusticeCustodyRespawnTransferMask())",
-            "return;");
+            "if (waitForRespawn)",
+            "_justiceCustodyWaitingForRespawn = true",
+            "JusticeFlushStateNow()",
+            "ShouldDeferCustodyFinancialMutationUntilRespawn(",
+            "return;",
+            "if (!waitForRespawn &&",
+            "_justiceCustodyRespawnMaskNeedsRearm = false");
+        Assert.IsFalse(
+            beginTransfer.Contains("TryRestoreJusticeCustodyRespawnTransferMask"),
+            "Le début du transfert ne doit jamais rendre un masque hérité de la mort.");
+        Assert.IsFalse(
+            beginTransfer.Contains("_justiceCustodyRespawnTransferPending = false"),
+            "Le début du transfert doit conserver le latch jusqu'à l'admission sûre.");
 
         string outageHolding = ExecutableMethodBody(
             custodySource,
@@ -4000,13 +4123,18 @@ public sealed class JusticeRuntimeContractTests
             "_justiceCustodyDeathPersistenceWriterFailureObserved",
             "CanMaskJusticeCustodyRespawnOrigin(player)",
             "GetJusticeCustodySiteForSentence(",
+            "_justiceCustodyRespawnTransferPending = true",
+            "ReassertJusticeCustodyRespawnTransferMask()",
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
-            "CompleteJusticePreJudgmentHoldingStreamingProtection(player)",
-            "EnsureJusticeCustodyPlayerMobility(player)",
+            "IsInsideJusticeCustodyLayout(layout, player.Position)",
+            "EnforceJusticePreJudgmentHoldingControlLock(player)",
             "_justiceCustodyPersistenceOutageHoldingEstablished = true",
-            "TryRestoreJusticeCustodyRespawnTransferMask()");
+            "_justiceCustodyContainmentEstablished = true");
         Assert.IsFalse(outageHolding.Contains("TeleportPlayerWithFadeSafe("));
         Assert.IsFalse(outageHolding.Contains("TryJusticeEmergencyTeleport("));
+        Assert.IsFalse(outageHolding.Contains("TryRestoreJusticeCustodyRespawnTransferMask"));
+        Assert.IsFalse(outageHolding.Contains("EnsureJusticeCustodyPlayerMobility"));
+        Assert.IsFalse(outageHolding.Contains("_justiceCustodyRespawnTransferPending = false"));
         Assert.IsFalse(outageHolding.Contains("JusticePhase.AtLarge"));
         Assert.IsFalse(outageHolding.Contains("RemoveAll"));
         Assert.IsFalse(outageHolding.Contains("SentenceSeconds ="));
@@ -4051,7 +4179,7 @@ public sealed class JusticeRuntimeContractTests
         {
             GTA.StubRuntime.NativeCallHandler = null;
         }
-        Assert.IsFalse(GetFieldValue<bool>(
+        Assert.IsTrue(GetFieldValue<bool>(
             script,
             "_justiceCustodyRespawnTransferPending"));
         Assert.IsTrue(GetFieldValue<bool>(
@@ -4066,25 +4194,29 @@ public sealed class JusticeRuntimeContractTests
             script,
             "IsInsideJusticeCustody",
             player.Position));
+        Assert.IsTrue(
+            player.FreezePosition,
+            "Sans writer, le détenu doit rester verrouillé sous le masque fail-closed.");
         int fadeOutAfterHolding = GTA.StubRuntime.NativeCalls.Count(call =>
             call.Hash == (ulong)GTA.Native.Hash.DO_SCREEN_FADE_OUT);
         int fadeInAfterHolding = GTA.StubRuntime.NativeCalls.Count(call =>
             call.Hash == (ulong)GTA.Native.Hash.DO_SCREEN_FADE_IN);
         Assert.IsTrue(fadeOutAfterHolding >= 1);
-        Assert.IsTrue(
-            fadeInAfterHolding >= 1,
-            "Une corruption définitive doit maintenir le détenu en cellule puis rendre l'écran.");
+        Assert.AreEqual(
+            0,
+            fadeInAfterHolding,
+            "Une corruption définitive ne doit jamais exposer une admission non durable.");
 
         InvokeInstance(script, "JusticeUpdateCustody", player, 2000);
-        Assert.IsFalse(GetFieldValue<bool>(
+        Assert.IsTrue(GetFieldValue<bool>(
             script,
             "_justiceCustodyRespawnTransferPending"),
-            "Le même détenu déjà dans l'enceinte ne doit pas repasser au noir.");
-        Assert.AreEqual(
-            fadeOutAfterHolding,
+            "Le même détenu doit rester sous le même masque tant que le writer est indisponible.");
+        Assert.IsTrue(
             GTA.StubRuntime.NativeCalls.Count(call =>
-                call.Hash == (ulong)GTA.Native.Hash.DO_SCREEN_FADE_OUT),
-            "Le maintien déjà établi ne doit pas retéléporter ni refondre l'écran.");
+                call.Hash == (ulong)GTA.Native.Hash.DO_SCREEN_FADE_OUT) >=
+            fadeOutAfterHolding,
+            "Le maintien peut réaffirmer le noir, mais ne doit jamais le relâcher.");
         Assert.AreEqual(
             fadeInAfterHolding,
             GTA.StubRuntime.NativeCalls.Count(call =>
@@ -4093,6 +4225,9 @@ public sealed class JusticeRuntimeContractTests
 
         SetFieldValue(script, "_justicePersistenceInitializationFailurePermanent", false);
         SetFieldValue(script, "_justiceCustodyPersistenceOutageHoldingEstablished", false);
+        SetFieldValue(script, "_justiceCustodyRespawnTransferPending", false);
+        SetFieldValue(script, "_justiceCustodyRespawnMaskNeedsRearm", false);
+        GTA.StubRuntime.ScreenFadedOut = false;
         int fadeOutAttempts = 0;
         GTA.StubRuntime.NativeCallHandler = (hash, arguments) =>
         {
@@ -4296,7 +4431,12 @@ public sealed class JusticeRuntimeContractTests
             "JusticeInventoryPreparationResult inventoryPreparation",
             "EnsureJusticeInventoryReadyForCustodyTransfer(player, now)",
             "inventoryPreparation != JusticeInventoryPreparationResult.Ready",
-            "TeleportPlayerWithFadeSafe(player");
+            "ReassertJusticeCustodyRespawnTransferMask()",
+            "EnforceJusticePreJudgmentHoldingControlLock(player)",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(");
+        Assert.IsFalse(
+            transfer.Contains("TeleportPlayerWithFadeSafe("),
+            "L'admission protégée ne doit jamais rendre l'image pendant le déplacement.");
         Assert.IsFalse(source.Contains("PlayerInvincibilityOwner.JusticeDiscipline"));
         StringAssert.Contains(source, "CommandJusticeCustodyGuardCombatIfDue");
     }
@@ -4536,7 +4676,9 @@ public sealed class JusticeRuntimeContractTests
             "inventoryPreparation != JusticeInventoryPreparationResult.Ready",
             "CanContinueJusticeCustodyTransferWithoutInventoryConfiscation(",
             "EnterJusticeNonDestructiveCustodyFallback(player, now)",
-            "TeleportPlayerWithFadeSafe(player");
+            "ReassertJusticeCustodyRespawnTransferMask()",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(");
+        Assert.IsFalse(transfer.Contains("TeleportPlayerWithFadeSafe("));
         string fallback = ExecutableMethodBody(
             source,
             "EnterJusticeNonDestructiveCustodyFallback");

@@ -1908,6 +1908,13 @@ public sealed partial class DonJEnemySpawner
 
     private string GetJusticeCriticalOperationKind(string caller)
     {
+        if (!string.IsNullOrWhiteSpace(caller) &&
+            caller.StartsWith(
+                JusticeLegalReleaseBarrierPrefix,
+                StringComparison.Ordinal))
+        {
+            return "Release";
+        }
         switch (caller)
         {
             case "FineDebit":

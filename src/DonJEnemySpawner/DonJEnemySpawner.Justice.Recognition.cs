@@ -7,6 +7,9 @@ public sealed partial class DonJEnemySpawner
     private bool? _justiceRecognitionSynchronizedSuspended;
     private int _justiceRecognitionSynchronizedProfileSlot = -2;
     private bool _justiceRecognitionCaptureResetPersistenceFailureLogged;
+    private int _justiceRecognitionCaptureResetConfirmedProfileSlot = -1;
+    private string _justiceRecognitionCaptureResetConfirmedEpisodeId =
+        string.Empty;
 
     private void InitializeJusticeRecognitionFailClosed()
     {
@@ -14,6 +17,7 @@ public sealed partial class DonJEnemySpawner
         _justiceRecognitionSynchronizedSuspended = null;
         _justiceRecognitionSynchronizedProfileSlot = -2;
         _justiceRecognitionCaptureResetPersistenceFailureLogged = false;
+        ResetJusticeRecognitionCaptureResetConfirmation();
 
         JusticeRecognitionBridge.SetActiveProfile(null);
         JusticeRecognitionBridge.SetRuntimeSuspended(true);
@@ -68,6 +72,7 @@ public sealed partial class DonJEnemySpawner
                          _justiceActiveProfileResetPending ||
                          _justiceAmnestyPending ||
                          _justiceLegalReleaseFinalizationPending ||
+                         _justicePoliceDeathNoCellReleaseProtectionRestorePending ||
                          _justiceCustodyTransferRollbackFinalizationPending;
 
         if (force ||
@@ -106,6 +111,7 @@ public sealed partial class DonJEnemySpawner
         _justiceRecognitionSynchronizedSuspended = true;
         _justiceRecognitionSynchronizedProfileSlot = -1;
         _justiceRecognitionCaptureResetPersistenceFailureLogged = false;
+        ResetJusticeRecognitionCaptureResetConfirmation();
     }
 
     private void SuppressJusticeRecognitionWantedLoss(string reason)
@@ -122,8 +128,28 @@ public sealed partial class DonJEnemySpawner
 
     private bool EnsureJusticeRecognitionCaptureResetDurable(string reason)
     {
+        string episodeId = _justiceCaseState == null
+            ? string.Empty
+            : _justiceCaseState.CustodyEpisodeId;
+        int profileSlot = _justiceActivePlayerProfileSlot;
+        if (IsJusticeCanonicalProfileSlot(profileSlot) &&
+            !string.IsNullOrWhiteSpace(episodeId) &&
+            _justiceRecognitionCaptureResetConfirmedProfileSlot == profileSlot &&
+            string.Equals(
+                _justiceRecognitionCaptureResetConfirmedEpisodeId,
+                episodeId,
+                System.StringComparison.Ordinal))
+        {
+            // Je ne recrée ni commande ni ForceSave pendant les retries wanted,
+            // inventaire, persistance ou FadeIn du même épisode de capture.
+            return true;
+        }
+
         if (NotifyJusticeRecognitionPlayerCaptured(reason))
         {
+            _justiceRecognitionCaptureResetConfirmedProfileSlot = profileSlot;
+            _justiceRecognitionCaptureResetConfirmedEpisodeId =
+                episodeId ?? string.Empty;
             if (_justiceRecognitionCaptureResetPersistenceFailureLogged)
             {
                 LogInfo(
@@ -142,6 +168,12 @@ public sealed partial class DonJEnemySpawner
                 "Reset plaque/tenue/mandat non durable; frontière d'arrestation suspendue et retry armé.");
         }
         return false;
+    }
+
+    private void ResetJusticeRecognitionCaptureResetConfirmation()
+    {
+        _justiceRecognitionCaptureResetConfirmedProfileSlot = -1;
+        _justiceRecognitionCaptureResetConfirmedEpisodeId = string.Empty;
     }
 
     private bool ClearJusticeRecognitionProfile(

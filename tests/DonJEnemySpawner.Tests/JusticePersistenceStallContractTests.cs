@@ -100,17 +100,19 @@ public sealed class JusticePersistenceStallContractTests
                 script,
                 "IsInsideJusticeCustody",
                 player.Position));
-            Assert.IsFalse(
+            Assert.IsTrue(
                 player.FreezePosition,
-                "Le détenu doit être mobile avant de rendre l'écran.");
-            Assert.IsTrue(fadeInCount >= 1, "Le masque ne doit pas rester noir.");
+                "Je garde le détenu gelé tant que le writer ne permet pas une admission durable.");
+            Assert.IsTrue(player.IsInvincible);
+            Assert.AreEqual(
+                0,
+                fadeInCount,
+                "Je ne rends jamais l'écran pendant une panne durable du writer.");
             Assert.IsFalse(
                 fadeInOutsideBolingbroke,
                 "Aucun fade-in ne doit révéler l'hôpital ou une position hors enceinte.");
-            Assert.IsFalse(
-                fadeInWhileFrozen,
-                "Aucun fade-in ne doit précéder la preuve de mobilité du détenu.");
-            Assert.IsFalse(GetField<bool>(
+            Assert.IsFalse(fadeInWhileFrozen);
+            Assert.IsTrue(GetField<bool>(
                 script,
                 "_justiceCustodyRespawnTransferPending"));
 

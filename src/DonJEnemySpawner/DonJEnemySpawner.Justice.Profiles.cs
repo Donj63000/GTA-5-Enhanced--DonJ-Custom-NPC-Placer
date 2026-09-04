@@ -1175,6 +1175,7 @@ public sealed partial class DonJEnemySpawner
         // intention d'amnistie sera neutralisée juste après sa normalisation et
         // ne pourra donc jamais effacer les étoiles du héros que j'active.
         CancelJusticeWantedClearRetry();
+        ResetJusticeInventoryRemovalRuntimeConfirmation();
 
         EnsureJusticePlayerProfilesInitialized();
         int[] repairArrestHoldingIntents =
@@ -1202,6 +1203,8 @@ public sealed partial class DonJEnemySpawner
             profile.PendingLegalReleaseFinalization
                 ? profile.PendingLegalReleaseSelectedWeapon
                 : JusticeUnarmedHash;
+        _justiceLegalReleaseWantedClearExecutionPending = false;
+        ResetJusticePoliceDeathNoCellReleaseProtectionRestoreState();
         _justiceLastCanonicalPlayerSlot = slot;
         _justiceLastCanonicalPlayerModelHash = profile.LastCanonicalPlayerModel;
         _justiceActivePlayerProfileSlot = slot;
