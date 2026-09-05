@@ -1702,14 +1702,8 @@ public sealed partial class DonJEnemySpawner
         // autre héros, même lorsque le contexte Justice bloque encore le reste.
         UpdateJusticeCustodyRespawnTransferMask(player);
         int nowRaw = GetJusticeRawGameTimeSafe();
-        if (UpdateJusticePoliceDeathPreJudgmentHolding(player, nowRaw))
-        {
-            // Je laisse le DeathFront seul propriétaire du dossier avant jugement
-            // et bloque les incidents, wanted et checkpoints tardifs pendant
-            // que le suspect vivant attend dans l'enceinte provisoire.
-            SuspendJusticeSentenceClocks(nowRaw);
-            return;
-        }
+        bool preJudgmentHoldingBlocksGameplay =
+            UpdateJusticePoliceDeathPreJudgmentHolding(player, nowRaw);
         if (HasOpenJusticeProfileResetWal())
         {
             // UpdateJusticeEarly possède seul le contrôleur du reset. Les scènes,
@@ -1730,6 +1724,23 @@ public sealed partial class DonJEnemySpawner
             // suspends ici même les reprises de détention afin qu'aucun effet
             // externe ne précède le retour d'une persistance fiable.
             SuspendJusticeSentenceClocks(nowRaw);
+            return;
+        }
+        if (preJudgmentHoldingBlocksGameplay)
+        {
+            // Je garde le dossier et les horloges gelés, mais laisse le writer
+            // confirmer le DeathFront dans le primaire puis le backup. Bloquer
+            // aussi cette rotation empêcherait le maintien de terminer un jour.
+            SuspendJusticeSentenceClocks(nowRaw);
+            if (HasJusticeDeathFrontPersistenceWork() &&
+                _justicePendingDeathFrontWalRecord == null &&
+                !HasJusticeDeferredRuntimeFronts() &&
+                !_justiceProfileSwitchPersistencePending)
+            {
+                // Je conserve la cadence, le backoff et l'exclusion des barrières
+                // critiques du checkpoint, sans forcer de flush sur le thread GTA.
+                PersistJusticeStateIfDue();
+            }
             return;
         }
         bool profileContextCompatible =
@@ -3254,7 +3265,7 @@ public sealed partial class DonJEnemySpawner
             }
         }
 
-        Vehicle[] vehicles = GetJusticeSnapshotVehicles();
+        Vehicle[] vehicles = GetJusticeVehicleCandidates(player);
 
         int vehicleCount = Math.Min(vehicles.Length, JusticeMaximumVehiclesPerEvent);
         for (int index = 0; index < vehicleCount; index++)
@@ -3655,7 +3666,8 @@ public sealed partial class DonJEnemySpawner
         bool playerVitalityDropped,
         bool weaponDischargeCausal)
     {
-        Ped[] nearbyPeds = GetJusticeWitnessCandidatesForActor(player);
+        Ped[] nearbyPeds = GetJusticeVictimCandidatesForActor(player);
+        Ped[] witnesses = GetJusticeWitnessCandidatesForActor(player);
         int processedHumans = 0;
 
         for (int index = 0; index < nearbyPeds.Length && processedHumans < JusticeMaximumWitnessesPerEvent; index++)
@@ -3723,7 +3735,7 @@ public sealed partial class DonJEnemySpawner
                     homicideCircumstances,
                     false,
                     0,
-                    nearbyPeds,
+                    witnesses,
                     causalEventId: homicideCausalEventId);
                 JusticeRecentVictim lethalRecent = RememberJusticeRecentVictim(
                     victim,
@@ -3778,7 +3790,7 @@ public sealed partial class DonJEnemySpawner
                 circumstances,
                 false,
                 0,
-                nearbyPeds,
+                witnesses,
                 causalEventId: assaultCausalEventId);
             RememberJusticeRecentVictim(
                 victim,
@@ -3791,7 +3803,7 @@ public sealed partial class DonJEnemySpawner
 
         if (hitVehicleRecently)
         {
-            ScanJusticeDamagedVehicles(player, nearbyPeds, hitVehicleRecently);
+            ScanJusticeDamagedVehicles(player, witnesses, hitVehicleRecently);
         }
     }
 
@@ -3800,7 +3812,7 @@ public sealed partial class DonJEnemySpawner
         Ped[] witnessCandidates,
         bool acceptUnbaselinedDamage)
     {
-        Vehicle[] vehicles = GetJusticeSnapshotVehicles();
+        Vehicle[] vehicles = GetJusticeVehicleCandidates(player);
 
         Vehicle currentVehicle = GetJusticeCurrentVehicleSafe(player);
         Vehicle lastVehicle = GetJusticeLastVehicleSafe(player);

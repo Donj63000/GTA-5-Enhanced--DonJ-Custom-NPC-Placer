@@ -235,8 +235,9 @@ public sealed class RuntimeStageIsolationTests
 
         foreach (string guard in new[]
         {
-            "if (UpdateJusticePoliceDeathPreJudgmentHolding(player, nowRaw))",
+            "if (preJudgmentHoldingBlocksGameplay)",
             "if (HasOpenJusticeProfileResetWal())",
+            "if (IsJusticeSentencePolicyRecoveryBlockingActiveProfile())",
             "if (_justiceBackupRepairPending)"
         })
         {

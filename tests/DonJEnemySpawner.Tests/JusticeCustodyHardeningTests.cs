@@ -51,22 +51,20 @@ public sealed class JusticeCustodyHardeningTests
     }
 
     [TestMethod]
-    public void DeferredAndShutdownRestore_AreExactDurableAndNeverRemoveAll()
+    public void DeferredAndShutdownRestore_PreserveProgressAndNeverRemoveAll()
     {
         string source = ReadCustodySource();
         string retry = ExtractMethodBody(source, "RetryJusticeDeferredInventoryRestore");
         AssertOrdered(
             retry,
-            "RestoreJusticeWeaponSnapshotMergeSafe(player, true, true)",
+            "RestoreJusticeDeferredWeapons(player)",
             "CommitJusticeDeferredInventoryRestore()");
 
         string commit = ExtractMethodBody(source, "CommitJusticeDeferredInventoryRestore");
         AssertOrdered(
             commit,
-            "JusticeWeaponSnapshot restoredSnapshot",
-            "_justiceWeaponSnapshot = null",
             "PersistJusticeDeferredRestoreRedundantly()",
-            "_justiceWeaponSnapshot = restoredSnapshot");
+            "_justiceWeaponSnapshot = null");
 
         string merge = ExtractMethodBody(source, "RestoreJusticeWeaponSnapshotMergeSafe");
         Assert.IsFalse(merge.Contains("RemoveJusticePlayerWeaponsSafe"));
@@ -84,6 +82,7 @@ public sealed class JusticeCustodyHardeningTests
             source,
             "RestoreJusticeInventoryProvisionallyOnShutdown");
         Assert.IsFalse(provisional.Contains("RemoveJusticePlayerWeaponsSafe"));
+        AssertOrdered(provisional, "if (_justiceDeferredInventoryRestore)", "RestoreJusticeDeferredWeapons(player)", "return;");
         StringAssert.Contains(provisional, "RestoreJusticeWeaponSnapshotMergeSafe(player, true, true)");
         StringAssert.Contains(provisional, "attempt < 3 && !restored");
         Assert.IsFalse(
@@ -875,7 +874,7 @@ public sealed class JusticeCustodyHardeningTests
             deferredRestore,
             "JusticeIsCustodyActive",
             "return;",
-            "RestoreJusticeWeaponSnapshotMergeSafe(player, true, true)");
+            "RestoreJusticeDeferredWeapons(player)");
     }
 
     [TestMethod]

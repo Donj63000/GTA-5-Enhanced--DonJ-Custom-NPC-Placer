@@ -265,6 +265,8 @@ public sealed partial class DonJEnemySpawner
 
     private sealed class JusticeWeaponSnapshotItem
     {
+        public bool DeferredRestoreAttempted;
+        public bool DeferredRestoreCompleted;
         internal int WeaponHash;
         internal int Ammo;
         internal int AmmoInClip;
@@ -274,6 +276,7 @@ public sealed partial class DonJEnemySpawner
 
     private sealed class JusticeWeaponSnapshot
     {
+        public string RestoreId = string.Empty;
         internal bool IsValidated;
         internal int SelectedWeaponHash = JusticeUnarmedHash;
         internal readonly List<JusticeWeaponSnapshotItem> Weapons = new List<JusticeWeaponSnapshotItem>();
@@ -6611,10 +6614,9 @@ public sealed partial class DonJEnemySpawner
         {
             // Le merge ne supprime aucune arme : cette commande de diagnostic ne
             // peut donc jamais aggraver un inventaire déjà partiellement restauré.
-            inventoryRestored = RestoreJusticeWeaponSnapshotMergeSafe(
-                player,
-                true,
-                true);
+            inventoryRestored = _justiceDeferredInventoryRestore
+                ? RestoreJusticeDeferredWeapons(player)
+                : RestoreJusticeWeaponSnapshotMergeSafe(player, true, true);
             if (inventoryRestored)
             {
                 _justiceDeferredInventoryRestore = true;
@@ -6622,6 +6624,11 @@ public sealed partial class DonJEnemySpawner
                 _justiceInventoryCustodyState =
                     JusticeInventoryCustodyState.RestorePending;
                 _justiceNextDeferredInventoryRestoreAt = 0;
+                foreach (JusticeWeaponSnapshotItem item in _justiceWeaponSnapshot.Weapons)
+                {
+                    item.DeferredRestoreAttempted = true;
+                    item.DeferredRestoreCompleted = true;
+                }
                 CommitJusticeDeferredInventoryRestore();
             }
             else
@@ -6644,7 +6651,7 @@ public sealed partial class DonJEnemySpawner
         _justiceNextInventoryPersistenceRetryAt = 0;
         EnsureJusticeCustodyPlayerMobility(player);
         SetJusticeCustodyPoliceSuppression(false);
-        SelectJusticeUnarmedSafe(player);
+        if (JusticeIsCustodyActive) SelectJusticeUnarmedSafe(player);
         JusticeMarkStateDirty();
         JusticeFlushStateNow();
         LogWarning(
@@ -6965,7 +6972,9 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyTransferPending = false;
         _justiceCustodyResumePending = false;
         _justiceOutsideCustodySinceAt = 0;
-        CleanupJusticeCustodyEntitiesAndGroups();
+        // Je conserve les recherches natives pendant l'évasion, même si une
+        // riposte des gardes avait porté le wanted au-dessus de trois étoiles.
+        CleanupJusticeCustodyEntitiesAndGroupsCore(false);
         _justiceCustodyPlayerStateStored = false;
         JusticeRegisterEscape();
 
@@ -9430,6 +9439,8 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
+        if (_justiceDeferredInventoryRestore) return PersistJusticeDeferredRestoreRedundantly();
+
         if (_justiceInventoryRemoved && _justiceWeaponSnapshot != null)
         {
             bool restored = RestoreJusticeWeaponSnapshot(player);
@@ -9462,10 +9473,6 @@ public sealed partial class DonJEnemySpawner
                         JusticeMarkStateDirty();
                         if (!PersistJusticeDeferredRestoreRedundantly())
                         {
-                            _justiceInventoryRemoved = true;
-                            _justiceWeaponControlsLocked = true;
-                            _justiceInventoryCustodyState =
-                                JusticeInventoryCustodyState.RemovedVerified;
                             return false;
                         }
 
@@ -9573,17 +9580,6 @@ public sealed partial class DonJEnemySpawner
         return fullyRestored && RestoreJusticeWeaponSnapshotMergeSafe(player, true, true);
     }
 
-    private bool PersistJusticeDeferredRestoreRedundantly()
-    {
-        if (!JusticeFlushStateNow())
-        {
-            return false;
-        }
-
-        JusticeMarkStateDirty();
-        return JusticeFlushStateNow();
-    }
-
     private void RetryJusticeDeferredInventoryRestore(Ped player, int now)
     {
         if (!_justiceDeferredInventoryRestore || _justiceWeaponSnapshot == null ||
@@ -9602,7 +9598,7 @@ public sealed partial class DonJEnemySpawner
         _justiceNextDeferredInventoryRestoreAt = JusticeCustodyFutureTime(
             now,
             JusticeCustodyDeferredRestoreRetryMs);
-        if (!RestoreJusticeWeaponSnapshotMergeSafe(player, true, true))
+        if (!RestoreJusticeDeferredWeapons(player))
         {
             return;
         }
@@ -9617,13 +9613,16 @@ public sealed partial class DonJEnemySpawner
 
     private bool CommitJusticeDeferredInventoryRestore()
     {
-        JusticeWeaponSnapshot restoredSnapshot = _justiceWeaponSnapshot;
-        int restoredPlayerHandle = _justiceCustodyPlayerHandle;
-        int restoredModelHash = _justiceCustodyPlayerModelHash;
-        int restoredPlayerSlot = _justiceCustodyPlayerSlot;
-
+        if (_justiceWeaponSnapshot == null) return false;
+        foreach (JusticeWeaponSnapshotItem item in _justiceWeaponSnapshot.Weapons)
+            if (!item.DeferredRestoreCompleted) return false;
+        // Je prouve les marqueurs de restitution dans les deux copies avant
+        // d'oublier le snapshot. Un ancien backup ne pourra plus redonner les armes.
+        if (!PersistJusticeDeferredRestoreRedundantly()) return false;
         _justiceDeferredInventoryRestore = false;
         _justiceWeaponSnapshot = null;
+        _justiceInventoryPreparedRestoreId = null;
+        _justiceInventoryPreparedRestoreSlot = -1;
         _justiceInventoryRemoved = false;
         _justiceWeaponControlsLocked = false;
         _justiceInventoryCustodyState = JusticeInventoryCustodyState.None;
@@ -9632,26 +9631,8 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyPlayerModelHash = 0;
         _justiceCustodyPlayerSlot = -1;
         JusticeMarkStateDirty();
-        if (PersistJusticeDeferredRestoreRedundantly())
-        {
-            return true;
-        }
-
-        // Je garde le snapshot en mémoire tant que son effacement n'est pas
-        // durable. Le merge exact est idempotent et ne supprime aucune arme.
-        _justiceDeferredInventoryRestore = true;
-        _justiceWeaponSnapshot = restoredSnapshot;
-        _justiceInventoryRemoved = false;
-        _justiceWeaponControlsLocked = false;
-        _justiceInventoryCustodyState = JusticeInventoryCustodyState.RestorePending;
-        _justiceCustodyPlayerHandle = restoredPlayerHandle;
-        _justiceCustodyPlayerModelHash = restoredModelHash;
-        _justiceCustodyPlayerSlot = restoredPlayerSlot;
-        _justiceNextDeferredInventoryRestoreAt = JusticeCustodyFutureTime(
-            Game.GameTime,
-            JusticeCustodyDeferredRestoreRetryMs);
-        JusticeMarkStateDirty();
-        return false;
+        JusticeFlushStateNow();
+        return true;
     }
 
     private bool RestoreJusticeWeaponSnapshotMergeSafe(
@@ -11018,6 +10999,11 @@ public sealed partial class DonJEnemySpawner
 
     private void CleanupJusticeCustodyEntitiesAndGroups()
     {
+        CleanupJusticeCustodyEntitiesAndGroupsCore(true);
+    }
+
+    private void CleanupJusticeCustodyEntitiesAndGroupsCore(bool clearWanted)
+    {
         Ped player = null;
         try
         {
@@ -11026,7 +11012,7 @@ public sealed partial class DonJEnemySpawner
         catch
         {
         }
-        ResetJusticeCustodyGuardRetaliation(player, true, false);
+        ResetJusticeCustodyGuardRetaliation(player, clearWanted, false);
         SetJusticeCustodyPoliceSuppression(false);
         _justiceNextPoliceSuppressionAt = 0;
         CleanupJusticeCustodySceneEntitiesAndGroups();
@@ -11478,7 +11464,7 @@ public sealed partial class DonJEnemySpawner
             (deferredInventoryRestore &&
              (!ValidateJusticeWeaponSnapshot(snapshot) || inventoryRemoved || weaponControlsLocked)) ||
             (voluntaryPayment != null &&
-             (savedActive || !caseState.Enabled || IsJusticeCustodyPhase(caseState.Phase))) ||
+             (savedActive || IsJusticeCustodyPhase(caseState.Phase))) ||
             (guardRetaliationActive &&
              (!savedActive || waitingForRespawn || deathRebindPending ||
               (caseState.Phase != JusticePhase.Incarcerated &&
@@ -11955,6 +11941,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         writer.WriteStartElement("InventorySnapshot");
+        if (!string.IsNullOrEmpty(_justiceWeaponSnapshot.RestoreId)) writer.WriteAttributeString("restoreId", _justiceWeaponSnapshot.RestoreId);
         writer.WriteAttributeString("validated", _justiceWeaponSnapshot.IsValidated ? "true" : "false");
         writer.WriteAttributeString(
             "selectedWeapon",
@@ -11973,6 +11960,8 @@ public sealed partial class DonJEnemySpawner
             writer.WriteAttributeString("ammo", item.Ammo.ToString(CultureInfo.InvariantCulture));
             writer.WriteAttributeString("clip", item.AmmoInClip.ToString(CultureInfo.InvariantCulture));
             writer.WriteAttributeString("tint", item.Tint.ToString(CultureInfo.InvariantCulture));
+            writer.WriteAttributeString("restoreAttempted", item.DeferredRestoreAttempted ? "true" : "false");
+            writer.WriteAttributeString("restoreCompleted", item.DeferredRestoreCompleted ? "true" : "false");
             for (int componentIndex = 0; componentIndex < item.ComponentHashes.Count; componentIndex++)
             {
                 writer.WriteStartElement("Component");
@@ -12809,10 +12798,13 @@ public sealed partial class DonJEnemySpawner
 
         JusticeWeaponSnapshot snapshot = new JusticeWeaponSnapshot
         {
+            RestoreId = snapshotElement.GetAttribute("restoreId"),
             IsValidated = isValidated,
             SelectedWeaponHash = selectedWeaponHash
         };
 
+        Guid restoreId;
+        if (snapshot.RestoreId.Length > 0 && !Guid.TryParseExact(snapshot.RestoreId, "N", out restoreId)) return null;
         XmlNodeList weaponNodes = snapshotElement.SelectNodes("Weapon");
         if (weaponNodes == null || weaponNodes.Count > JusticeCustodyMaxWeapons)
         {
@@ -12868,8 +12860,14 @@ public sealed partial class DonJEnemySpawner
                 return null;
             }
 
+            bool restoreAttempted, restoreCompleted;
+            if (!TryReadJusticeBoolStrict(weaponElement, "restoreAttempted", false, out restoreAttempted) ||
+                !TryReadJusticeBoolStrict(weaponElement, "restoreCompleted", false, out restoreCompleted) ||
+                (restoreCompleted && !restoreAttempted) || (restoreAttempted && snapshot.RestoreId.Length == 0)) return null;
             JusticeWeaponSnapshotItem item = new JusticeWeaponSnapshotItem
             {
+                DeferredRestoreAttempted = restoreAttempted,
+                DeferredRestoreCompleted = restoreCompleted,
                 WeaponHash = weaponHash,
                 Ammo = ammo,
                 AmmoInClip = ammoInClip,
@@ -13178,6 +13176,13 @@ public sealed partial class DonJEnemySpawner
             !IsJusticeCustodyPlayerIdentityCompatible(player) ||
             (!_justiceInventoryRemoved && !_justiceDeferredInventoryRestore))
         {
+            return;
+        }
+
+        if (_justiceDeferredInventoryRestore)
+        {
+            // Je garde les marqueurs de reprise et les armes deja rendues a l'arret.
+            RestoreJusticeDeferredWeapons(player);
             return;
         }
 

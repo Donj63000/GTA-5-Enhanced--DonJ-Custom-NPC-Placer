@@ -131,7 +131,17 @@ public sealed class JusticePreJudgmentHoldingTests
             "UpdateJusticeCustodyRespawnTransferMask(player)",
             "UpdateJusticePoliceDeathPreJudgmentHolding(player, nowRaw)",
             "HasOpenJusticeProfileResetWal()",
-            "_justiceBackupRepairPending");
+            "IsJusticeSentencePolicyRecoveryBlockingActiveProfile()",
+            "_justiceBackupRepairPending",
+            "if (preJudgmentHoldingBlocksGameplay)",
+            "SuspendJusticeSentenceClocks(nowRaw)",
+            "HasJusticeDeathFrontPersistenceWork()",
+            "_justicePendingDeathFrontWalRecord == null",
+            "!HasJusticeDeferredRuntimeFronts()",
+            "!_justiceProfileSwitchPersistencePending",
+            "PersistJusticeStateIfDue()",
+            "return;",
+            "bool profileContextCompatible");
         StringAssert.Contains(
             failSafe,
             "UpdateJusticePoliceDeathPreJudgmentHolding(player, now)");

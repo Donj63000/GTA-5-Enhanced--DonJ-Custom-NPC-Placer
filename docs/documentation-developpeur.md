@@ -886,6 +886,15 @@ d'écriture empêche cette mutation de se transformer en nouvel épisode artific
 succès : une exception du getter renvoie ce niveau fiable, jamais zéro par défaut,
 et ne peut donc simuler ni perte d'étoiles ni éligibilité artificielle au mandat.
 
+Les alliés possédés par DonJ sont exclus par le même prédicat que les témoins
+judiciaires. Cette exclusion est revérifiée sur les observateurs déjà suivis,
+y compris pendant leur délai de dénonciation. La sélection filtre les distances
+avant le quota, donne la priorité aux policiers et fait tourner le point de
+départ du snapshot. Les victimes et véhicules judiciaires ont leurs propres
+buffers réutilisés et curseurs : huit morts, vingt-quatre victimes au total et
+seize véhicules au maximum, sans nouvelle requête monde. Les preuves causales,
+les générations d'entités et les fenêtres d'attribution restent obligatoires.
+
 L'exposition d'un observateur appartient à une génération d'entité complète, pas
 à son seul handle. Chaque état mémorise le `handle`, le hash du modèle et la
 `MemoryAddress` native du `Ped`. Toute divergence remplace l'état et repart avec
@@ -1924,6 +1933,88 @@ Règle :
 Quand on change une constante stable, il faut mettre à jour le test correspondant.
 Quand on ajoute une fonctionnalité testable hors jeu, il faut ajouter un test.
 Ne jamais supprimer un test juste pour faire passer la suite.
+
+### Admission après mort policière : progression du backup sous masque
+
+`UpdateJusticeSystem` maintient physiquement le suspect avant ses gardes de
+persistance, puis laisse uniquement progresser les rotations `DeathFront` déjà
+préparées lorsque le holding bloque le gameplay. Le checkpoint respecte les
+contrôleurs de reset de profil, de récupération de politique et de réparation du
+backup, ainsi que les fronts WAL non acquittés, événements différés et changements
+de profil en cours de persistance. Les barrières critiques, le debounce de deux
+secondes et le backoff restent ceux du checkpoint existant. Aucun flush disque
+bloquant n'est ajouté au thread GTA.
+
+Sans cette maintenance, le primaire pouvait contenir `pendingDeathCapture=true`
+et le WAL rester `Ambiguous` tandis que le backup ne contenait pas encore la mort.
+Le holding attendait la confirmation que son propre retour anticipé empêchait
+d'obtenir, laissant l'écran noir indéfiniment. Le contrôleur physique du holding
+reste sans mutation judiciaire : seul l'orchestrateur poursuit la preuve primaire
+puis backup avant de reprendre l'admission normale.
+
+`JusticePoliceDeathHospitalRespawnTests` exerce ce chemin avec les trois slots et
+leurs modèles GTA canoniques, Mission Row/Bolingbroke, le reload d'un état
+`Ambiguous`, une amende débitée une seule fois, un writer retardé ou indisponible,
+une observation de révision sautée et les barrières concurrentes. Ces régressions
+pilotent Early/Late sans appeler `JusticeFlushStateNow`,
+`JusticeAwaitQueuedPersistenceForTests` ni `PersistJusticeStateIfDue` depuis le
+test. L'attente du repository ne fait qu'achever une écriture déjà enfilée.
+Le modèle de fondu dure 350 ms et un FadeOut interrompt réellement un FadeIn;
+une réaffirmation sur un écran déjà entièrement noir n'est pas un nouveau cycle
+visible. Après admission, cinq minutes sont simulées à Bolingbroke sans nouveau
+fondu ni confiscation; les peines courtes sont observées jusqu'avant leur
+libération attendue. La validation des natives et de l'icône de chargement GTA
+reste manuelle, dans DOM-23/DOM-24.
+
+### Correctifs de la revue Justice du 5 septembre 2026
+
+`Justice.Payment.cs` résout un litige sans recalculer les sanctions historiques :
+la dette exigible, la peine restante et les pénalités déjà appliquées sont
+conservées. Une transaction ouverte du profil propriétaire interdit cette action,
+même lorsque ce profil est seulement consulté. Le paiement volontaire est accepté
+avec Justice OFF et conserve cette préférence après rechargement. Une intention
+annulée avant débit (`Rejected`, `DebtCommitted=true`, aucun essai) est relisible.
+
+`Justice.Persistence.InventoryRestore.cs` sépare la restitution initiale exacte,
+avant reprise du jeu, de la reprise différée en jeu libre. Le snapshot porte un
+`restoreId` et chaque arme les attributs facultatifs `restoreAttempted` et
+`restoreCompleted`. Leur absence dans les anciens XML signifie aucune tentative.
+Le DTO typé, son clone et les chemins de récupération conservent ces marqueurs.
+Un refus natif vérifié reste réessayable ; un effet incertain reste protégé par
+le WAL et n'est jamais rejoué aveuglément si l'arme n'est plus possédée.
+
+La reprise différée traite au plus quatre armes par tentative cadencée à cinq
+secondes. La preuve initiale est conservée par restitution et propriétaire :
+les lots suivants s'appuient sur leur WAL sans répéter deux attentes disque.
+Une arme terminée est ignorée, même si le joueur l'a ensuite jetée.
+Une arme déjà possédée conserve munitions, teinte et sélection ; seuls ses
+composants encore manquants peuvent être complétés. La configuration d'une arme
+nouvellement donnée est tentée une fois, sans réécriture aux reprises suivantes.
+Le menu de récupération et l'arrêt du script respectent aussi cette progression.
+La restitution exacte d'un inventaire encore confisqué reste distincte.
+
+L'acceptation d'une file writer ne prouve pas une écriture. La barrière attend
+une révision exacte contenant les marqueurs, puis une seconde rotation avant
+d'oublier le snapshot. Une révision sautée est recapturée. Le WAL borné
+`InventoryRestoreResult` enregistre `restoreId`, hash de l'arme et schéma avant
+effet, sous le slot propriétaire. Sa confirmation exige une preuve du résultat
+dans le primaire puis le backup ; `Ambiguous` peut reconstruire ce résultat
+depuis un backup antérieur. Aucun inventaire complet n'est copié dans le WAL.
+
+Les deux stores Recognition distinguent `Missing`, `Valid`, `Corrupt`,
+`Unsupported` et `Unavailable` sur leurs six variantes. Une erreur d'accès ou
+une version inconnue interdit la quarantaine et la republication de toutes les
+copies. Une corruption démontrée conserve le mécanisme de quarantaine existant.
+L'initialisation échouée est retentée après cinq secondes sans perdre les
+commandes en attente ; son état indisponible apparaît dans le diagnostic.
+L'évasion conserve le wanted courant et applique seulement le minimum trois.
+
+`JusticeReviewRegressionTests.cs` couvre les litiges, paiements OFF, annulations,
+verrous réels de fichiers, reprise d'initialisation, alliés, quotas et rotation,
+évasion à zéro à cinq étoiles, writer retardé, révisions sautées, compatibilité
+XML, restitution partielle, ambiguïté native et reprise depuis le backup. La
+matrice manuelle ajoute les scénarios RVJ : ces tests hors jeu ne remplacent pas
+les vérifications de natives, mods tiers et frametime dans GTA.
 
 ## 24. Performance et stabilité
 

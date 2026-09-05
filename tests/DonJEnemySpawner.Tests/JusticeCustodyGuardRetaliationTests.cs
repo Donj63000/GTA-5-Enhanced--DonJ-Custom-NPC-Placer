@@ -357,7 +357,9 @@ public sealed class JusticeCustodyGuardRetaliationTests
             "TryPersistJusticeCustodyDeathFrontToWal(");
         StringAssert.Contains(
             cleanup,
-            "ResetJusticeCustodyGuardRetaliation(player, true, false)");
+            "CleanupJusticeCustodyEntitiesAndGroupsCore(true)");
+        StringAssert.Contains(ReadMethod(source, "CleanupJusticeCustodyEntitiesAndGroupsCore"),
+            "ResetJusticeCustodyGuardRetaliation(player, clearWanted, false)");
         StringAssert.Contains(reset, "_justiceCustodyGuardRetaliationActive = false");
         StringAssert.Contains(reset, "Hash.CLEAR_PED_TASKS");
     }

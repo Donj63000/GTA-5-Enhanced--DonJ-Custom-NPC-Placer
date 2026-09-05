@@ -26,6 +26,7 @@ public sealed partial class DonJEnemySpawner
 
     private void BindAndSynchronizeJusticeRecognition()
     {
+        JusticeRecognitionBridge.BindObserverExclusion(IsJusticeOwnedAlly);
         JusticeRecognitionBridge.BindWantedMinimum(
             delegate(int level)
             {
@@ -106,6 +107,7 @@ public sealed partial class DonJEnemySpawner
         JusticeRecognitionBridge.SetEnabled(false);
         JusticeRecognitionBridge.SetActiveProfile(null);
         JusticeRecognitionBridge.UnbindWantedMinimum();
+        JusticeRecognitionBridge.BindObserverExclusion(null);
 
         _justiceRecognitionSynchronizedEnabled = false;
         _justiceRecognitionSynchronizedSuspended = true;

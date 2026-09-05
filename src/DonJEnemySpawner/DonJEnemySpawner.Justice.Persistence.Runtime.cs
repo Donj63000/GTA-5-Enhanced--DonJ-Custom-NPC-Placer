@@ -682,6 +682,14 @@ public sealed partial class DonJEnemySpawner
 
     private bool PersistJusticeFinancialOutcomeWithoutEffect(string operationKind)
     {
+        // Je reconstruis aussi la barriere d'une annulation relue du backup.
+        // Sans WAL encore present, son resultat doit redevenir durable avant
+        // la terminalisation ; aucun chemin ici ne rappelle le cash.
+        if (_justiceFinancialBarrierRevision <= 0L &&
+            !EnsureJusticeFinancialPreparedSnapshot(operationKind))
+        {
+            return false;
+        }
         if (!JusticeFlushStateNow())
         {
             return false;
@@ -1672,6 +1680,7 @@ public sealed partial class DonJEnemySpawner
 
         TrackJusticeDeathFrontResultSnapshots(snapshot);
         TrackJusticeProfileResetResultSnapshots(snapshot);
+        TrackJusticeInventoryRestoreResults(snapshot);
 
         bool persisted = true;
         if (waitForDisk)
@@ -1966,7 +1975,7 @@ public sealed partial class DonJEnemySpawner
         for (int index = 0; index < open.Count; index++)
         {
             JusticeWalRecord record = open[index];
-            if (record.State != JusticeWalState.Attempted ||
+            if (record.OperationKind == JusticeInventoryRestoreWalKind || record.State != JusticeWalState.Attempted ||
                 string.Equals(
                     record.OperationKind,
                     JusticeDeathFrontOperationKind,
@@ -2004,6 +2013,7 @@ public sealed partial class DonJEnemySpawner
             long diskRevision = _justiceRepository.GetDiagnostics().DiskRevision;
             AdvanceJusticeDeathFrontWalResults(diskRevision);
             AdvanceJusticeProfileResetWalResults(diskRevision);
+            AdvanceJusticeInventoryRestoreResults(diskRevision);
             // Je ne qualifie jamais un résultat sur la seule acceptation du
             // writer. La révision qui acquitte l'effet doit déjà être relue sur
             // disque, sinon un crash pourrait faire référencer un XML inexistant.
@@ -2014,7 +2024,7 @@ public sealed partial class DonJEnemySpawner
             for (int index = 0; index < open.Count; index++)
             {
                 JusticeWalRecord record = open[index];
-                if (record.State != JusticeWalState.Ambiguous ||
+                if (record.OperationKind == JusticeInventoryRestoreWalKind || record.State != JusticeWalState.Ambiguous ||
                     string.Equals(
                         record.OperationKind,
                         JusticeDeathFrontOperationKind,
@@ -2025,7 +2035,7 @@ public sealed partial class DonJEnemySpawner
                         StringComparison.Ordinal) ||
                     record.PersistenceRevision >= diskRevision)
                 {
-                    if (record.State == JusticeWalState.Ambiguous &&
+                    if (record.OperationKind != JusticeInventoryRestoreWalKind && record.State == JusticeWalState.Ambiguous &&
                         !string.Equals(
                             record.OperationKind,
                             JusticeDeathFrontOperationKind,
@@ -2140,6 +2150,10 @@ public sealed partial class DonJEnemySpawner
                 }
                 newestProfileResetResult = candidate;
                 RecoverJusticeProfileResetFromWal(candidate);
+            }
+            else if (candidate.OperationKind == JusticeInventoryRestoreWalKind)
+            {
+                RecoverJusticeInventoryRestoreResult(candidate);
             }
             else if (candidate.OperationKind == "FineDebit" ||
                      candidate.OperationKind == "VoluntaryFinePayment")

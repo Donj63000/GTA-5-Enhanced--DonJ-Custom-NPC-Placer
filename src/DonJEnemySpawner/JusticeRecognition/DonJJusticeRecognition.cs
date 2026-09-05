@@ -40,6 +40,20 @@ namespace DonJ.JusticeRecognition
         private static bool? _desiredRuntimeSuspended;
         private static string _desiredActiveProfileId;
         private static Func<int, bool> _wantedMinimumHandler;
+        private static Func<Ped, bool> _observerExclusionHandler;
+
+        internal static void BindObserverExclusion(Func<Ped, bool> handler)
+        {
+            lock (SyncRoot) { _observerExclusionHandler = handler; }
+        }
+
+        internal static bool IsObserverExcluded(Ped observer)
+        {
+            Func<Ped, bool> handler;
+            lock (SyncRoot) { handler = _observerExclusionHandler; }
+            try { return handler != null && handler(observer); }
+            catch { return true; }
+        }
 
         private static long _nextCriticalCommandId;
 
@@ -1065,6 +1079,66 @@ namespace DonJ.JusticeRecognition
         public string Reason { get; set; }
     }
 
+    internal enum RecognitionReadStatus
+    {
+        Missing,
+        Valid,
+        Corrupt,
+        Unsupported,
+        Unavailable
+    }
+
+    internal static class RecognitionFileReader
+    {
+        internal static RecognitionReadStatus Read<T>(string path, long maximumBytes,
+            Func<T, bool> supported, Func<T, bool> valid, out T data) where T : class
+        {
+            data = null;
+            try
+            {
+                // Je tente l'ouverture réelle : File.Exists masque notamment
+                // les refus d'accès et ne constitue pas une preuve d'absence.
+                using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    if (stream.Length <= 0L || stream.Length > maximumBytes)
+                        return RecognitionReadStatus.Corrupt;
+                    using (XmlReader reader = XmlReader.Create(stream, new XmlReaderSettings
+                    {
+                        DtdProcessing = DtdProcessing.Prohibit,
+                        XmlResolver = null,
+                        MaxCharactersInDocument = maximumBytes
+                    }))
+                    {
+                        data = new XmlSerializer(typeof(T)).Deserialize(reader) as T;
+                    }
+                }
+                if (data == null) return RecognitionReadStatus.Corrupt;
+                if (!supported(data)) { data = null; return RecognitionReadStatus.Unsupported; }
+                if (!valid(data)) { data = null; return RecognitionReadStatus.Corrupt; }
+                return RecognitionReadStatus.Valid;
+            }
+            catch (FileNotFoundException) { return RecognitionReadStatus.Missing; }
+            catch (DirectoryNotFoundException) { return RecognitionReadStatus.Missing; }
+            catch (Exception exception)
+            {
+                data = null;
+                for (Exception current = exception; current != null; current = current.InnerException)
+                {
+                    if (current is IOException || current is UnauthorizedAccessException ||
+                        current is System.Security.SecurityException)
+                        return RecognitionReadStatus.Unavailable;
+                }
+                return exception is InvalidOperationException || exception is XmlException
+                    ? RecognitionReadStatus.Corrupt : RecognitionReadStatus.Unavailable;
+            }
+        }
+
+        internal static bool BlocksRecovery(RecognitionReadStatus status)
+        {
+            return status == RecognitionReadStatus.Unavailable || status == RecognitionReadStatus.Unsupported;
+        }
+    }
+
     internal sealed class RecognitionCriticalIntentStore
     {
         private const long MaximumJournalBytes = 256L * 1024L;
@@ -1101,15 +1175,28 @@ namespace DonJ.JusticeRecognition
             RecognitionCriticalIntentJournalData primaryRollback;
             RecognitionCriticalIntentJournalData backupRollback;
 
-            bool hasPrimary = TryLoadFile(_path, out primary);
-            bool hasBackup = TryLoadFile(_backupPath, out backup);
-            bool hasTemporary = TryLoadFile(_temporaryPath, out temporary);
-            bool hasBackupTemporary =
-                TryLoadFile(_backupTemporaryPath, out backupTemporary);
-            bool hasPrimaryRollback =
-                TryLoadFile(_primaryRollbackPath, out primaryRollback);
-            bool hasBackupRollback =
-                TryLoadFile(_backupRollbackPath, out backupRollback);
+            RecognitionReadStatus primaryStatus = ReadFile(_path, out primary);
+            bool hasPrimary = primaryStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus backupStatus = ReadFile(_backupPath, out backup);
+            bool hasBackup = backupStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus temporaryStatus = ReadFile(_temporaryPath, out temporary);
+            bool hasTemporary = temporaryStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus backupTemporaryStatus = ReadFile(_backupTemporaryPath, out backupTemporary);
+            bool hasBackupTemporary = backupTemporaryStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus primaryRollbackStatus = ReadFile(_primaryRollbackPath, out primaryRollback);
+            bool hasPrimaryRollback = primaryRollbackStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus backupRollbackStatus = ReadFile(_backupRollbackPath, out backupRollback);
+            bool hasBackupRollback = backupRollbackStatus == RecognitionReadStatus.Valid;
+
+            if (RecognitionFileReader.BlocksRecovery(primaryStatus) ||
+                RecognitionFileReader.BlocksRecovery(backupStatus) ||
+                RecognitionFileReader.BlocksRecovery(temporaryStatus) ||
+                RecognitionFileReader.BlocksRecovery(backupTemporaryStatus) ||
+                RecognitionFileReader.BlocksRecovery(primaryRollbackStatus) ||
+                RecognitionFileReader.BlocksRecovery(backupRollbackStatus))
+            {
+                return false;
+            }
 
             string selectedPath = null;
             DateTime selectedWrite = DateTime.MinValue;
@@ -1194,7 +1281,7 @@ namespace DonJ.JusticeRecognition
             {
                 // Je réédite le dernier intent valide afin que primaire et
                 // backup redeviennent immédiatement identiques.
-                ForceSave(data);
+                return ForceSave(data);
             }
 
             return true;
@@ -1371,55 +1458,15 @@ namespace DonJ.JusticeRecognition
             }
         }
 
-        private static bool TryLoadFile(
-            string path,
-            out RecognitionCriticalIntentJournalData data)
+        private static bool TryLoadFile(string path, out RecognitionCriticalIntentJournalData data)
         {
-            data = null;
+            return ReadFile(path, out data) == RecognitionReadStatus.Valid;
+        }
 
-            if (!File.Exists(path))
-            {
-                return false;
-            }
-
-            try
-            {
-                FileInfo file = new FileInfo(path);
-                if (file.Length <= 0L ||
-                    file.Length > MaximumJournalBytes)
-                {
-                    return false;
-                }
-
-                XmlSerializer serializer =
-                    new XmlSerializer(
-                        typeof(RecognitionCriticalIntentJournalData));
-                XmlReaderSettings settings =
-                    new XmlReaderSettings
-                    {
-                        DtdProcessing = DtdProcessing.Prohibit,
-                        XmlResolver = null,
-                        CloseInput = true
-                    };
-
-                using (FileStream stream = new FileStream(
-                    path,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read))
-                using (XmlReader reader = XmlReader.Create(stream, settings))
-                {
-                    data = serializer.Deserialize(reader)
-                        as RecognitionCriticalIntentJournalData;
-                }
-
-                return Sanitize(data);
-            }
-            catch
-            {
-                data = null;
-                return false;
-            }
+        private static RecognitionReadStatus ReadFile(string path, out RecognitionCriticalIntentJournalData data)
+        {
+            return RecognitionFileReader.Read(path, MaximumJournalBytes,
+                value => value.SchemaVersion == 1, Sanitize, out data);
         }
 
         private static bool Sanitize(
@@ -1505,6 +1552,10 @@ namespace DonJ.JusticeRecognition
 
         private bool _initialized;
         private bool _initializationFailed;
+        private int _nextInitializationRetryAt;
+        private const int InitializationRetryMilliseconds = 5000;
+        // Je réserve ce chemin aux tests de contention, sans toucher au dossier GTA.
+        private string _initializationDirectoryOverride = null;
         private bool _enabled;
         private bool _runtimeSuspended;
 
@@ -1552,6 +1603,7 @@ namespace DonJ.JusticeRecognition
 
         private bool _insideSearchZone;
         private int _recognitionScanSequence;
+        private int _observerScanCursor;
 
         private bool _hasQueuedEnabledState;
         private bool _queuedEnabledState;
@@ -1860,7 +1912,7 @@ namespace DonJ.JusticeRecognition
             {
                 RemoveSearchZoneBlip();
 
-                if (_store != null)
+                if (_initialized && _store != null)
                 {
                     _store.ForceSave(_saveData);
                 }
@@ -1887,7 +1939,7 @@ namespace DonJ.JusticeRecognition
                 return true;
             }
 
-            if (_initializationFailed)
+            if (_initializationFailed && unchecked(Environment.TickCount - _nextInitializationRetryAt) < 0)
             {
                 return false;
             }
@@ -1917,7 +1969,7 @@ namespace DonJ.JusticeRecognition
                     runtimeDirectory = assemblyDirectory;
                 }
 
-                string dataDirectory =
+                string dataDirectory = _initializationDirectoryOverride ??
                     ResolveWritableDataDirectory(
                         runtimeDirectory,
                         assemblyDirectory);
@@ -1960,6 +2012,7 @@ namespace DonJ.JusticeRecognition
                 _lastRecognitionScanTime = Game.GameTime;
 
                 _initialized = true;
+                _initializationFailed = false;
 
                 _logger.Info(
                     "module_initialized",
@@ -1969,25 +2022,38 @@ namespace DonJ.JusticeRecognition
             }
             catch (Exception exception)
             {
+                bool firstFailure = !_initializationFailed;
+                _initialized = false;
                 _initializationFailed = true;
+                _nextInitializationRetryAt = unchecked(Environment.TickCount + InitializationRetryMilliseconds);
+                // Je conserve les commandes en attente, mais libère les ressources
+                // incomplètes avant la prochaine initialisation cadencée.
+                try { if (_hud != null) _hud.Dispose(); } catch { }
+                try { if (_radiusBlip != null) _radiusBlip.Remove(); } catch { }
+                _hud = null;
+                _radiusBlip = null;
+                _store = null;
+                _saveData = null;
 
                 try
                 {
-                    NativeUi.Notify(
+                    if (firstFailure) NativeUi.Notify(
                         "~r~Justice avancée : échec d'initialisation " +
-                        "du module de reconnaissance.");
+                        "du module de reconnaissance; nouvelle tentative dans 5 secondes.");
                 }
                 catch
                 {
                     // Ignoré.
                 }
 
-                if (_logger != null)
+                if (firstFailure && _logger != null)
                 {
                     _logger.Error(
                         "module_initialization_failed",
                         exception);
                 }
+
+                RefreshStatusLinesCache();
 
                 return false;
             }
@@ -4397,10 +4463,9 @@ namespace DonJ.JusticeRecognition
             bool bodyRecognitionAvailable =
                 disguiseMultiplier > 0.0f;
 
-            Ped[] candidates =
-                GetCandidatePeds(
-                    playerPed,
-                    RecognitionPolicy.ObserverMaximumDistance);
+            RemoveInvalidObservers();
+            Ped[] candidates = SelectObserverCandidates(playerPed,
+                GetCandidatePeds(playerPed, RecognitionPolicy.ObserverMaximumDistance));
 
             _recognitionScanSequence++;
 
@@ -4577,6 +4642,67 @@ namespace DonJ.JusticeRecognition
             }
         }
 
+        private readonly Ped[] _observerCandidates = new Ped[MaximumTrackedObservers];
+
+        private Ped[] SelectObserverCandidates(Ped player, Ped[] nearby)
+        {
+            Array.Clear(_observerCandidates, 0, _observerCandidates.Length);
+            if (nearby == null || nearby.Length == 0) return _observerCandidates;
+            int count = 0;
+            int start = _observerScanCursor % nearby.Length;
+            // Je reserve d'abord la visibilite aux policiers proches ; la rotation
+            // evite qu'un meme prefixe du tableau monopolise les douze examens.
+            for (int pass = 0; pass < 2 && count < MaximumTrackedObservers; pass++)
+            {
+                for (int offset = 0; offset < nearby.Length && count < MaximumTrackedObservers; offset++)
+                {
+                    Ped ped = nearby[(start + offset) % nearby.Length];
+                    if (!IsValidObserver(ped, player)) continue;
+                    bool police = IsLawOfficer(ped);
+                    if (police != (pass == 0)) continue;
+                    float radius = police ? RecognitionPolicy.PoliceObserverMaximumDistance
+                        : RecognitionPolicy.CivilianObserverMaximumDistance;
+                    try
+                    {
+                        if (!JusticeSpatialMath.IsWithinSquaredDistance(ped.Position, player.Position, radius)) continue;
+                    }
+                    catch { continue; }
+                    bool duplicate = false;
+                    for (int i = 0; i < count; i++) duplicate |= _observerCandidates[i].Handle == ped.Handle;
+                    if (!duplicate) _observerCandidates[count++] = ped;
+                }
+            }
+            _observerScanCursor = (start + 1) % nearby.Length;
+            return _observerCandidates;
+        }
+
+        private void RemoveInvalidObservers()
+        {
+            _observerRemovalBuffer.Clear();
+            foreach (KeyValuePair<int, ObserverExposureRuntime> pair in _observerExposures)
+                if (!IsValidRuntimeObserver(pair.Value)) _observerRemovalBuffer.Add(pair.Key);
+            foreach (int handle in _observerRemovalBuffer) _observerExposures.Remove(handle);
+            _observerRemovalBuffer.Clear();
+        }
+
+        private bool TryMakeObserverRoom(bool lawOfficer)
+        {
+            int remove = 0;
+            float lowest = float.MaxValue;
+            foreach (KeyValuePair<int, ObserverExposureRuntime> pair in _observerExposures)
+            {
+                ObserverExposureRuntime candidate = pair.Value;
+                if ((candidate.LastScanSequence != _recognitionScanSequence ||
+                     (lawOfficer && !candidate.IsLawOfficer)) &&
+                    candidate.Exposure < lowest)
+                {
+                    lowest = candidate.Exposure;
+                    remove = pair.Key;
+                }
+            }
+            return remove != 0 && _observerExposures.Remove(remove);
+        }
+
         private void UpdateObserverExposure(
             Ped observer,
             bool lawOfficer,
@@ -4602,8 +4728,8 @@ namespace DonJ.JusticeRecognition
                     memoryAddress))
             {
                 if (!stateFound &&
-                    _observerExposures.Count >=
-                    MaximumTrackedObservers)
+                    _observerExposures.Count >= MaximumTrackedObservers &&
+                    (exposureRate <= 0.0f || !TryMakeObserverRoom(lawOfficer)))
                 {
                     return;
                 }
@@ -5004,7 +5130,7 @@ namespace DonJ.JusticeRecognition
                 return false;
             }
 
-            if (IsPlayerDead(observer))
+            if (IsPlayerDead(observer) || JusticeRecognitionBridge.IsObserverExcluded(observer))
             {
                 return false;
             }
@@ -5031,7 +5157,7 @@ namespace DonJ.JusticeRecognition
         {
             if (state == null ||
                 !EntityExists(state.Ped) ||
-                IsPlayerDead(state.Ped))
+                IsPlayerDead(state.Ped) || JusticeRecognitionBridge.IsObserverExcluded(state.Ped))
             {
                 return false;
             }
@@ -5404,6 +5530,8 @@ namespace DonJ.JusticeRecognition
         {
             try
             {
+                if (_initializationFailed)
+                    return new[] { "Reconnaissance indisponible : nouvelle tentative automatique" };
                 if (!_initialized ||
                     _currentProfile == null)
                 {
@@ -8049,15 +8177,28 @@ namespace DonJ.JusticeRecognition
             JusticeRecognitionSaveData primaryRollback;
             JusticeRecognitionSaveData backupRollback;
 
-            bool hasPrimary = TryLoadFile(_path, out primary);
-            bool hasBackup = TryLoadFile(_backupPath, out backup);
-            bool hasTemporary = TryLoadFile(_temporaryPath, out temporary);
-            bool hasBackupTemporary =
-                TryLoadFile(_backupTemporaryPath, out backupTemporary);
-            bool hasPrimaryRollback =
-                TryLoadFile(_primaryRollbackPath, out primaryRollback);
-            bool hasBackupRollback =
-                TryLoadFile(_backupRollbackPath, out backupRollback);
+            RecognitionReadStatus primaryStatus = ReadFile(_path, out primary);
+            bool hasPrimary = primaryStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus backupStatus = ReadFile(_backupPath, out backup);
+            bool hasBackup = backupStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus temporaryStatus = ReadFile(_temporaryPath, out temporary);
+            bool hasTemporary = temporaryStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus backupTemporaryStatus = ReadFile(_backupTemporaryPath, out backupTemporary);
+            bool hasBackupTemporary = backupTemporaryStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus primaryRollbackStatus = ReadFile(_primaryRollbackPath, out primaryRollback);
+            bool hasPrimaryRollback = primaryRollbackStatus == RecognitionReadStatus.Valid;
+            RecognitionReadStatus backupRollbackStatus = ReadFile(_backupRollbackPath, out backupRollback);
+            bool hasBackupRollback = backupRollbackStatus == RecognitionReadStatus.Valid;
+
+            if (RecognitionFileReader.BlocksRecovery(primaryStatus) ||
+                RecognitionFileReader.BlocksRecovery(backupStatus) ||
+                RecognitionFileReader.BlocksRecovery(temporaryStatus) ||
+                RecognitionFileReader.BlocksRecovery(backupTemporaryStatus) ||
+                RecognitionFileReader.BlocksRecovery(primaryRollbackStatus) ||
+                RecognitionFileReader.BlocksRecovery(backupRollbackStatus))
+            {
+                throw new IOException("Sauvegarde reconnaissance indisponible ou incompatible; aucune variante remplacee.");
+            }
 
             string selectedPath = null;
             DateTime selectedWrite = DateTime.MinValue;
@@ -8600,75 +8741,15 @@ namespace DonJ.JusticeRecognition
             }
         }
 
-        private bool TryLoadFile(
-            string path,
-            out JusticeRecognitionSaveData data)
+        private bool TryLoadFile(string path, out JusticeRecognitionSaveData data)
         {
-            data = null;
+            return ReadFile(path, out data) == RecognitionReadStatus.Valid;
+        }
 
-            if (!File.Exists(path))
-            {
-                return false;
-            }
-
-            try
-            {
-                FileInfo file = new FileInfo(path);
-                if (file.Length <= 0L ||
-                    file.Length > MaximumSaveBytes)
-                {
-                    throw new InvalidDataException(
-                        "Taille de sauvegarde reconnaissance invalide.");
-                }
-
-                XmlSerializer serializer =
-                    new XmlSerializer(
-                        typeof(JusticeRecognitionSaveData));
-
-                XmlReaderSettings settings =
-                    new XmlReaderSettings
-                    {
-                        DtdProcessing =
-                            DtdProcessing.Prohibit,
-                        XmlResolver = null,
-                        CloseInput = true
-                    };
-
-                using (FileStream stream =
-                    new FileStream(
-                        path,
-                        FileMode.Open,
-                        FileAccess.Read,
-                        FileShare.Read))
-                using (XmlReader reader =
-                    XmlReader.Create(
-                        stream,
-                        settings))
-                {
-                    data =
-                        serializer.Deserialize(reader)
-                        as JusticeRecognitionSaveData;
-                }
-
-                if (data == null ||
-                    data.SchemaVersion != RecognitionPolicy.SchemaVersion)
-                {
-                    throw new InvalidDataException(
-                        "Version de sauvegarde reconnaissance non prise en charge.");
-                }
-
-                return true;
-            }
-            catch (Exception exception)
-            {
-                _logger.Error(
-                    "save_load_failed_" +
-                    Path.GetFileName(path),
-                    exception);
-
-                data = null;
-                return false;
-            }
+        private RecognitionReadStatus ReadFile(string path, out JusticeRecognitionSaveData data)
+        {
+            return RecognitionFileReader.Read(path, MaximumSaveBytes,
+                value => value.SchemaVersion == RecognitionPolicy.SchemaVersion, value => true, out data);
         }
 
         private static int GetCurrentGameTimeForRetry()

@@ -2505,3 +2505,220 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Réarmement explicite de la protection et du FadeIn lors des refus, acquittement légal atomique avec restauration sur échec writer, remise à zéro de l'horloge jusqu'au rendu final, conservation de la source capturée seulement pour l'identité active compatible, puis réalignement des tests et signatures. Les commandes temporaires incorrectes ont été remplacées par les chemins officiels du projet.
 - Vérification: Passe finale `TestResults\safety-20260904-100137` verte à `788/788`; build réelle verte sans avertissement ni erreur; suite réelle verte à `665/665`; aucun échec restant.
 - Résolution: Tous les défauts intermédiaires sont corrigés ou qualifiés comme erreurs de commande. Seul le test gameplay réel décrit dans l'entrée principale reste nécessaire.
+
+
+## 2026-09-05 01:55:19 +02:00 - Verification de base bloquee par un testhost precedent
+- Statut: Resolu pendant la revue, avant implementation.
+- Contexte: Premiere execution safety de la base 2ccf18e.
+- Symptome: Echec de copie des assemblies de test pendant le build Release.
+- Sources verifiees: `TestResults/safety-20260905-015417/logs/build-release.log`; collecte `bug-reports/20260905-015449-safety-failure` (logs GTA Enhanced, Scripts, legacy et evenements Windows).
+- Extraits utiles: `MSB3027` et `MSB3021`; `Le fichier est verrouille par : testhost (42228)`.
+- Analyse / hypothese: Un processus de test anterieur conservait les assemblies chargees. Aucun defaut Justice n'est implique par cette erreur de copie.
+- Action menee: Attente de la liberation du host et relance sequentielle des verifications, sans modifier la base.
+- Verification: Safety API locale `665/665` dans `TestResults/safety-20260905-015706`, puis stub `788/788` dans `TestResults/safety-20260905-020136`, build sans erreur ni avertissement.
+- Resolution: Base verifiee; les builds et tests suivants restent sequentiels.
+
+## 2026-09-05 02:35:17 +02:00 - Premier lot de tests de regression de la revue Justice
+- Statut: Causes identifiees et corrigees; verification finale referencee dans l'entree de cloture.
+- Contexte: Tests cibles des correctifs de paiement, reconnaissance et gameplay.
+- Symptome: Trois echecs sur seize : action de litige sans liaison de profil dans la fixture, reflection d'un champ interne de paiement et selection d'un policier non simule.
+- Sources verifiees: `TestResults/justice-review-targeted-1/*.trx`; collecte `bug-reports/20260905-023244-justice-review-targeted-1`; sources Payment et Recognition et fixtures MSTest.
+- Extraits utiles: `Attendu : 0, Reel : 600`, `NullReferenceException` au champ CashWriteResult et `Assert.AreSame` pour le policier.
+- Analyse / hypothese: L'action litige utilisait le tableau de profils alors que le dossier actif de la fixture n'y etait pas encore lie. La reflection omettait les champs internes. La police Recognition est identifiee par groupe natif, pas par modele.
+- Action menee: Ciblage explicite du dossier actif dans l'action, reflection public/non-public et simulation du groupe natif COP.
+- Verification: La passe suivante valide les cas de litige et paiement; les simulations natives sont completees dans les occurrences suivantes.
+- Resolution: Aucun binaire intermediaire deploye; la validation finale couvre les nouveaux tests.
+
+## 2026-09-05 02:40:11 +02:00 - Deuxieme lot cible de la revue Justice
+- Statut: Causes identifiees et corrigees.
+- Contexte: Ajout des preuves de restitution par arme, du writer retarde et des reprises depuis le backup.
+- Symptome: Trois echecs sur 53 : un contrat source de reprise encore exact, un handler de test convertissant directement InputArgument et une existence native de PNJ non simulee.
+- Sources verifiees: `TestResults/justice-review-targeted-2/*.trx`; collecte `bug-reports/20260905-024011-justice-review-targeted-2`; `tools/Stubs/NIBScriptHookVDotNet2/StubApi.cs`.
+- Extraits utiles: Marqueur absent `RestoreJusticeWeaponSnapshotMergeSafe(player, true, true)` et arme 102 non ajoutee dans la simulation.
+- Analyse / hypothese: Le nouveau chemin differe respecte la progression plutot qu'un merge exact. Les natives du stub recoivent des enveloppes InputArgument dont la valeur interne doit etre lue par reflection.
+- Action menee: Mise a jour du contrat sans retirer ses controles de non-destruction et decodage correct des arguments natives dans les fixtures.
+- Verification: La passe suivante valide les tests d'inventaire, y compris le backup et l'arme jetee apres restitution.
+- Resolution: Regressions intermediaires circonscrites aux fixtures et contrats source; aucun echec d'inventaire restant dans le lot suivant.
+
+## 2026-09-05 02:43:01 +02:00 - Troisieme lot cible de la revue Justice
+- Statut: Fixture corrigee, reprise dans la suite complete.
+- Contexte: Verification ciblee apres correction des simulations d'inventaire.
+- Symptome: Un seul echec sur 53 : le policier attendu n'est pas selectionne.
+- Sources verifiees: `TestResults/justice-review-targeted-3/*.trx`; collecte `bug-reports/20260905-024301-justice-review-targeted-3`; helper Recognition `EntityExists` et harness des tests existants.
+- Extraits utiles: `Assert.AreSame` dans `ObserverSelection_PrioritizesPoliceAndExcludesAllies`.
+- Analyse / hypothese: Recognition utilise DOES_ENTITY_EXIST, que le stub renvoie faux sans handler. Les candidats de la fixture etaient donc tous invalides.
+- Action menee: Simulation explicite de l'existence native, puis ajout d'une assertion de rotation et du retrait d'un observateur devenu allie.
+- Verification: Reexecution dans la suite complete; les 52 autres tests cibles passent deja.
+- Resolution: Cause corrigee; aucun changement du comportement de validation des entites en production.
+
+## 2026-09-05 02:46:33 +02:00 - Defauts confirmes par la revue Justice
+- Statut: Correctifs implementes; validation automatique finale et matrice GTA distinctes.
+- Contexte: Revue approfondie demandee, suivie de l'implementation du plan approuve.
+- Symptome: Litige recalculant peine et dette historiques, paiement OFF rejete au reload, annulation pre-debit illisible, restitution differee repetitive et preuve disque insuffisante, baisse du wanted a l'evasion, allies et candidats pertinents mal filtres, fichiers Recognition verrouilles pris pour corrompus et initialisation bloquee sans retry.
+- Sources verifiees: Sources Justice Payment/Custody/Persistence/Recognition/Candidates et tests; `C:/Users/nodig/AppData/Local/Temp/donj-review-recognition-lock-b9bdf651427c4821bf953677472ad51e/Recognition.log`; collectes des occurrences ci-dessus. Les logs GTA presents contiennent aussi des injections de tests : ils ne constituent pas une reproduction en jeu de ces defauts.
+- Extraits utiles: Reproduction hors jeu du 5 septembre a 01:58:58 locale : `save_load_failed_Recognition.xml` et `.bak` avec `System.IO.IOException`, suivis de `save_corrupt_variants_quarantined`. La lecture des sources et les simulations de revue montraient aussi une peine restante de 40 secondes remontee a 240 apres resolution de litige.
+- Analyse / hypothese: Confusion entre historique et dette courante, entre enfilement et durabilite, et entre indisponibilite I/O et corruption. Les quotas etaient appliques a un prefixe fixe avant selection des candidats utiles.
+- Action menee: Progression persistante par arme et WAL de resultat, preuves de deux copies, invariants financiers corriges, lecture Recognition typee et retry cadence, exclusion des allies, rotation des candidats et nettoyage d'evasion conservant le wanted. Documentation et matrice RVJ ajoutees.
+- Verification: Tests comportementaux et verifications finales consignes dans l'entree de cloture. Aucun scenario GTA manuel execute pendant cette implementation.
+- Resolution: La cloture gameplay exige les lignes RVJ de `docs/validation-justice-manuelle.md`; aucune installation GTA modifiee.
+
+
+## 2026-09-05 02:50:00 +02:00 - Premiere suite complete du correctif Justice
+- Statut: Cinq ecarts corriges et verifies par le lot cible de 103 tests.
+- Contexte: Execution complete sur API stub apres implementation, `TestResults/justice-review-full-stub-1`.
+- Symptome: `805/810` : contrat source de nettoyage de riposte obsolete, ancienne attente de remplacement d'un schema Recognition futur, deux tests attendant un observateur a exposition nulle, et reprise d'une annulation Prepared depuis le backup qui ne converge pas.
+- Sources verifiees: `TestResults/justice-review-full-stub-1/*.trx`; collecte `justice-review-full-stub-1` sous `bug-reports`; log GTA Enhanced `Scripts/DonJCustomNpcPlacer.log` lu pour les injections financieres; helpers Payment/Persistence et tests Recognition.
+- Extraits utiles: `VoluntaryPayment_CancelledPreparedIntentCannotBeResurrectedFromBackup` depassait douze reprises; deux `KeyNotFoundException` sur l'exposition d'un observateur sans ligne de vue; `IOException` explicite sur le schema 99 preserve.
+- Analyse / hypothese: Le lecteur accepte desormais l'annulation effectivement emise, ce qui expose une barriere financiere runtime non reconstruite lors du reload de ce terminal. Les autres ecarts portent sur les contrats source et la representation des observateurs sans exposition.
+- Action menee: Reconstruction de la barriere du resultat sans effet avant cloture, sans rappel cash; preservation des etats nuls tant que le quota le permet et evictions reservees aux nouveaux observateurs utiles; adaptation des deux contrats source sans retrait des gardes de securite.
+- Verification: `TestResults/justice-review-targeted-5` : 103 tests reussis, dont toute la classe de paiement volontaire, les stores Recognition, les scenarios runtime Recognition et les nouvelles regressions.
+- Resolution: Echecs corriges; suites officielles completes consignees dans l'entree finale. Les erreurs natives injectees dans les logs ne sont pas des incidents observes dans GTA.
+
+## 2026-09-05 02:53:13 +02:00 - Nom de helper incorrect dans un test de riposte
+- Statut: Resolu.
+- Contexte: Compilation du lot cible 4 apres adaptation du contrat de nettoyage.
+- Symptome: `CS0103` dans `JusticeCustodyGuardRetaliationTests.cs`, helper `ExtractMethodBody` absent.
+- Sources verifiees: Sortie MSBuild du lot cible 4; lecture de la classe de tests; collecte `justice-review-test-helper-build` sous `bug-reports`.
+- Extraits utiles: `Le nom ExtractMethodBody n'existe pas dans le contexte actuel`.
+- Analyse / hypothese: Cette classe nomme son helper d'extraction `ReadMethod`, contrairement a une autre classe de tests.
+- Action menee: Remplacement de l'appel par le helper existant, sans modifier le code produit pour contourner le test.
+- Verification: Build du lot cible 5 sans erreur; 103/103 tests reussis.
+- Resolution: Erreur de test intermediaire corrigee avant les suites finales.
+
+
+## 2026-09-05 03:40:34 +02:00 - Validation finale du plan correctif Justice
+- Statut: Implementation terminee et validee automatiquement; validation manuelle GTA non executee.
+- Contexte: Application du plan de revue Justice approuve, sur la base 2ccf18e, sans modification hors de ce perimetre.
+- Symptome: Defauts financiers, I/O Recognition, reprise d'inventaire, selection des candidats et baisse du wanted a l'evasion decrits dans l'entree principale de cette revue.
+- Sources verifiees: Sources et diff final; `TestResults/safety-20260905-031206/safety-tests.trx`; `TestResults/safety-20260905-032302/safety-tests.trx`; `TestResults/justice-review-final-inventory/*.trx`; `TestResults/justice-review-final-release/*.trx`; logs build/ABI/packaging de ces deux runs safety; manifest et hash du livrable reel.
+- Extraits utiles: `821/821` sur le stub; `686/686` avec l'API locale; `686/686` sur la commande Release directe; build `0 Avertissement(s), 0 Erreur(s)`; ABI NIB v2 valide sur 32 types et 189 membres.
+- Analyse / hypothese: Les regressions confirmees sont corrigees et les anciens contrats du projet restent couverts. La restitution conserve une preuve initiale par identifiant/proprietaire, utilise le WAL pour chaque lot et exige les deux copies pour sa cloture. Les choix du joueur ne sont plus remis a leur ancienne valeur pendant les retries.
+- Action menee: Correctifs de paiement/litige, suivi par arme et WAL de resultat, lecture Recognition typee et retry sans notifications repetitives, exclusion des allies, rotation des victimes/vehicules/observateurs et conservation du wanted a l'evasion. Ajout de 33 cas de regression, adaptation des contrats source concernes et de neuf scenarios manuels RVJ.
+- Verification:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools/run-safety-checks.ps1 -UseStubApi` : reussi, run final `safety-20260905-031206`, 821/821, package et contrat ENdll verifies.
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools/run-safety-checks.ps1` : reussi, run `safety-20260905-032302`, API NIB locale 2.11.6.0, 686/686, package verifie.
+  - `dotnet build GTA5modDEV.sln -c Release` : reussi sans erreur ni avertissement.
+  - `dotnet test GTA5modDEV.sln -c Release --logger trx --results-directory TestResults/justice-review-final-release` : reussi, 686/686.
+  - `git diff --check` : aucune erreur de whitespace. Relecture des sources, des DTO, des chemins de reprise et des documents modifies.
+  - SHA-256 du `DonJCustomNpcPlacer.ENdll` reel et du package teste : `4D2060662467F5D2C222BF356801EEB1308DD35382CAFBC4589C139CAD98A786`.
+- Resolution: Aucun echec automatique restant. Aucun binaire installe dans GTA. Les packages locaux portent `sourceDirty=true` et leur refus de deploiement est attendu. Les natives reelles, armes DLC/add-on, compatibilites avec les autres mods et frametimes restent a valider avec la matrice RVJ, avant une publication jouable. Une restitution dont l'effet est indeterminable conserve son snapshot et ne redonne pas aveuglement une arme absente.
+- Fichiers modifies ou ajoutes:
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.Payment.cs`
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.Custody.cs`
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs`
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.Candidates.cs`
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.Recognition.cs`
+  - `src/DonJEnemySpawner/JusticeRecognition/DonJJusticeRecognition.cs`
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.Persistence.InventoryRestore.cs`
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.Persistence.Runtime.cs`
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.Persistence.TypedCustody.cs`
+  - `src/DonJEnemySpawner/DonJEnemySpawner.Justice.Persistence.PolicyUpgrade.cs`
+  - `tests/DonJEnemySpawner.Tests/JusticeReviewRegressionTests.cs`
+  - `tests/DonJEnemySpawner.Tests/JusticeCustodyHardeningTests.cs`
+  - `tests/DonJEnemySpawner.Tests/JusticeCustodyGuardRetaliationTests.cs`
+  - `tests/DonJEnemySpawner.Tests/JusticeRecognitionDomainTests.cs`
+  - `docs/documentation-developpeur.md`
+  - `docs/validation-justice-manuelle.md`
+  - `crash-list.md`
+
+## 2026-09-06 00:07:55 +02:00 - Chargement noir infini après mort policière de Trevor
+- Statut: Cause confirmée; correctif et tests de régression en cours.
+- Contexte: Mort en poursuite avec Trevor, session GTA Enhanced du 5 septembre 2026; build installée 2ccf18e, SHA-256 8FC4F9E476A4085EB0900BFCEBE2D8A820F79865192A53AD37F0DA46581D6095.
+- Symptôme: Écran noir avec icône de chargement répétée, fermeture manuelle du jeu; aucune admission terminée pour Trevor.
+- Sources vérifiées: Collecte bug-reports/20260906-000339-prison-black-screen-trevor (logs GTA, loaders, Scripts, Recognition, événements Windows, Git); copies non modifiées du primaire, backup et WAL Justice dans ce rapport.
+- Extraits utiles: DonJCustomNpcPlacer.log, 2026-09-05 23:25:00 : maintien source=DurablePoliceDeath, slot=2, modèle=-1686040670. Primaire génération 1486 pendingDeathCapture=true; backup 1485 pendingDeathCapture=false; WAL PoliceCapture Prepared -> Attempted -> Ambiguous 1486, sans Confirmed. Aucun événement Application GTA exploitable entre 23:15 et 23:40.
+- Analyse / hypothèse: Le retour anticipé du holding dans UpdateJusticeSystem empêche PersistJusticeStateIfDue de publier la rotation backup nécessaire à la confirmation du DeathFront. La capture attend cette confirmation, d'où le verrou circulaire.
+- Action menée: Analyse croisée code/disque, conservation des preuves; ajout d'une reproduction par ticks réels sans flush métier artificiel, puis correction ciblée prévue dans l'orchestrateur.
+- Vérification: Base avant intervention : build API locale sans erreur ni avertissement, 7 tests ciblés locaux et 63 tests ciblés stub réussis. Aucun scénario GTA manuel exécuté pendant l'intervention.
+- Résolution: À compléter par les résultats de validation du correctif; aucune sauvegarde utilisateur ni installation GTA modifiée.
+
+## 2026-09-06 00:07:55 +02:00 - Première fixture de reproduction du blocage prison
+- Statut: Synchronisation de la fixture ajustée avant correction produit.
+- Contexte: TestResults/prison-black-screen-reproduction, sept déclinaisons des trois héros et du reload.
+- Symptôme: 0/7; assertion Ambiguous observant encore Attempted après un seul tick.
+- Sources vérifiées: TRX du run et sources Early/holding/DeathFront; collecte de l'incident principal ci-dessus.
+- Extraits utiles: Assert.AreEqual attendu Ambiguous, réel Attempted, JusticePoliceDeathHospitalRespawnTests.cs.
+- Analyse / hypothèse: Early précède l'établissement physique du holding; sa qualification exige le tick suivant, même quand le writer a fini.
+- Action menée: Deux ticks réels avant l'observation, sans appel à la finalisation ni à une nouvelle sauvegarde depuis le test.
+- Vérification: Reproduction suivante référencée dans la clôture; ce premier échec ne constitue pas encore la preuve complète du blocage.
+- Résolution: Fixture réalignée sur l'ordre réel Early/Late.
+
+## 2026-09-06 00:18:35 +02:00 - Reproduction confirmée du verrou de sauvegarde prison
+- Statut: Cause identifiée et traitée pendant les tests; aucun binaire intermédiaire installé.
+- Contexte: TestResults/prison-black-screen-reproduction-2.
+- Symptôme: 0/7 : les ticks ne confirment jamais la seconde copie du DeathFront.
+- Sources vérifiées: TRX du run, logs runtime injectés par les tests, sources Justice et StubApi; collectes bug-reports/20260906-000339-prison-black-screen-trevor et bug-reports/20260906-001636-prison-black-screen-regression-runs.
+- Extraits utiles: 0/7 : les ticks ne confirment jamais la seconde copie du DeathFront.
+- Analyse / hypothèse: Le primaire est écrit, le holding bloque Late et la rotation backup reste inaccessible. Le reload reproduit le même verrou.
+- Action menée: Correction ciblée de UpdateJusticeSystem pour maintenir les rotations techniques sous les gardes existants.
+- Vérification: Les runs suivants et la validation finale sont référencés dans l'entrée de clôture.
+- Résolution: Cause circonscrite; aucune sauvegarde de jeu modifiée pour contourner un test.
+
+## 2026-09-06 00:18:36 +02:00 - Distinction des cycles visibles et réaffirmations du masque
+- Statut: Cause identifiée et traitée pendant les tests; aucun binaire intermédiaire installé.
+- Contexte: TestResults/prison-black-screen-fix-1.
+- Symptôme: 0/7 sur le comptage des FadeOut, malgré une admission terminée.
+- Sources vérifiées: TRX du run, logs runtime injectés par les tests, sources Justice et StubApi; collectes bug-reports/20260906-000339-prison-black-screen-trevor et bug-reports/20260906-001636-prison-black-screen-regression-runs.
+- Extraits utiles: 0/7 sur le comptage des FadeOut, malgré une admission terminée.
+- Analyse / hypothèse: Le transfert réaffirme plusieurs fois un écran déjà noir pendant ses barrières; ces appels ne constituent pas des cycles visibles ni des FadeIn interrompus.
+- Action menée: Le test vérifie un seul passage visible vers noir, un seul FadeIn progressif, aucune interruption et aucune nouvelle commande après admission.
+- Vérification: Les runs suivants et la validation finale sont référencés dans l'entrée de clôture.
+- Résolution: Cause circonscrite; aucune sauvegarde de jeu modifiée pour contourner un test.
+
+## 2026-09-06 00:18:36 +02:00 - Cadence des retries de la rotation backup
+- Statut: Cause identifiée et traitée pendant les tests; aucun binaire intermédiaire installé.
+- Contexte: TestResults/prison-black-screen-fix-2.
+- Symptôme: 36/37 : le writer retardé observe mémoire 5 au lieu de 3 après quatre secondes.
+- Sources vérifiées: TRX du run, logs runtime injectés par les tests, sources Justice et StubApi; collectes bug-reports/20260906-000339-prison-black-screen-trevor et bug-reports/20260906-001636-prison-black-screen-regression-runs.
+- Extraits utiles: 36/37 : le writer retardé observe mémoire 5 au lieu de 3 après quatre secondes.
+- Analyse / hypothèse: La seconde rotation est retentée selon le debounce existant de deux secondes; la première écriture reste en cours, sans remplacement à chaque tick.
+- Action menée: Assertion de cadence bornée et de conservation de la première écriture; aucune modification produit supplémentaire.
+- Vérification: Les runs suivants et la validation finale sont référencés dans l'entrée de clôture.
+- Résolution: Cause circonscrite; aucune sauvegarde de jeu modifiée pour contourner un test.
+
+## 2026-09-06 00:18:36 +02:00 - Identités canoniques dans la simulation GTA
+- Statut: Cause identifiée et traitée pendant les tests; aucun binaire intermédiaire installé.
+- Contexte: TestResults/prison-black-screen-final-targeted.
+- Symptôme: 13/21 : rotation confirmée mais admission refusée avec les hashes numériques GTA réels.
+- Sources vérifiées: TRX du run, logs runtime injectés par les tests, sources Justice et StubApi; collectes bug-reports/20260906-000339-prison-black-screen-trevor et bug-reports/20260906-001636-prison-black-screen-regression-runs.
+- Extraits utiles: 13/21 : rotation confirmée mais admission refusée avec les hashes numériques GTA réels.
+- Analyse / hypothèse: Le stub Game.GenerateHash utilise des hashes .NET. Les nombres GTA codés dans la fixture étaient donc des modèles custom pour GetCurrentPlayerModelSlotSafe; le garde de modèle les refusait correctement.
+- Action menée: Utilisation de Model(player_zero/player_one/player_two), comme le reste du runtime simulé; conservation du ciblage explicite des trois slots et des assertions de débit/confiscation uniques.
+- Vérification: Les runs suivants et la validation finale sont référencés dans l'entrée de clôture.
+- Résolution: Cause circonscrite; aucune sauvegarde de jeu modifiée pour contourner un test.
+
+## 2026-09-06 00:20:22 +02:00 - Comptage de la confiscation native dans la régression prison
+- Statut: Assertion de fixture corrigée; retrait produit inchangé.
+- Contexte: TestResults/prison-black-screen-final-targeted-2.
+- Symptôme: 13/21; huit admissions terminées échouent sur un compteur API de retrait attendu à un au lieu de zéro.
+- Sources vérifiées: TRX du run, RemoveJusticePlayerWeaponsSafe, StubApi.WeaponCollection et logs runtime des admissions.
+- Extraits utiles: Assert.AreEqual attendu 1, réel 0; le produit appelle REMOVE_ALL_PED_WEAPONS avant le fallback player.Weapons.RemoveAll.
+- Analyse / hypothèse: Le retrait natif est déjà vérifié et ne doit donc pas appeler le fallback API. La fixture observait le mauvais compteur.
+- Action menée: Comptage de l'unique native de confiscation, contrôle du fallback restant à zéro et répétition après cinq minutes simulées.
+- Vérification: Run prison-black-screen-final-admission puis suites officielles; résultats définitifs dans l'entrée de clôture.
+- Résolution: Aucun changement du code de confiscation; l'assertion conserve la vérification d'absence de double retrait.
+
+## 2026-09-06 00:34:09 +02:00 - Validation finale du correctif de chargement prison
+- Statut: Correctif implémenté et validé automatiquement; validation manuelle GTA non exécutée.
+- Contexte: Application du plan après diagnostic de la mort de Trevor du 5 septembre, en préservant toutes les modifications préexistantes du dépôt.
+- Symptôme: Holding sous écran noir attendant un DeathFront Confirmed dont la rotation backup était bloquée par le retour anticipé de Late.
+- Sources vérifiées: Diff final; collectes prison-black-screen-trevor et prison-black-screen-regression-runs; TRX des reproductions, des tests ciblés et des suites officielles; manifest et hash du package local réel.
+- Extraits utiles: Reproduction avant correctif 0/7 avec échec de confirmation du DeathFront; après correction 842/842 sur stub, 686/686 sur API NIB locale et 686/686 sur la commande Release directe. Deux builds Release sans avertissement ni erreur. ABI NIB v2 vérifiée sur 32 types et 189 membres.
+- Analyse / hypothèse: Le holding physique reste prioritaire et ne mute pas le dossier. L'orchestrateur laisse ses seules rotations DeathFront continuer après les gardes reset/politique/réparation, sans dépasser un front WAL non acquitté, des événements différés ou un switch persistant. Le checkpoint garde cadence, backoff et barrière critique.
+- Action menée: Correction ciblée de UpdateJusticeSystem; 21 cas comportementaux ajoutés pour les trois héros, les deux sites, un reload Ambiguous, un débit et une confiscation uniques, le debounce, les propriétaires concurrents, le writer retardé/en panne, les révisions sautées et un fondu réellement progressif. Vérification de cinq minutes sans nouveau fondu après admission à Bolingbroke. Deux contrats source existants étendus. Documentation et matrice DOM-23/DOM-24 actualisées.
+- Vérification:
+  - powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1 -UseStubApi : réussi, TestResults/safety-20260906-002042, 842/842, ABI et package vérifiés.
+  - powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\run-safety-checks.ps1 : réussi, TestResults/safety-20260906-002550, 686/686, API NIB locale 2.11.6.0, package vérifié.
+  - dotnet build GTA5modDEV.sln -c Release : réussi, zéro erreur et avertissement.
+  - dotnet test GTA5modDEV.sln -c Release --logger trx --results-directory TestResults/prison-black-screen-final-release : réussi, 686/686.
+  - git diff --check : aucune erreur de whitespace; relecture du correctif et des tests terminée.
+  - SHA-256 du ENdll réel et du package testé : 5A2F1D985BE0E0CCFF3E7CCE18E63BAEAF7A85D8DA8C9F3E471D323D2D14D3BD, empreintes identiques.
+- Résolution: Aucun échec automatique restant. Les occurrences intermédiaires de fixture sont résolues; le verrou initial est reproduit avant correction puis absent dans les parcours par ticks après correction. La clôture gameplay exige encore DOM-23 et DOM-24 dans GTA. Aucun binaire ni sauvegarde utilisateur installé/remplacé; les packages locaux portent sourceDirty=true et le refus de déploiement prévu par le pipeline a été vérifié. Une panne disque persistante reste bloquante et n'est jamais faussement confirmée.
+- Fichiers modifiés pour cette intervention:
+  - src/DonJEnemySpawner/DonJEnemySpawner.Justice.cs
+  - tests/DonJEnemySpawner.Tests/JusticePoliceDeathHospitalRespawnTests.cs
+  - tests/DonJEnemySpawner.Tests/JusticePreJudgmentHoldingTests.cs
+  - tests/DonJEnemySpawner.Tests/RuntimeStageIsolationTests.cs
+  - docs/documentation-developpeur.md
+  - docs/validation-justice-manuelle.md
+  - crash-list.md

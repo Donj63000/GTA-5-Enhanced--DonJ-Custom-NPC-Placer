@@ -566,7 +566,10 @@ public sealed partial class DonJEnemySpawner
         valid &= debitAmount <= cashBefore && cashAfter == cashBefore - debitAmount &&
                  (!debitAttempted
                      ? attemptedAtUtcTicks == 0L &&
-                       cashWriteResult == JusticeCashWriteResult.Unknown && !debtCommitted
+                       ((cashWriteResult == JusticeCashWriteResult.Unknown && !debtCommitted &&
+                         resolution == JusticePaymentResolution.Prepared) ||
+                        (cashWriteResult == JusticeCashWriteResult.Rejected && debtCommitted &&
+                         resolution == JusticePaymentResolution.Rejected))
                      : attemptedAtUtcTicks > 0L) &&
                  (!debtCommitted ||
                   resolution == JusticePaymentResolution.Confirmed ||
@@ -682,7 +685,8 @@ public sealed partial class DonJEnemySpawner
             return;
         }
         EnsureJusticePlayerProfilesInitialized();
-        JusticeCaseState state = _justicePlayerProfiles[profileSlot].CaseState;
+        JusticeCaseState state = profileSlot == _justiceActivePlayerProfileSlot
+            ? _justiceCaseState : _justicePlayerProfiles[profileSlot].CaseState;
         long currentDispute = state == null ? 0L : Math.Max(0L, state.FineInDispute);
         if (state == null || currentDispute <= 0L ||
             confirmedAmount <= 0L || confirmedAmount != currentDispute)
@@ -690,9 +694,7 @@ public sealed partial class DonJEnemySpawner
             ShowStatus("Justice : le litige a changé, confirmation annulée.", 4200);
             return;
         }
-        if (profileSlot == _justiceActivePlayerProfileSlot &&
-            (_justiceFineDebitIntent != null ||
-             _justiceVoluntaryFinePaymentIntent != null))
+        if (HasJusticeProfileTransactionBlockingDispute(profileSlot))
         {
             ShowStatus("Justice : une transaction de paiement est encore ouverte.", 4200);
             return;
@@ -707,7 +709,8 @@ public sealed partial class DonJEnemySpawner
             currentDispute,
             JusticePolicy.MaxActiveFine);
         JusticePolicy.NormalizeFineLedger(state);
-        state.RecalculateTotals();
+        // Je conserve la dette exigible et le temps restant : les charges
+        // historiques comprennent aussi les sanctions déjà payées ou purgées.
         JusticeMarkStateDirty();
         bool persisted = JusticeFlushStateNow();
         LogWarning(
@@ -715,11 +718,47 @@ public sealed partial class DonJEnemySpawner
             "Résolution explicite en faveur du joueur; profil=" +
             profileSlot.ToString(CultureInfo.InvariantCulture) +
             ", montant=" + currentDispute.ToString(CultureInfo.InvariantCulture) +
-            ", persistance=" + (persisted ? "confirmée" : "en attente") + ".");
+            ", persistance=" + (persisted ? "enfilée" : "en attente") + ".");
         ShowStatus(
             persisted
                 ? "Justice : litige annulé explicitement, aucun nouveau débit."
                 : "Justice : litige résolu en mémoire, sauvegarde à retenter.",
             5500);
+    }
+
+    private bool HasJusticeProfileTransactionBlockingDispute(int slot)
+    {
+        if (_justiceBackupRepairPending || _justiceProfileSwitchPersistencePending ||
+            _justiceAmnestyPending || _justiceActiveProfileResetPending)
+        {
+            return true;
+        }
+        if (slot == _justiceActivePlayerProfileSlot &&
+            (_justiceFineDebitIntent != null || _justiceVoluntaryFinePaymentIntent != null ||
+             _justiceLegalReleaseFinalizationPending))
+        {
+            return true;
+        }
+        JusticePlayerProfileState profile = GetJusticePlayerProfileForSlot(slot);
+        if (profile != null && slot != _justiceActivePlayerProfileSlot &&
+            (HasJusticeProfilePendingRecoveryWal(profile) ||
+             (profile.CustodySnapshot != null &&
+              (profile.CustodySnapshot.FineDebitIntent != null ||
+               profile.CustodySnapshot.VoluntaryPaymentIntent != null)) ||
+             (profile.CustodySnapshot == null && HasJusticeProfileCustodyRecovery(profile))))
+        {
+            return true;
+        }
+        if (_justiceWriteAheadLog != null)
+        {
+            foreach (JusticeWalRecord transaction in _justiceWriteAheadLog.GetOpenTransactions())
+            {
+                if (transaction.ProfileSlot == slot)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

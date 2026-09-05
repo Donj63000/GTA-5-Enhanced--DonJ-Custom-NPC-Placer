@@ -862,12 +862,12 @@ public sealed partial class DonJEnemySpawner
                 weapon.Ammo,
                 weapon.AmmoInClip,
                 weapon.Tint,
-                weapon.ComponentHashes));
+                weapon.ComponentHashes, weapon.DeferredRestoreAttempted, weapon.DeferredRestoreCompleted));
         }
         return new JusticeInventoryPersistenceSnapshot(
             source.IsValidated,
             source.SelectedWeaponHash,
-            weapons);
+            weapons, source.RestoreId);
     }
 
     private bool IsJusticeSentencePolicyRecoveryBlockingActiveProfile()

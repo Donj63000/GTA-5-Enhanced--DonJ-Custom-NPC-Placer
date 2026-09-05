@@ -397,6 +397,514 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
             "_justicePlayerProfiles")[0].PendingDeathCapture);
     }
 
+    [DataTestMethod]
+    [DataRow(0, 180, false, 0)]
+    [DataRow(0, 600, false, 0)]
+    [DataRow(1, 180, false, 0)]
+    [DataRow(1, 600, false, 0)]
+    [DataRow(2, 180, false, 0)]
+    [DataRow(2, 600, false, 0)]
+    [DataRow(2, 600, true, 0)]
+    [DataRow(2, 600, false, 900)]
+    public void PoliceCapture_RuntimeTicksRotateBackupAndFinishAdmission(
+        int playerSlot,
+        int sentenceSeconds,
+        bool reloadAmbiguous,
+        int fineAmount)
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            StubRuntime.Reset();
+            // Je passe par le même hash de modèle que l'API simulée et que
+            // GetCurrentPlayerModelSlotSafe; ses hashes .NET diffèrent de GTA.
+            string model = new[] { "player_zero", "player_one", "player_two" }[playerSlot];
+            Ped player = Game.Player.Character;
+            player.Handle = 1500 + playerSlot;
+            player.Model = new Model(model);
+            player.Position = new GTA.Math.Vector3(310.0f, -590.0f, 43.0f);
+            player.IsDead = true;
+            Game.Player.IsDead = true;
+            Game.Player.WantedLevel = 3;
+            Game.Player.Money = 9876;
+            RuntimeAdmissionScreen screen = new RuntimeAdmissionScreen();
+            StubRuntime.NativeCallHandler = screen.Call;
+            DonJEnemySpawner script = null;
+            try
+            {
+                script = new DonJEnemySpawner();
+                ConfigureLivePoliceDeathCase(script, player, sentenceSeconds, playerSlot);
+                JusticeCaseState state = GetField<JusticeCaseState>(script, "_justiceCaseState");
+                state.FineDue = fineAmount;
+                state.Charges[0].Fine = fineAmount;
+                int cashWrites = 0;
+                SetField(script, "_justiceCashReadOverride", new Func<int, int?>(slot => Game.Player.Money));
+                SetField(script, "_justiceCashWriteOverride", new Func<int, int, bool?>((slot, amount) =>
+                {
+                    Assert.AreEqual(playerSlot, slot);
+                    cashWrites++;
+                    Game.Player.Money = amount;
+                    return true;
+                }));
+                int originalScore = state.ActiveScore;
+                Assert.IsTrue((bool)Invoke(script, "TryPersistJusticePoliceDeathFrontToWal", player));
+                WaitForRuntimeWriterOnly(script);
+                JusticeWriteAheadLog wal = GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog");
+                string transactionId = wal.GetOpenTransactions().Single(
+                    record => record.OperationKind == "DeathFront").TransactionId;
+
+                player = new Ped
+                {
+                    Handle = 1600 + playerSlot,
+                    Model = new Model(model),
+                    Position = new GTA.Math.Vector3(310.0f, -590.0f, 43.0f),
+                    IsInvincible = true,
+                    FreezePosition = true
+                };
+                Game.Player.Character = player;
+                Game.Player.IsDead = false;
+                screen.ResidualMissionFlag = true;
+                RunAdmissionRuntimeTick(script, 250);
+                RunAdmissionRuntimeTick(script, 250);
+                Assert.AreEqual(JusticeWalState.Ambiguous, wal.GetLatest(transactionId).State);
+                Assert.IsTrue(ReadRuntimeDeathCapture(directory, playerSlot, false));
+                Assert.IsFalse(ReadRuntimeDeathCapture(directory, playerSlot, true));
+                long firstResult = GetField<JusticeRepository>(script, "_justiceRepository")
+                    .GetDiagnostics().DiskRevision;
+                Assert.AreEqual(JusticePhase.Wanted, state.Phase);
+                Assert.AreEqual(sentenceSeconds, state.SentenceSeconds);
+                Assert.AreEqual(originalScore, state.ActiveScore);
+                Assert.AreEqual(0, screen.FadeIns);
+                Assert.IsTrue(player.FreezePosition);
+
+                if (reloadAmbiguous)
+                {
+                    // Je coupe seulement le writer : aucun shutdown métier ne
+                    // doit fournir la rotation absente de la session interrompue.
+                    JusticeRepository previous = GetField<JusticeRepository>(script, "_justiceRepository");
+                    previous.Dispose();
+                    SetField(script, "_justiceRepository", null);
+                    script = new DonJEnemySpawner();
+                    SetField(script, "_justiceCanonicalPlayerSlotOverride", new Func<int>(() => playerSlot));
+                    state = GetField<JusticeCaseState>(script, "_justiceCaseState");
+                    wal = GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog");
+                    Assert.AreEqual(JusticePhase.Wanted, state.Phase);
+                }
+
+                bool confirmed = false;
+                bool observedProgressiveFade = false;
+                for (int tick = 0; tick < 180; tick++)
+                {
+                    RunAdmissionRuntimeTick(script, screen.IsFadingIn ? 33 : 250);
+                    JusticeWalRecord latest = wal.GetLatest(transactionId);
+                    if (!confirmed && latest != null && latest.State == JusticeWalState.Confirmed)
+                    {
+                        confirmed = true;
+                        Assert.IsTrue(ReadRuntimeDeathCapture(directory, playerSlot, true));
+                        Assert.IsTrue(GetField<JusticeRepository>(script, "_justiceRepository")
+                            .GetDiagnostics().DiskRevision > firstResult);
+                    }
+                    if (screen.IsFadingIn)
+                    {
+                        observedProgressiveFade = true;
+                        Assert.IsTrue(GetField<bool>(script, "_justiceCustodyTransferPending"));
+                        Assert.AreEqual(sentenceSeconds, state.SentenceSeconds);
+                    }
+                    if (IsRuntimeAdmissionFinished(script, state, screen))
+                    {
+                        break;
+                    }
+                }
+
+                Assert.IsTrue(confirmed, "Les ticks seuls doivent confirmer la seconde copie du DeathFront.");
+                Assert.IsTrue(IsRuntimeAdmissionFinished(script, state, screen),
+                    "L'admission doit terminer sans flush métier imposé par le test.");
+                Assert.IsTrue(observedProgressiveFade);
+                Assert.AreEqual(sentenceSeconds >= 300 ? "Bolingbroke" : "MissionRow",
+                    GetFieldObject(script, "_justiceCustodySite").ToString());
+                Assert.AreEqual(1, screen.FadeIns);
+                Assert.AreEqual(1, screen.Blackouts);
+                Assert.AreEqual(0, screen.InterruptedFadeIns);
+                Assert.IsFalse(player.FreezePosition);
+                Assert.IsFalse(player.IsInvincible);
+                Assert.AreEqual(0, Game.Player.WantedLevel);
+                Assert.AreEqual(9876 - fineAmount, Game.Player.Money);
+                Assert.AreEqual(fineAmount == 0 ? 0 : 1, cashWrites);
+                Assert.AreEqual(1, CountNative(Hash.REMOVE_ALL_PED_WEAPONS));
+                Assert.AreEqual(0, player.Weapons.RemoveAllCount,
+                    "Le retrait natif vérifié n'a pas besoin du fallback API.");
+                Assert.AreEqual(1, state.CompletedOperationIds.Count(
+                    operation => operation.StartsWith("Capture:", StringComparison.Ordinal)));
+                Assert.AreEqual(1, GetField<JusticeRecordState>(script, "_justiceRecordState").Convictions.Count);
+                string custodyEpisode = state.CustodyEpisodeId;
+                int fadeOutRequestsAtAdmission = screen.FadeOuts;
+
+                // Je garde cinq minutes observables à Bolingbroke. Pour la peine
+                // courte, je m'arrête avant la libération légale attendue.
+                int secondsToObserve = Math.Min(300, state.SentenceSeconds - 5);
+                int sentenceAtAdmission = state.SentenceSeconds;
+                for (int tick = 0; tick < secondsToObserve * 4; tick++)
+                {
+                    RunAdmissionRuntimeTick(script, 250);
+                }
+                Assert.IsTrue(state.SentenceSeconds < sentenceAtAdmission);
+                Assert.AreEqual(custodyEpisode, state.CustodyEpisodeId);
+                Assert.AreEqual(JusticePhase.Incarcerated, state.Phase);
+                Assert.AreEqual(1, screen.FadeIns);
+                Assert.AreEqual(fadeOutRequestsAtAdmission, screen.FadeOuts);
+                Assert.AreEqual(1, screen.Blackouts);
+                Assert.AreEqual(fineAmount == 0 ? 0 : 1, cashWrites);
+                Assert.AreEqual(1, CountNative(Hash.REMOVE_ALL_PED_WEAPONS));
+                Assert.AreEqual(0, player.Weapons.RemoveAllCount);
+            }
+            finally
+            {
+                if (script != null)
+                {
+                    Invoke(script, "ShutdownJusticeSystem");
+                }
+            }
+        });
+    }
+
+    [DataTestMethod]
+    [DataRow("_justiceBackupRepairPending", "flag")]
+    [DataRow("_justiceProfileSwitchPersistencePending", "flag")]
+    [DataRow("_justicePolicyResetPublicationPending", "flag")]
+    [DataRow("_justicePolicyResetRecoveryPublicationPending", "flag")]
+    [DataRow("_justicePendingProfileResetWalRecord", "record")]
+    [DataRow("_justicePendingDeathFrontWalRecord", "record")]
+    [DataRow("_justiceDeferredRuntimeFronts", "front")]
+    [DataRow("_justiceCriticalBarrierRevision", "revision")]
+    [DataRow("_justiceNextStateFlushAttemptAtMs", "backoff")]
+    public void PoliceCapture_HoldingCheckpointRespectsPersistenceOwners(string field, string valueKind)
+    {
+        WithRuntimeDeathAwaitingBackup((directory, script, screen, record) =>
+        {
+            JusticeRepository repository = GetField<JusticeRepository>(script, "_justiceRepository");
+            JusticeCaseState state = GetField<JusticeCaseState>(script, "_justiceCaseState");
+            long revision = repository.GetDiagnostics().MemoryRevision;
+            int wanted = Game.Player.WantedLevel;
+            object original = GetFieldObject(script, field);
+            object blockedValue = true;
+            if (valueKind == "record") blockedValue = record;
+            if (valueKind == "front") blockedValue = Enum.ToObject(original.GetType(), 1);
+            if (valueKind == "revision") blockedValue = revision;
+            if (valueKind == "backoff") blockedValue = long.MaxValue;
+            SetField(script, field, blockedValue);
+            try
+            {
+                // Je cible Late pendant que le contrôleur Early propriétaire
+                // reste volontairement bloqué; Late ne peut pas le remplacer.
+                for (int tick = 0; tick < 20; tick++)
+                {
+                    Game.GameTime += 250;
+                    SetField(script, "_justiceMonotonicTimeMs", (long)Game.GameTime);
+                    Invoke(script, "UpdateJusticeSystem");
+                }
+                Assert.AreEqual(revision, repository.GetDiagnostics().MemoryRevision, field);
+                Assert.AreEqual(revision, repository.GetDiagnostics().DiskRevision, field);
+                Assert.AreEqual(JusticePhase.Wanted, state.Phase);
+                Assert.AreEqual(600, state.SentenceSeconds);
+                Assert.AreEqual(wanted, Game.Player.WantedLevel);
+                Assert.AreEqual(0, state.CompletedOperationIds.Count);
+                Assert.AreEqual(0, screen.FadeIns);
+                Assert.IsFalse(GetField<bool>(script, "_justiceInventoryRemoved"));
+                Assert.IsTrue(Game.Player.Character.FreezePosition);
+                Assert.IsTrue(Game.Player.Character.IsInvincible);
+            }
+            finally
+            {
+                SetField(script, field, original);
+            }
+            AssertRuntimeDeathFrontEventuallyConfirmed(script, record.TransactionId);
+        });
+    }
+
+    [TestMethod]
+    public void PoliceCapture_HoldingCheckpointKeepsSaveDebounce()
+    {
+        WithRuntimeDeathAwaitingBackup((directory, script, screen, record) =>
+        {
+            JusticeRepository repository = GetField<JusticeRepository>(script, "_justiceRepository");
+            long revision = repository.GetDiagnostics().MemoryRevision;
+            long due = GetField<long>(script, "_justiceNextStateSaveAtMs");
+            Assert.IsTrue(due > GetField<long>(script, "_justiceMonotonicTimeMs"));
+            SetField(script, "_justiceMonotonicTimeMs", due - 1L);
+            Invoke(script, "UpdateJusticeSystem");
+            Assert.AreEqual(revision, repository.GetDiagnostics().MemoryRevision);
+            SetField(script, "_justiceMonotonicTimeMs", due);
+            Invoke(script, "UpdateJusticeSystem");
+            Assert.IsTrue(repository.GetDiagnostics().MemoryRevision > revision);
+            WaitForRuntimeWriterOnly(script);
+            AssertRuntimeDeathFrontEventuallyConfirmed(script, record.TransactionId);
+        });
+    }
+
+    [DataTestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void PoliceCapture_HoldingWriterDelayOrFailureResumesWithoutGameplay(bool failWrite)
+    {
+        WithRuntimeDeathAwaitingBackup((directory, script, screen, record) =>
+        {
+            JusticeRepository oldRepository = GetField<JusticeRepository>(script, "_justiceRepository");
+            long diskRevision = oldRepository.GetDiagnostics().DiskRevision;
+            oldRepository.Dispose();
+            using (RuntimeAdmissionWriterGate gate = new RuntimeAdmissionWriterGate())
+            {
+                JusticeRepository repository = new JusticeRepository(
+                    Path.Combine(directory, "_justice_state.xml"),
+                    Path.Combine(directory, "_justice_state.xml.bak"),
+                    new JusticeXmlPersistenceCodec(), diskRevision,
+                    new JusticeAtomicFileStore(), gate, 10);
+                SetField(script, "_justiceRepository", repository);
+                repository.Start();
+                gate.Repository = repository;
+                gate.FailWrites = failWrite;
+                try
+                {
+                    SetField(script, "_justiceMonotonicTimeMs",
+                        GetField<long>(script, "_justiceNextStateSaveAtMs"));
+                    Invoke(script, "UpdateJusticeSystem");
+                    Assert.IsTrue(gate.Entered.Wait(TimeSpan.FromSeconds(5)));
+                    if (failWrite)
+                    {
+                        Assert.IsTrue(SpinWait.SpinUntil(
+                            () => repository.GetDiagnostics().WriteFailures > 0L, 5000));
+                    }
+                    long memoryRevision = repository.GetDiagnostics().MemoryRevision;
+                    for (int tick = 0; tick < 40; tick++)
+                    {
+                        Game.GameTime += 100;
+                        Invoke(script, "UpdateJusticeEarly");
+                        Invoke(script, "UpdateJusticeSystem");
+                    }
+                    Assert.AreEqual(diskRevision, repository.GetDiagnostics().DiskRevision);
+                    if (!failWrite)
+                    {
+                        Assert.IsTrue(repository.GetDiagnostics().MemoryRevision <= memoryRevision + 2L,
+                            "Les rotations restent cadencées à deux secondes, jamais à chaque tick.");
+                        Assert.AreEqual(1L, repository.GetDiagnostics().WriteAttempts,
+                            "Le writer conserve sa première écriture en cours.");
+                    }
+                    Assert.AreEqual(JusticePhase.Wanted,
+                        GetField<JusticeCaseState>(script, "_justiceCaseState").Phase);
+                    Assert.AreEqual(600, GetField<JusticeCaseState>(script, "_justiceCaseState").SentenceSeconds);
+                    Assert.IsFalse(ReadRuntimeDeathCapture(directory, 2, true));
+                    Assert.AreEqual(0, screen.FadeIns);
+                    Assert.IsTrue(Game.Player.Character.IsInvincible);
+                    Assert.IsFalse(GetField<bool>(script, "_justiceInventoryRemoved"));
+                }
+                finally
+                {
+                    gate.FailWrites = false;
+                    gate.Release.Set();
+                }
+                WaitForRuntimeWriterOnly(script);
+                AssertRuntimeDeathFrontEventuallyConfirmed(script, record.TransactionId);
+            }
+            SetField(script, "_justiceRepository", null);
+        });
+    }
+
+    [TestMethod]
+    public void PoliceCapture_HoldingRecapturesSkippedResultBeforeConfirming()
+    {
+        WithRuntimeDeathAwaitingBackup((directory, script, screen, record) =>
+        {
+            JusticeRepository repository = GetField<JusticeRepository>(script, "_justiceRepository");
+            long skippedResultRevision = repository.GetDiagnostics().DiskRevision;
+            Assert.AreEqual(JusticeWalState.Attempted, record.State);
+            Assert.AreEqual(0, screen.FadeIns);
+            AssertRuntimeDeathFrontEventuallyConfirmed(script, record.TransactionId);
+            JusticeWalRecord confirmed = GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog")
+                .GetLatest(record.TransactionId);
+            Assert.IsTrue(confirmed.PersistenceRevision > skippedResultRevision,
+                "Je réobserve un nouveau résultat exact, sans assimiler une révision sautée à une preuve.");
+            Assert.IsTrue(ReadRuntimeDeathCapture(directory, 2, true));
+        }, skipResultObservation: true);
+    }
+
+    private sealed class RuntimeAdmissionWriterGate : IJusticePersistenceFaultInjector, IDisposable
+    {
+        internal readonly ManualResetEventSlim Entered = new ManualResetEventSlim();
+        internal readonly ManualResetEventSlim Release = new ManualResetEventSlim();
+        internal volatile bool FailWrites;
+        internal JusticeRepository Repository;
+
+        public void Probe(JusticePersistenceFaultPoint point)
+        {
+            if (point != JusticePersistenceFaultPoint.BeforeSnapshotSerialization) return;
+            Entered.Set();
+            if (FailWrites) throw new IOException("Panne writer temporaire simulée pendant le maintien prison.");
+            if (!Release.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("Le test doit libérer le writer de détention.");
+        }
+
+        public void Dispose()
+        {
+            // Je termine le worker avant de libérer les événements qu'il utilise.
+            FailWrites = false;
+            Release.Set();
+            if (Repository != null) Repository.Dispose();
+            Entered.Dispose();
+            Release.Dispose();
+        }
+    }
+
+    private static void WithRuntimeDeathAwaitingBackup(
+        Action<string, DonJEnemySpawner, RuntimeAdmissionScreen, JusticeWalRecord> test,
+        bool skipResultObservation = false)
+    {
+        WithTemporaryJusticeDirectory(directory =>
+        {
+            StubRuntime.Reset();
+            Ped player = Game.Player.Character;
+            player.Handle = 1702;
+            player.Model = new Model("player_two");
+            player.Position = new GTA.Math.Vector3(310.0f, -590.0f, 43.0f);
+            player.IsDead = true;
+            Game.Player.IsDead = true;
+            Game.Player.WantedLevel = 3;
+            RuntimeAdmissionScreen screen = new RuntimeAdmissionScreen();
+            StubRuntime.NativeCallHandler = screen.Call;
+            DonJEnemySpawner script = new DonJEnemySpawner();
+            try
+            {
+                ConfigureLivePoliceDeathCase(script, player, 600, 2);
+                JusticeCaseState state = GetField<JusticeCaseState>(script, "_justiceCaseState");
+                state.FineDue = 0L;
+                state.Charges[0].Fine = 0L;
+                Assert.IsTrue((bool)Invoke(script, "TryPersistJusticePoliceDeathFrontToWal", player));
+                WaitForRuntimeWriterOnly(script);
+                if (skipResultObservation)
+                {
+                    // Je simule une publication plus récente avant que le thread
+                    // du script ait observé la révision exacte de son candidat.
+                    JusticePersistenceSnapshot snapshot;
+                    string error;
+                    Assert.IsTrue(new JusticeXmlPersistenceCodec().TryDeserialize(
+                        File.ReadAllBytes(Path.Combine(directory, "_justice_state.xml")),
+                        out snapshot, out error), error);
+                    JusticePersistenceSnapshot newer = new JusticePersistenceSnapshot(
+                        snapshot.Revision + 1L, snapshot.SchemaVersion,
+                        snapshot.CapturedAtUtcTicks, snapshot.ActiveProfileSlot,
+                        snapshot.GlobalFields, snapshot.Profiles);
+                    JusticeRepository repository = GetField<JusticeRepository>(script, "_justiceRepository");
+                    Assert.AreEqual(JusticeRepositoryEnqueueResult.Accepted, repository.Enqueue(newer));
+                    Assert.IsTrue(repository.Flush(newer.Revision, TimeSpan.FromSeconds(10)));
+                }
+                player.IsDead = false;
+                Game.Player.IsDead = false;
+                screen.ResidualMissionFlag = true;
+                RunAdmissionRuntimeTick(script, 250);
+                RunAdmissionRuntimeTick(script, 250);
+                JusticeWalRecord record = GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog")
+                    .GetOpenTransactions().Single(item => item.OperationKind == "DeathFront");
+                Assert.AreEqual(skipResultObservation ? JusticeWalState.Attempted : JusticeWalState.Ambiguous,
+                    record.State);
+                Assert.IsTrue(ReadRuntimeDeathCapture(directory, 2, false));
+                Assert.AreEqual(skipResultObservation, ReadRuntimeDeathCapture(directory, 2, true));
+                test(directory, script, screen, record);
+            }
+            finally
+            {
+                Invoke(script, "ShutdownJusticeSystem");
+            }
+        });
+    }
+
+    private static void AssertRuntimeDeathFrontEventuallyConfirmed(object script, string transactionId)
+    {
+        JusticeWriteAheadLog wal = GetField<JusticeWriteAheadLog>(script, "_justiceWriteAheadLog");
+        for (int tick = 0; tick < 80; tick++)
+        {
+            RunAdmissionRuntimeTick(script, 250);
+            if (wal.GetLatest(transactionId).State == JusticeWalState.Confirmed) return;
+        }
+        Assert.Fail("Le DeathFront doit terminer après la levée du blocage de persistance.");
+    }
+
+    private static bool ReadRuntimeDeathCapture(string directory, int slot, bool backup)
+    {
+        XElement profile = XDocument.Load(Path.Combine(directory,
+            "_justice_state.xml" + (backup ? ".bak" : string.Empty)))
+            .Root.Element("Profiles").Elements("Profile").Single(
+                item => (int)item.Attribute("slot") == slot);
+        return (bool)profile.Attribute("pendingDeathCapture");
+    }
+
+    private static void WaitForRuntimeWriterOnly(object script)
+    {
+        // Je laisse seulement écrire le DTO déjà enfilé. Contrairement à
+        // JusticeAwaitQueuedPersistenceForTests, cette attente ne qualifie aucun WAL.
+        JusticeRepository repository = GetField<JusticeRepository>(script, "_justiceRepository");
+        long revision = GetField<long>(script, "_justiceLastQueuedPersistenceRevision");
+        if (repository != null && revision > 0L)
+        {
+            Assert.IsTrue(repository.Flush(revision, TimeSpan.FromSeconds(10)),
+                "Le writer doit terminer son écriture existante : " + repository.GetDiagnostics().LastError);
+        }
+    }
+
+    private static void RunAdmissionRuntimeTick(object script, int durationMs)
+    {
+        Game.GameTime += durationMs;
+        Invoke(script, "UpdateJusticeEarly");
+        Invoke(script, "UpdateJusticeSystem");
+        WaitForRuntimeWriterOnly(script);
+    }
+
+    private static bool IsRuntimeAdmissionFinished(
+        object script, JusticeCaseState state, RuntimeAdmissionScreen screen)
+    {
+        return state.Phase == JusticePhase.Incarcerated && screen.IsVisible &&
+            !GetField<bool>(script, "_justiceCustodyTransferPending") &&
+            !GetField<bool>(script, "_justiceCustodyRespawnTransferPending");
+    }
+
+    private sealed class RuntimeAdmissionScreen
+    {
+        private bool _visible = true;
+        private int _fadeInEndsAt = -1;
+        internal bool ResidualMissionFlag;
+        internal int FadeIns;
+        internal int FadeOuts;
+        internal int Blackouts;
+        internal int InterruptedFadeIns;
+        internal bool IsFadingIn { get { return _fadeInEndsAt >= 0 && Game.GameTime < _fadeInEndsAt; } }
+        internal bool IsVisible { get { return _visible || (_fadeInEndsAt >= 0 && !IsFadingIn); } }
+
+        internal object Call(ulong hash, object[] arguments)
+        {
+            if (hash == GroundReadyNative || hash == CollisionReadyNative) return true;
+            if (hash == MissionFlagNative) return ResidualMissionFlag;
+            if (hash == (ulong)Hash.DO_SCREEN_FADE_OUT)
+            {
+                // Je distingue un vrai retour au noir d'une réaffirmation
+                // idempotente alors que l'écran est déjà entièrement masqué.
+                if (IsVisible || IsFadingIn) Blackouts++;
+                if (IsFadingIn) InterruptedFadeIns++;
+                FadeOuts++;
+                _visible = false;
+                _fadeInEndsAt = -1;
+                return true;
+            }
+            if (hash == (ulong)Hash.DO_SCREEN_FADE_IN)
+            {
+                FadeIns++;
+                _visible = false;
+                _fadeInEndsAt = Game.GameTime + 350;
+                return true;
+            }
+            if (hash == ScreenFadedInNative) return IsVisible;
+            if (hash == ScreenFadingInNative) return IsFadingIn;
+            if (hash == ScreenFadedOutNative) return !IsVisible && !IsFadingIn;
+            if (hash == ScreenFadingOutNative) return false;
+            return null;
+        }
+    }
+
     [TestMethod]
     public void PoliceCapture_DoubleRotationThenCapturesExactlyOnce()
     {
@@ -4390,13 +4898,14 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
     private static void ConfigureLivePoliceDeathCase(
         object script,
         Ped player,
-        int sentenceSeconds)
+        int sentenceSeconds,
+        int playerSlot = 0)
     {
         JusticePlayerProfileState[] profiles = GetField<JusticePlayerProfileState[]>(
             script,
             "_justicePlayerProfiles");
         Assert.IsNotNull(profiles);
-        JusticePlayerProfileState profile = profiles[0];
+        JusticePlayerProfileState profile = profiles[playerSlot];
         ConfigureConsistentActiveCase(
             profile.CaseState,
             "live-hospital",
@@ -4410,8 +4919,8 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
         SetField(script, "_justiceRecordState", profile.RecordState);
         SetField(script, "_justiceEnabled", true);
         SetField(script, "_justiceInitialized", true);
-        SetField(script, "_justiceActivePlayerProfileSlot", 0);
-        SetField(script, "_justiceLastCanonicalPlayerSlot", 0);
+        SetField(script, "_justiceActivePlayerProfileSlot", playerSlot);
+        SetField(script, "_justiceLastCanonicalPlayerSlot", playerSlot);
         SetField(script, "_justiceLastCanonicalPlayerModelHash", player.Model.Hash);
         SetField(script, "_justicePursuitActive", true);
         SetField(script, "_justiceLastWantedLevel", 2);
@@ -4420,7 +4929,7 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
         SetField(
             script,
             "_justiceCanonicalPlayerSlotOverride",
-            new Func<int>(() => 0));
+            new Func<int>(() => playerSlot));
     }
 
     private static JusticeCaseState ConfigureCapturedPoliceDeathFineResumeState(

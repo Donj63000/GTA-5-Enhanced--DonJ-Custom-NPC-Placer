@@ -353,10 +353,9 @@ public sealed class JusticeRecognitionDomainTests
                     .Replace("<SchemaVersion>1</SchemaVersion>", "<SchemaVersion>99</SchemaVersion>");
                 File.WriteAllText(futurePath, futureXml);
 
-                JusticeRecognitionSaveData rejected =
-                    new RecognitionStore(futurePath, logger).Load();
-                Assert.AreEqual(RecognitionPolicy.SchemaVersion, rejected.SchemaVersion);
-                Assert.AreEqual(0, rejected.Profiles.Count);
+                Assert.ThrowsException<IOException>(() => new RecognitionStore(futurePath, logger).Load());
+                Assert.AreEqual(futureXml, File.ReadAllText(futurePath));
+                Assert.IsFalse(Directory.Exists(futurePath + ".corrupt-quarantine"));
             });
     }
 
