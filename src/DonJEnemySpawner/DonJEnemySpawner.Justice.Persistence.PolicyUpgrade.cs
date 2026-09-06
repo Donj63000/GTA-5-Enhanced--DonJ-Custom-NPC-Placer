@@ -255,7 +255,8 @@ public sealed partial class DonJEnemySpawner
             null,
             source.InventorySnapshot,
             false,
-            new JusticeActivityCooldownPersistenceSnapshot[0]);
+            new JusticeActivityCooldownPersistenceSnapshot[0], false,
+            source.AppearanceSnapshot == null ? null : source.AppearanceSnapshot.ForRestore());
         return RequiresJusticeSentencePolicyRecovery(token) ? token : null;
     }
 
@@ -266,7 +267,7 @@ public sealed partial class DonJEnemySpawner
                (source.Active || source.PoliceSuppressionApplied ||
                 source.PoliceDispatchDisabled || source.InventoryRemoved ||
                 source.WeaponControlsLocked || source.DeferredInventoryRestore ||
-                source.InventorySnapshot != null || source.PlayerStateStored);
+                source.InventorySnapshot != null || source.AppearanceSnapshot != null || source.PlayerStateStored);
     }
 
     private bool LoadJusticeLegacySentencePolicyForReset(
@@ -707,6 +708,9 @@ public sealed partial class DonJEnemySpawner
 
         JusticeWeaponSnapshot legacyInventory =
             ReadJusticeWeaponSnapshotXml(custody);
+        JusticeAppearancePersistenceSnapshot appearance;
+        if (!TryReadJusticeAppearanceXml(custody, out appearance) ||
+            (appearance != null && appearance.PlayerSlot != playerSlot)) return false;
         bool hasInventoryElement =
             custody.SelectSingleNode("InventorySnapshot") != null;
         if (hasInventoryElement && legacyInventory == null)
@@ -781,7 +785,7 @@ public sealed partial class DonJEnemySpawner
             null,
             inventory,
             false,
-            new JusticeActivityCooldownPersistenceSnapshot[0]);
+            new JusticeActivityCooldownPersistenceSnapshot[0], false, appearance);
         return true;
     }
 
@@ -862,12 +866,12 @@ public sealed partial class DonJEnemySpawner
                 weapon.Ammo,
                 weapon.AmmoInClip,
                 weapon.Tint,
-                weapon.ComponentHashes, weapon.DeferredRestoreAttempted, weapon.DeferredRestoreCompleted));
+                weapon.ComponentHashes, weapon.DeferredRestoreAttempted, weapon.DeferredRestoreCompleted, weapon.AmmoTypeHash));
         }
         return new JusticeInventoryPersistenceSnapshot(
             source.IsValidated,
             source.SelectedWeaponHash,
-            weapons, source.RestoreId);
+            weapons, source.RestoreId, CaptureJusticeAmmoPersistence(source));
     }
 
     private bool IsJusticeSentencePolicyRecoveryBlockingActiveProfile()
@@ -1187,6 +1191,7 @@ public sealed partial class DonJEnemySpawner
             return false;
         }
 
+        if (!RestoreJusticeCustodyAppearance(player)) return false;
         bool inventoryRecoveryRequired = token.InventorySnapshot != null;
         if (inventoryRecoveryRequired &&
             (_justiceWeaponSnapshot == null ||

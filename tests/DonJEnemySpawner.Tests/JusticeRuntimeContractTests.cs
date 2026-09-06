@@ -4710,9 +4710,9 @@ public sealed class JusticeRuntimeContractTests
             "_justiceWeaponControlsLocked = false",
             "OnAborted doit toujours rendre les contrôles, tandis que l'état inventaire durable garde la reprise.");
         Assert.AreEqual(
-            4,
+            5,
             Regex.Matches(shutdown, @"RunJusticeCustodyShutdownStep\s*\(").Count,
-            "Une panne d'un nettoyage ne doit pas empêcher les trois autres domaines de s'exécuter.");
+            "Une panne d'un nettoyage ne doit pas empêcher les quatre autres domaines de s'exécuter.");
 
         string update = ExecutableMethodBody(source, "JusticeUpdateCustody");
         StringAssert.Contains(update, "CompleteJusticeLegalRelease(player)");

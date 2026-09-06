@@ -2722,3 +2722,90 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
   - docs/documentation-developpeur.md
   - docs/validation-justice-manuelle.md
   - crash-list.md
+
+## 2026-09-06 00:46:00 +02:00 - Contrôle du nombre de sauvegardes après installation
+- Statut: Faux positif du contrôle PowerShell résolu; sauvegardes intactes.
+- Contexte: Audit complémentaire après le déploiement réussi du correctif prison demandé par l'utilisateur.
+- Symptôme: La commande de contrôle signale « Inventaire des sauvegardes modifie » alors que les huit fichiers sont présents et identiques.
+- Sources vérifiées: TestResults/deployment-prison-20260906-003928/saves-before.json; inventaire réel de Scripts/DonJEnemySpawnerSaves; SHA-256 de chaque fichier; collecte bug-reports/20260906-004600-deployment-prison-audit-array-count.
+- Extraits utiles: Le tableau JSON désérialisé est de type System.Object[], Before=8, After=8; les huit comparaisons HashIdentical valent True.
+- Analyse / hypothèse: L'enveloppe @(... | ConvertFrom-Json) de la commande d'audit PowerShell 5 comptait un tableau imbriqué au lieu de ses huit éléments. Ce contrôle était extérieur au produit et au script officiel de déploiement.
+- Action menée: Désérialisation directe du tableau, puis réexécution complète de l'audit sans nouvelle installation ni écriture dans les sauvegardes.
+- Vérification: verification.json donne Status=OK et SaveFilesPreserved=8; binaire, PDB, manifest, assets et provenance vérifiés à nouveau.
+- Résolution: Aucun changement du mod ni du pipeline requis; aucune sauvegarde ajoutée, supprimée ou modifiée.
+
+## 2026-09-06 00:46:01 +02:00 - Correctif prison installé dans GTA V Enhanced
+- Statut: Déploiement terminé et vérifié; essai visuel dans GTA restant à effectuer.
+- Contexte: Demande explicite d'installer dans le jeu la version corrigée après l'application du plan.
+- Symptôme: Chargement noir prolongé à l'arrivée de Trevor en prison, corrigé et couvert par les tests de la précédente intervention.
+- Sources vérifiées: Snapshot local C:/Users/nodig/GTA5-release-0906-0039; TestResults/safety-20260906-004016 dans ce snapshot; TestResults/deployment-prison-20260906-003928 dans le dépôt principal; fichiers effectivement installés dans GTA V Enhanced/Scripts.
+- Extraits utiles: Suite complète 686/686 sur l'API réelle NIBScriptHookVDotNet2 2.11.6.0; build Release sans avertissement ni erreur; ABI 32 types et 189 membres. Commit de livraison 9ab1c4eda6dd1dea1a79e4f6342e92159e21696a; sourceDirty=false. SHA-256 ENdll installé: 5C6F6074DCEF86D4D416A6BA60585227E62C06BE68B4E1867F0487F73E05643D.
+- Analyse / hypothèse: Un snapshot Git propre conserve exactement les vingt fichiers locaux modifiés ou nouveaux, déjà validés, sans modifier la branche main ni son index. La reconstruction depuis ce commit fournit une provenance de livraison exacte et respecte le refus officiel des packages sourceDirty=true.
+- Action menée: Création du worktree et de la branche locale release/prison-20260906-003928; commit du snapshot isolé; sauvegarde des six fichiers de l'installation précédente dans TestResults/deployment-prison-20260906-003928/previous-installation; exécution de run-safety-checks.ps1 -Ci avec l'API réelle; déploiement transactionnel officiel par deploy-game-ready.ps1 vers le dossier GTA Enhanced, jeu fermé.
+- Vérification: Suite de sécurité réussie avec build, tests, package et installation temporaire. Installation réelle réussie, API réelle et renderer HUD externe validés. Hashes identiques entre build testé, package et fichiers installés; manifest exact; anciens alias et résidus de transaction absents. Huit fichiers de sauvegarde inchangés octet pour octet. Vingt fichiers locaux et état Git original préservés avant l'ajout de ce compte rendu; snapshot de livraison toujours propre.
+- Résolution: DonJCustomNpcPlacer.ENdll, DonJCustomNpcPlacer.pdb, DonJCustomNpcPlacer.manifest.json et les trois PNG Assets/Justice sont installés. L'utilisateur peut relancer GTA et tester l'arrivée de Trevor en prison. Aucun essai manuel en jeu effectué par l'agent. Seul crash-list.md est édité dans le dépôt principal pendant cette phase de livraison.
+
+
+## 2026-09-06 02:15:21 +02:00 — Préparation des changements — commandes locales
+
+- Statut: Corrigé
+- Contexte: Implémentation locale du bleu de travail et de la confiscation en détention.
+- Symptôme: Échec de git diff --output et recherches rg utilisant des jokers Windows ou des chemins de logs absents.
+- Sources vérifiées: Sorties des commandes; before.patch finalement créé (140569 octets); collecteur bug-reports/20260906-015324-custody-implementation-tooling.
+- Extraits utiles: Codes et résultats cités ci-dessus; aucun nouveau crash GTA observé pendant cette intervention.
+- Analyse / hypothèse: Erreur de commande, de compilation ou de fixture identifiée par sa sortie; les logs GTA collectés ne sont pas une reproduction en jeu de cette fonctionnalité.
+- Action menée: Chemin --output reconstruit séparément; recherches ciblées; aucun changement utilisateur annulé.
+- Vérification: Copie initiale conservée sous TestResults/custody-outfit-ammo-implementation; état Git préservé.
+- Résolution: Cause corrigée; qualification finale et validation visuelle suivies séparément.
+
+
+## 2026-09-06 02:15:21 +02:00 — Édition ciblée — encodage et ancres
+
+- Statut: Corrigé
+- Contexte: Implémentation locale du bleu de travail et de la confiscation en détention.
+- Symptôme: Deux assertions de remplacement et une application de patch documentaire ont refusé leurs ancres.
+- Sources vérifiées: Sorties Python/apply_patch; collecteur bug-reports/20260906-015324-custody-implementation-tooling.
+- Extraits utiles: Codes et résultats cités ci-dessus; aucun nouveau crash GTA observé pendant cette intervention.
+- Analyse / hypothèse: Erreur de commande, de compilation ou de fixture identifiée par sa sortie; les logs GTA collectés ne sont pas une reproduction en jeu de cette fonctionnalité.
+- Action menée: Pipeline PowerShell vers Python réglé en UTF-8, nom réel hasInventoryElement utilisé et documentation ajoutée sans réécrire le contenu existant.
+- Vérification: Les fichiers refusés avant écriture ont été repris; compilation ensuite réussie, diff relu.
+- Résolution: Cause corrigée; qualification finale et validation visuelle suivies séparément.
+
+
+## 2026-09-06 02:15:21 +02:00 — Premières compilations de la tenue et des réserves
+
+- Statut: Corrigé
+- Contexte: Implémentation locale du bleu de travail et de la confiscation en détention.
+- Symptôme: CS0103 sur active puis CS1002/CS1513 sur une parenthèse du clone de restitution.
+- Sources vérifiées: TestResults/custody-outfit-ammo-implementation/build-initial.log et build-second.log; collecteur bug-reports/20260906-020421-custody-appearance-ammo-build-tests.
+- Extraits utiles: Codes et résultats cités ci-dessus; aucun nouveau crash GTA observé pendant cette intervention.
+- Analyse / hypothèse: Erreur de commande, de compilation ou de fixture identifiée par sa sortie; les logs GTA collectés ne sont pas une reproduction en jeu de cette fonctionnalité.
+- Action menée: Variable savedActive utilisée; parenthèses du constructeur typé corrigées.
+- Vérification: build-third.log : compilation Release réussie, zéro avertissement et zéro erreur.
+- Résolution: Cause corrigée; qualification finale et validation visuelle suivies séparément.
+
+
+## 2026-09-06 02:15:21 +02:00 — Contrat NIB et cinquième domaine de restauration
+
+- Statut: Corrigé
+- Contexte: Implémentation locale du bleu de travail et de la confiscation en détention.
+- Symptôme: 21 tests ont échoué : 19 dépendaient de ABI040; deux attendaient quatre domaines de shutdown.
+- Sources vérifiées: TestResults/custody-outfit-ammo-implementation/tests-live-initial.log; collecteur bug-reports/20260906-020421-custody-appearance-ammo-build-tests.
+- Extraits utiles: Codes et résultats cités ci-dessus; aucun nouveau crash GTA observé pendant cette intervention.
+- Analyse / hypothèse: Erreur de commande, de compilation ou de fixture identifiée par sa sortie; les logs GTA collectés ne sont pas une reproduction en jeu de cette fonctionnalité.
+- Action menée: IS_PED_COMPONENT_VARIATION_VALID utilise désormais la surcharge params InputArgument[] déjà autorisée. Le cinquième domaine Tenue est isolé; les deux contrats de tests passent de quatre à cinq.
+- Vérification: Suite stub suivante : 861/861 tests réussis; vérification ABI valide (189 références de membres).
+- Résolution: Cause corrigée; qualification finale et validation visuelle suivies séparément.
+
+
+## 2026-09-06 02:15:21 +02:00 — Fixtures de tests des effets personnels
+
+- Statut: Corrigé
+- Contexte: Implémentation locale du bleu de travail et de la confiscation en détention.
+- Symptôme: Compilation stub refusée pour CombatPistol absent et conversion uint non unchecked; une commande ciblée pointait vers temporary-gta au lieu de stub-gta; un test WAL ne créait pas ses services.
+- Sources vérifiées: TestResults/safety-20260906-020505/logs/build-release.log; tests-personal-effects.log et tests-personal-effects-second.log; collecte automatique bug-reports/20260906-020516-safety-failure.
+- Extraits utiles: Codes et résultats cités ci-dessus; aucun nouveau crash GTA observé pendant cette intervention.
+- Analyse / hypothèse: Erreur de commande, de compilation ou de fixture identifiée par sa sortie; les logs GTA collectés ne sont pas une reproduction en jeu de cette fonctionnalité.
+- Action menée: Fixture remplacée par MicroSMG, conversion unchecked, GtaRoot de test corrigé, initialisation explicite du WAL avant simulation de perte ACK.
+- Vérification: tests-personal-effects-third.log : 15/15 tests ciblés réussis; suite suivante 861/861 réussie.
+- Résolution: Cause corrigée; qualification finale et validation visuelle suivies séparément.

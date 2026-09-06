@@ -1776,6 +1776,7 @@ public sealed partial class DonJEnemySpawner
 
         RetryJusticePoliceSuppressionRestore(player, nowRaw);
         RetryJusticeDeferredInventoryRestore(player, nowRaw);
+        RetryJusticeCustodyAppearanceRestore(player, nowRaw);
 
         if (profileContextCompatible &&
             _justiceLegalReleaseFinalizationPending &&
@@ -1881,6 +1882,7 @@ public sealed partial class DonJEnemySpawner
         RepairJusticeOrphanedCustodyControls(player);
         RetryJusticePoliceSuppressionRestore(player, now);
         RetryJusticeDeferredInventoryRestore(player, now);
+        RetryJusticeCustodyAppearanceRestore(player, now);
 
         // Je ne fais progresser ni dossier, ni peine, ni détection ici. Seuls
         // les états déjà préparés et les restaurations de sécurité sont persistés.

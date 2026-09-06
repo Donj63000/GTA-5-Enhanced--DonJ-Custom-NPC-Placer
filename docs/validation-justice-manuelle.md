@@ -304,3 +304,22 @@ dossier Justice.
 | Manifest publié propre (`sourceDirty=false`) et package sale non déployable | NON EXÉCUTÉ | — |
 
 La release reste bloquée tant qu'une ligne de cette décision vaut `FAIL`, `BLOQUÉ` ou `NON EXÉCUTÉ`, sauf dérogation écrite qui décrit précisément le risque résiduel.
+
+
+## Tenue et confiscation — essais locaux du 6 septembre 2026
+
+L'utilisateur demande l'application du plan et la mise à jour locale du mod pour
+ses essais. Cette installation ne constitue pas une validation visuelle ni une
+qualification de release publique. Les observations ci-dessous restent à effectuer
+dans GTA Enhanced; les simulations automatisées ne les remplacent pas.
+
+| Scénario | Résultat attendu | État en jeu |
+|---|---|---|
+| Trois héros, chacun à Mission Row puis Bolingbroke | Combinaison bleu marine complète, chaussures cohérentes, visage et cheveux préservés | NON EXÉCUTÉ |
+| Admission après mort, attente de cinq minutes | Un seul chargement, tenue stable, aucune boucle d'écran noir | NON EXÉCUTÉ |
+| Armes partageant un stock, chargeur spécial, réserve sans arme | Tout confisqué, poings disponibles, acquisitions retirées sous une seconde | NON EXÉCUTÉ |
+| Libération normale et amnistie | Tenue/props d'origine, armes/composants/teintes/chargeurs et stocks rendus sans multiplication | NON EXÉCUTÉ |
+| Mort en cellule, reload, backup, changement de héros puis retour | Dépôt original conservé, tenue réappliquée au seul détenu concerné | NON EXÉCUTÉ |
+| Pause/reprise Justice et arrêt du script | Pause conservant la tenue, arrêt la rendant provisoirement, reprise conservant la peine et le dépôt | NON EXÉCUTÉ |
+| Évasion confirmée | Combinaison conservée, dépôt abandonné sans restitution automatique | NON EXÉCUTÉ |
+| Restitution partielle, utilisation de munitions, changement de vêtement, reload | Aucun remplissage d'un stock déjà rendu ni écrasement des nouveaux vêtements | NON EXÉCUTÉ |

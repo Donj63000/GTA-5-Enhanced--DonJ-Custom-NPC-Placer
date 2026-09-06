@@ -93,7 +93,7 @@ public sealed class JusticeCustodyHardeningTests
         Assert.IsFalse(shutdown.Contains("RestoreJusticeWeaponSnapshot(player)"));
         Assert.IsFalse(shutdown.Contains("RemoveJusticePlayerWeaponsSafe"));
         Assert.AreEqual(
-            4,
+            5,
             CountOccurrences(shutdown, "RunJusticeCustodyShutdownStep("),
             "Chaque domaine de nettoyage doit être isolé, police comprise dans le finally.");
         AssertOrdered(

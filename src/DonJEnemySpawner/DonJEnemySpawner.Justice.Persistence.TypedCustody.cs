@@ -143,11 +143,12 @@ internal sealed class JusticeWeaponPersistenceSnapshot
         int ammoInClip,
         int tint,
         IEnumerable<int> componentHashes,
-        bool restoreAttempted = false, bool restoreCompleted = false)
+        bool restoreAttempted = false, bool restoreCompleted = false, int ammoTypeHash = 0)
     {
         DeferredRestoreAttempted = restoreAttempted;
         DeferredRestoreCompleted = restoreCompleted;
         WeaponHash = weaponHash;
+        AmmoTypeHash = ammoTypeHash;
         Ammo = ammo;
         AmmoInClip = ammoInClip;
         Tint = tint;
@@ -160,6 +161,7 @@ internal sealed class JusticeWeaponPersistenceSnapshot
     internal bool DeferredRestoreAttempted { get; }
     internal bool DeferredRestoreCompleted { get; }
     internal int WeaponHash { get; }
+    internal int AmmoTypeHash { get; }
     internal int Ammo { get; }
     internal int AmmoInClip { get; }
     internal int Tint { get; }
@@ -173,9 +175,12 @@ internal sealed class JusticeInventoryPersistenceSnapshot
     internal JusticeInventoryPersistenceSnapshot(
         bool isValidated,
         int selectedWeaponHash,
-        IEnumerable<JusticeWeaponPersistenceSnapshot> weapons, string restoreId = "")
+        IEnumerable<JusticeWeaponPersistenceSnapshot> weapons, string restoreId = "",
+        IEnumerable<JusticeAmmoPersistenceSnapshot> ammoPools = null)
     {
         RestoreId = restoreId ?? string.Empty;
+        AmmoPools = new ReadOnlyCollection<JusticeAmmoPersistenceSnapshot>(ammoPools == null
+            ? new List<JusticeAmmoPersistenceSnapshot>() : new List<JusticeAmmoPersistenceSnapshot>(ammoPools));
         IsValidated = isValidated;
         SelectedWeaponHash = selectedWeaponHash;
         List<JusticeWeaponPersistenceSnapshot> copy =
@@ -196,13 +201,14 @@ internal sealed class JusticeInventoryPersistenceSnapshot
                     weapon.Ammo,
                     weapon.AmmoInClip,
                     weapon.Tint,
-                    weapon.ComponentHashes, weapon.DeferredRestoreAttempted, weapon.DeferredRestoreCompleted));
+                    weapon.ComponentHashes, weapon.DeferredRestoreAttempted, weapon.DeferredRestoreCompleted, weapon.AmmoTypeHash));
             }
         }
         _weapons = new ReadOnlyCollection<JusticeWeaponPersistenceSnapshot>(copy);
     }
 
     internal string RestoreId { get; }
+    internal IReadOnlyList<JusticeAmmoPersistenceSnapshot> AmmoPools { get; }
     internal bool IsValidated { get; }
     internal int SelectedWeaponHash { get; }
     internal IReadOnlyList<JusticeWeaponPersistenceSnapshot> Weapons => _weapons;
@@ -254,7 +260,8 @@ internal sealed class JusticeCustodyPersistenceSnapshot
         JusticeInventoryPersistenceSnapshot inventorySnapshot,
         bool hasActivityCooldownContainer,
         IEnumerable<JusticeActivityCooldownPersistenceSnapshot> cooldowns,
-        bool guardRetaliationActive = false)
+        bool guardRetaliationActive = false,
+        JusticeAppearancePersistenceSnapshot appearanceSnapshot = null)
     {
         Active = active;
         Site = site;
@@ -285,6 +292,7 @@ internal sealed class JusticeCustodyPersistenceSnapshot
         VoluntaryPaymentIntent = voluntaryPaymentIntent;
         DisciplineIntent = disciplineIntent;
         InventorySnapshot = inventorySnapshot;
+        AppearanceSnapshot = appearanceSnapshot;
         HasActivityCooldownContainer = hasActivityCooldownContainer;
         GuardRetaliationActive = active && guardRetaliationActive;
 
@@ -336,6 +344,7 @@ internal sealed class JusticeCustodyPersistenceSnapshot
     internal JusticeVoluntaryPaymentPersistenceSnapshot VoluntaryPaymentIntent { get; }
     internal JusticeDisciplinePersistenceSnapshot DisciplineIntent { get; }
     internal JusticeInventoryPersistenceSnapshot InventorySnapshot { get; }
+    internal JusticeAppearancePersistenceSnapshot AppearanceSnapshot { get; }
     internal bool HasActivityCooldownContainer { get; }
     internal IReadOnlyList<JusticeActivityCooldownPersistenceSnapshot> Cooldowns => _cooldowns;
     internal bool GuardRetaliationActive { get; }
@@ -384,7 +393,7 @@ public sealed partial class DonJEnemySpawner
             CaptureJusticeInventoryPersistenceSnapshot(),
             false,
             new JusticeActivityCooldownPersistenceSnapshot[0],
-            _justiceCustodyGuardRetaliationActive);
+            _justiceCustodyGuardRetaliationActive, _justiceCustodyAppearance);
     }
 
     private JusticeCustodyPersistenceSnapshot CaptureLoadedJusticeCustodyPersistenceSnapshot(
@@ -423,7 +432,7 @@ public sealed partial class DonJEnemySpawner
             CaptureJusticeInventoryPersistenceSnapshot(),
             false,
             new JusticeActivityCooldownPersistenceSnapshot[0],
-            _justiceCustodyGuardRetaliationActive);
+            _justiceCustodyGuardRetaliationActive, _justiceCustodyAppearance);
     }
 
     private JusticeFineDebitPersistenceSnapshot CaptureJusticeFineDebitPersistenceSnapshot()
@@ -494,14 +503,14 @@ public sealed partial class DonJEnemySpawner
                     item.Ammo,
                     item.AmmoInClip,
                     item.Tint,
-                    item.ComponentHashes, item.DeferredRestoreAttempted, item.DeferredRestoreCompleted));
+                    item.ComponentHashes, item.DeferredRestoreAttempted, item.DeferredRestoreCompleted, item.AmmoTypeHash));
             }
         }
 
         return new JusticeInventoryPersistenceSnapshot(
             source.IsValidated,
             source.SelectedWeaponHash,
-            weapons, source.RestoreId);
+            weapons, source.RestoreId, CaptureJusticeAmmoPersistence(source));
     }
 
     private static JusticeCustodyPersistenceSnapshot
@@ -543,7 +552,7 @@ public sealed partial class DonJEnemySpawner
             inventory,
             source.HasActivityCooldownContainer,
             source.Cooldowns,
-            source.GuardRetaliationActive);
+            source.GuardRetaliationActive, source.AppearanceSnapshot);
     }
 
     private static JusticeCustodyPersistenceSnapshot
@@ -585,7 +594,7 @@ public sealed partial class DonJEnemySpawner
             source.InventorySnapshot,
             source.HasActivityCooldownContainer,
             source.Cooldowns,
-            source.GuardRetaliationActive);
+            source.GuardRetaliationActive, source.AppearanceSnapshot);
     }
 
     private static JusticeCustodyPersistenceSnapshot
@@ -628,7 +637,7 @@ public sealed partial class DonJEnemySpawner
             source.InventorySnapshot,
             source.HasActivityCooldownContainer,
             source.Cooldowns,
-            source.GuardRetaliationActive);
+            source.GuardRetaliationActive, source.AppearanceSnapshot);
     }
 
     private static JusticeCustodyPersistenceSnapshot
@@ -673,7 +682,7 @@ public sealed partial class DonJEnemySpawner
             source.InventorySnapshot,
             source.HasActivityCooldownContainer,
             source.Cooldowns,
-            false);
+            false, source.AppearanceSnapshot);
     }
 
     private bool RestoreJusticeCustodyPersistenceSnapshot(
@@ -729,6 +738,7 @@ public sealed partial class DonJEnemySpawner
         _justiceVoluntaryFinePaymentIntent =
             RestoreJusticeVoluntaryPaymentIntent(snapshot.VoluntaryPaymentIntent);
         _justiceWeaponSnapshot = RestoreJusticeInventorySnapshot(snapshot.InventorySnapshot);
+        _justiceCustodyAppearance = snapshot.AppearanceSnapshot;
 
         // Un précommit de confiscation n'acquiert jamais les contrôles avant que
         // RemoveAll soit confirmé par GTA.
@@ -827,6 +837,7 @@ public sealed partial class DonJEnemySpawner
                 DeferredRestoreAttempted = weapon.DeferredRestoreAttempted,
                 DeferredRestoreCompleted = weapon.DeferredRestoreCompleted,
                 WeaponHash = weapon.WeaponHash,
+                AmmoTypeHash = weapon.AmmoTypeHash,
                 Ammo = weapon.Ammo,
                 AmmoInClip = weapon.AmmoInClip,
                 Tint = weapon.Tint
@@ -839,6 +850,9 @@ public sealed partial class DonJEnemySpawner
             }
             restored.Weapons.Add(item);
         }
+        foreach (JusticeAmmoPersistenceSnapshot pool in source.AmmoPools)
+            restored.AmmoPools.Add(new JusticeAmmoSnapshotItem { TypeHash = pool.TypeHash, Ammo = pool.Ammo,
+                RestoreAttempted = pool.RestoreAttempted, RestoreCompleted = pool.RestoreCompleted });
         return restored;
     }
 
@@ -939,6 +953,7 @@ public sealed partial class DonJEnemySpawner
         WriteJusticeFineDebitPersistenceXml(writer, snapshot.FineDebitIntent);
         WriteJusticeVoluntaryPaymentPersistenceXml(writer, snapshot.VoluntaryPaymentIntent);
         WriteJusticeInventoryPersistenceXml(writer, snapshot.InventorySnapshot);
+        WriteJusticeAppearanceXml(writer, snapshot.AppearanceSnapshot);
         writer.WriteEndElement();
     }
 
@@ -1035,6 +1050,7 @@ public sealed partial class DonJEnemySpawner
             writer.WriteStartElement("Weapon");
             WriteJusticePersistenceAttribute(writer, "hash", weapon.WeaponHash);
             WriteJusticePersistenceAttribute(writer, "ammo", weapon.Ammo);
+            if (weapon.AmmoTypeHash != 0) WriteJusticePersistenceAttribute(writer, "ammoType", weapon.AmmoTypeHash);
             WriteJusticePersistenceAttribute(writer, "clip", weapon.AmmoInClip);
             WriteJusticePersistenceAttribute(writer, "tint", weapon.Tint);
             WriteJusticePersistenceAttribute(writer, "restoreAttempted", weapon.DeferredRestoreAttempted);
@@ -1052,6 +1068,7 @@ public sealed partial class DonJEnemySpawner
             }
             writer.WriteEndElement();
         }
+        WriteJusticeAmmoPoolsXml(writer, inventory.AmmoPools);
         writer.WriteEndElement();
     }
 

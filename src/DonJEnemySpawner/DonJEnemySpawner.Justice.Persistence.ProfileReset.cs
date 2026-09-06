@@ -400,7 +400,7 @@ public sealed partial class DonJEnemySpawner
                custody.FineDebitIntent == null &&
                custody.VoluntaryPaymentIntent == null &&
                custody.DisciplineIntent == null &&
-               custody.InventorySnapshot == null &&
+               custody.InventorySnapshot == null && custody.AppearanceSnapshot == null &&
                !custody.HasActivityCooldownContainer &&
                custody.Cooldowns.Count == 0;
     }

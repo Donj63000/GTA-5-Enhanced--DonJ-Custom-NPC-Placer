@@ -2046,6 +2046,7 @@ public sealed partial class DonJEnemySpawner
             string.Equals(custody.GetAttribute("active"), "true", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(custody.GetAttribute("inventoryRemoved"), "true", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(custody.GetAttribute("deferredInventoryRestore"), "true", StringComparison.OrdinalIgnoreCase) ||
+            custody.SelectSingleNode("AppearanceSnapshot") != null ||
             custody.SelectSingleNode("InventorySnapshot") != null ||
             custody.SelectSingleNode("FineDebitIntent") != null ||
             custody.SelectSingleNode("DisciplineIntent") != null;
@@ -2077,7 +2078,7 @@ public sealed partial class DonJEnemySpawner
             JusticeCustodyPersistenceSnapshot custody = profile.CustodySnapshot;
             return custody.Active || custody.PoliceSuppressionApplied ||
                    custody.PoliceDispatchDisabled || custody.InventoryRemoved ||
-                   custody.DeferredInventoryRestore || custody.InventorySnapshot != null ||
+                   custody.DeferredInventoryRestore || custody.InventorySnapshot != null || custody.AppearanceSnapshot != null ||
                    custody.FineDebitIntent != null || custody.DisciplineIntent != null ||
                    custody.VoluntaryPaymentIntent != null;
         }
@@ -2094,6 +2095,7 @@ public sealed partial class DonJEnemySpawner
                     string.Equals(custody.GetAttribute("policeDispatchDisabled"), "true", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(custody.GetAttribute("inventoryRemoved"), "true", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(custody.GetAttribute("deferredInventoryRestore"), "true", StringComparison.OrdinalIgnoreCase) ||
+                    custody.SelectSingleNode("AppearanceSnapshot") != null ||
                     custody.SelectSingleNode("InventorySnapshot") != null ||
                     custody.SelectSingleNode("FineDebitIntent") != null ||
                     custody.SelectSingleNode("DisciplineIntent") != null ||
@@ -2354,6 +2356,7 @@ public sealed partial class DonJEnemySpawner
         return string.Equals(custody.GetAttribute("active"), "true", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(custody.GetAttribute("inventoryRemoved"), "true", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(custody.GetAttribute("deferredInventoryRestore"), "true", StringComparison.OrdinalIgnoreCase) ||
+               custody.SelectSingleNode("AppearanceSnapshot") != null ||
                custody.SelectSingleNode("InventorySnapshot") != null ||
                custody.SelectSingleNode("FineDebitIntent") != null ||
                custody.SelectSingleNode("DisciplineIntent") != null ||

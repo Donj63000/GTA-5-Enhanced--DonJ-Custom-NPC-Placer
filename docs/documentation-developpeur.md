@@ -2304,3 +2304,49 @@ Pour la limousine/convoi :
 - Pas d'ordres véhicules à chaque frame.
 - Préserver la conduite actuelle si elle fonctionne.
 - Toute conduite agressive doit rester contrôlée et limitée au mode urgence/combat.
+
+
+## 31. Tenue et effets personnels en détention
+
+`Justice.Custody.Appearance.cs` applique la combinaison native « Navy Boiler Suit »
+à Mission Row et Bolingbroke. Le modèle du héros et les composants visage/barbe/
+cheveux restent inchangés. Les composants 3 à 11 et les neuf emplacements de props
+sont capturés avant le précommit d'admission. L'application utilise le masque
+existant, sans nouveau fade ni attente. La maintenance est cadencée à 1 000 ms et
+n'écrit que les différences. Une panne cosmétique tente de rétablir les composants
+changés sans bloquer l'admission.
+
+Les presets proviennent du [catalogue solo fbi4_prep3](https://github.com/root-cause/v-decompiled-scripts/blob/master/fbi4_prep3.c),
+fonctions `func_207`, `func_210` et `func_129` :
+
+| Héros | Haut (3) drawable/texture | Pantalon (4) | Chaussures (6) | Accessoire (8) |
+|---|---|---|---|---|
+| Michael | 12/3 | 11/3 | 1/0 | 0/0 |
+| Franklin | 1/3 | 1/3 | 1/0 | 14/0 |
+| Trevor | 5/2 | 5/2 | 5/0 | 14/0 |
+
+Les autres composants vestimentaires valent 0/0, palette 0; les props sont retirés.
+Le snapshot est lié au slot, modèle et épisode. Libération, amnistie et récupération
+mettant fin à la détention rendent la tenue d'origine. Une restitution incomplète
+conserve son jeton après reset. Les vêtements choisis depuis une restitution
+partielle sont préservés. L'évasion conserve la combinaison et abandonne sa
+restitution. Une pause garde la tenue; l'arrêt du script la restaure provisoirement
+sans effacer le dépôt durable, réutilisé au prochain chargement.
+
+`Justice.Custody.Ammo.cs` capture les réserves uniques, dont les types effectifs des
+chargeurs spéciaux montés et les réserves connues sans arme. Après sauvegarde,
+chargeurs et réserves sont vidés et les armes retirées; l'absence des armes et des
+réserves capturées est vérifiée. Les poings restent utilisables. La maintenance
+retire les acquisitions une fois par seconde sans remplacer le dépôt initial ni
+répéter RemoveAll sur un inventaire vide. La restitution exacte normalise les
+réserves partagées après les armes et composants. En différé, les armes sont
+rendues sans munitions puis chaque réserve est traitée une fois, avec une intention
+`InventoryRestoreResult` dans le WAL. Une tentative native ambiguë n'est jamais
+rejouée pour éviter de recharger un stock déjà consommé; une telle panne peut donc
+nécessiter une vérification manuelle du stock restant.
+
+Le schéma XML reste en version 2. `AppearanceSnapshot`, `Weapon.ammoType` et
+`AmmoPool` sont optionnels; les anciens dépôts conservent leur lecture historique.
+DTO, clones, profils et récupérations de politique transportent ces données.
+Les tests ciblés sont dans `JusticeCustodyPersonalEffectsTests.cs`. La validation
+visuelle GTA reste distincte des simulations automatisées.

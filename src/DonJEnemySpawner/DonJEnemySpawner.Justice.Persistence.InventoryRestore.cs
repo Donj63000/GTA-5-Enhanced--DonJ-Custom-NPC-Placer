@@ -29,6 +29,8 @@ public sealed partial class DonJEnemySpawner
         key.Append(':').Append(_justiceActivePlayerProfileSlot).Append(':').Append(_justiceDeferredInventoryRestore);
         foreach (JusticeWeaponSnapshotItem item in _justiceWeaponSnapshot.Weapons)
             key.Append(item.DeferredRestoreCompleted ? '2' : item.DeferredRestoreAttempted ? '1' : '0');
+        foreach (JusticeAmmoSnapshotItem pool in _justiceWeaponSnapshot.AmmoPools)
+            key.Append(pool.RestoreCompleted ? '2' : pool.RestoreAttempted ? '1' : '0');
         string currentKey = key.ToString();
         if (!string.Equals(currentKey, _justiceInventoryBarrierKey, StringComparison.Ordinal))
         {
@@ -97,7 +99,7 @@ public sealed partial class DonJEnemySpawner
             {
                 try
                 {
-                    Function.Call((Hash)JusticeNativeGiveWeaponToPed, player.Handle, item.WeaponHash, item.Ammo, false, false);
+                    Function.Call((Hash)JusticeNativeGiveWeaponToPed, player.Handle, item.WeaponHash, item.AmmoTypeHash == 0 ? item.Ammo : 0, false, false);
                     owned = Function.Call<bool>(Hash.HAS_PED_GOT_WEAPON, player.Handle, item.WeaponHash, false);
                     if (!owned)
                     {
@@ -112,7 +114,7 @@ public sealed partial class DonJEnemySpawner
                     // Je configure seulement l'arme que je viens de rendre.
                     // Une arme déjà possédée conserve tous les choix du joueur.
                     Function.Call(Hash.SET_PED_WEAPON_TINT_INDEX, player.Handle, item.WeaponHash, item.Tint);
-                    Function.Call(Hash.SET_AMMO_IN_CLIP, player.Handle, item.WeaponHash, item.AmmoInClip);
+                    if (item.AmmoTypeHash == 0) Function.Call(Hash.SET_AMMO_IN_CLIP, player.Handle, item.WeaponHash, item.AmmoInClip);
                 }
                 catch
                 {
@@ -126,6 +128,7 @@ public sealed partial class DonJEnemySpawner
             item.DeferredRestoreCompleted = true;
             JusticeMarkStateDirty();
         }
+        complete &= RestoreJusticeDeferredAmmo(player);
         if (_justiceStateDirty) JusticeFlushStateNow();
         return complete;
     }
@@ -190,10 +193,11 @@ public sealed partial class DonJEnemySpawner
     private void RecoverJusticeInventoryRestoreResult(JusticeWalRecord record)
     {
         Guid id;
-        if (!HasExactJusticeWalFields(record, "restoreId", "weaponHash", "schemaMajor") ||
+        bool ammoResult = HasExactJusticeWalFields(record, "restoreId", "ammoTypeHash", "schemaMajor");
+        if ((!ammoResult && !HasExactJusticeWalFields(record, "restoreId", "weaponHash", "schemaMajor")) ||
             !IsJusticeCanonicalProfileSlot(record.ProfileSlot) || ReadWalInt(record, "schemaMajor", 0) != 2 ||
             !Guid.TryParseExact(ReadWalString(record, "restoreId", ""), "N", out id) ||
-            ReadWalInt(record, "weaponHash", 0) == 0)
+            ReadWalInt(record, ammoResult ? "ammoTypeHash" : "weaponHash", 0) == 0)
             throw new InvalidDataException("Résultat de restitution WAL invalide.");
         if (record.State == JusticeWalState.Prepared)
         {
@@ -211,9 +215,16 @@ public sealed partial class DonJEnemySpawner
                     weapon.Tint, weapon.ComponentHashes,
                     weapon.DeferredRestoreAttempted || weapon.WeaponHash == ReadWalInt(record, "weaponHash", 0),
                     weapon.DeferredRestoreCompleted || (record.State == JusticeWalState.Ambiguous &&
-                        weapon.WeaponHash == ReadWalInt(record, "weaponHash", 0))));
+                        weapon.WeaponHash == ReadWalInt(record, "weaponHash", 0)), weapon.AmmoTypeHash));
+            List<JusticeAmmoPersistenceSnapshot> pools = new List<JusticeAmmoPersistenceSnapshot>();
+            foreach (JusticeAmmoPersistenceSnapshot pool in inventory.AmmoPools)
+            {
+                bool matches = ammoResult && pool.TypeHash == ReadWalInt(record, "ammoTypeHash", 0);
+                pools.Add(new JusticeAmmoPersistenceSnapshot(pool.TypeHash, pool.Ammo,
+                    pool.RestoreAttempted || matches, pool.RestoreCompleted || (matches && record.State == JusticeWalState.Ambiguous)));
+            }
             inventory = new JusticeInventoryPersistenceSnapshot(inventory.IsValidated, inventory.SelectedWeaponHash,
-                weapons, inventory.RestoreId);
+                weapons, inventory.RestoreId, pools);
             profile.CustodySnapshot = CloneJusticeCustodyWithInventory(custody, inventory);
             profile.CustodyXml = string.Empty;
             if (record.ProfileSlot == _justiceActivePlayerProfileSlot)
@@ -228,6 +239,8 @@ public sealed partial class DonJEnemySpawner
         if (profile == null || profile.CustodyState == null) return false;
         JusticeInventoryPersistenceSnapshot inventory = profile.CustodyState.InventorySnapshot;
         if (inventory == null || inventory.RestoreId != ReadWalString(record, "restoreId", "")) return true;
+        foreach (JusticeAmmoPersistenceSnapshot pool in inventory.AmmoPools)
+            if (pool.TypeHash == ReadWalInt(record, "ammoTypeHash", 0)) return pool.RestoreCompleted;
         foreach (JusticeWeaponPersistenceSnapshot weapon in inventory.Weapons)
             if (weapon.WeaponHash == ReadWalInt(record, "weaponHash", 0))
                 return weapon.DeferredRestoreCompleted;
