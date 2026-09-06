@@ -95,6 +95,7 @@ public sealed partial class DonJEnemySpawner
 
     private void MaintainJusticeCustodyPersonalEffects(Ped player, int now)
     {
+        if (!JusticeCustodyHasReached(now, _justiceNextCustodyPersonalEffectsAt)) return;
         if (!JusticeIsCustodyActive || _justiceCaseState == null || _justiceCaseState.Phase != JusticePhase.Incarcerated ||
             _justiceInventoryCustodyState != JusticeInventoryCustodyState.RemovedVerified || !_justiceInventoryRemoved ||
             !Entity.Exists(player) || player.IsDead || !IsJusticeCustodyPlayerIdentityCompatible(player) ||

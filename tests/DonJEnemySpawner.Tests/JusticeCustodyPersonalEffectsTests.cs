@@ -207,6 +207,20 @@ public sealed class JusticeCustodyPersonalEffectsTests
     }
 
     [TestMethod]
+    public void Outfit_CustomModelNeverReceivesProtagonistComponents()
+    {
+        object script = CustodyScript(0, "MissionRow");
+        Ped player = Game.Player.Character;
+        player.Model = new Model("mp_m_freemode_01");
+        Set(script, "_justiceCustodyPlayerModelHash", player.Model.Hash);
+        var clothing = new ClothingWorld();
+        StubRuntime.NativeCallHandler = clothing.Handle;
+        Call(script, "PrepareJusticeCustodyAppearance", player);
+        Assert.IsNull(Get<object>(script, "_justiceCustodyAppearance"));
+        Assert.AreEqual(0, clothing.Writes);
+    }
+
+    [TestMethod]
     public void Outfit_DeferredRestoreSurvivesResetAndProtectsNewClothing()
     {
         object script = CustodyScript(0, "MissionRow");

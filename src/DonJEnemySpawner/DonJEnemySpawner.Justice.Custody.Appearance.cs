@@ -113,6 +113,8 @@ public sealed partial class DonJEnemySpawner
         int slot = GetJusticeCanonicalPlayerSlotSafe();
         JusticeClothingItem[] uniform = GetJusticeCustodyUniform(slot);
         if (uniform == null || slot != _justiceActivePlayerProfileSlot) return;
+        int expectedModel = Game.GenerateHash(slot == 0 ? "player_zero" : slot == 1 ? "player_one" : "player_two");
+        if (GetJusticePedModelHashSafe(player) != expectedModel) return;
         try
         {
             List<JusticeClothingItem> original = new List<JusticeClothingItem>(uniform.Length);
@@ -138,6 +140,7 @@ public sealed partial class DonJEnemySpawner
 
     private void ApplyJusticeCustodyAppearance(Ped player, int now)
     {
+        if (!JusticeCustodyHasReached(now, _justiceNextCustodyAppearanceAt)) return;
         if (_justiceCustodyAppearanceRollbackPending && IsJusticeAppearanceOwner(player) &&
             JusticeCustodyHasReached(now, _justiceNextCustodyAppearanceAt))
         {
