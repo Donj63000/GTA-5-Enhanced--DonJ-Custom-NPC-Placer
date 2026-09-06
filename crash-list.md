@@ -2809,3 +2809,27 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Fixture remplacée par MicroSMG, conversion unchecked, GtaRoot de test corrigé, initialisation explicite du WAL avant simulation de perte ACK.
 - Vérification: tests-personal-effects-third.log : 15/15 tests ciblés réussis; suite suivante 861/861 réussie.
 - Résolution: Cause corrigée; qualification finale et validation visuelle suivies séparément.
+
+## 2026-09-06 02:44:41 +02:00 — Commande de suivi de la publication GitHub
+
+- Statut: Corrigé.
+- Contexte: Publication des correctifs de détention et du bleu de travail sur `main`.
+- Symptôme: Le filtre `gh run view --jq` échoue avec le code 1 pendant la lecture du statut CI.
+- Sources vérifiées: `TestResults/github-publication-20260906-023825/monitoring-command-error.txt`; collecte `bug-reports/20260906-024233-github-publication-monitoring` incluant les logs NIB, ScriptHookV et Scripts du dossier GTA Enhanced.
+- Extraits utiles: `function not defined: pending/0` dans la sortie de la commande de suivi.
+- Analyse / hypothèse: Les guillemets du filtre ont été transformés lors du passage de PowerShell à l'exécutable natif. Aucun échec du workflow ni du mod n'est établi par cette commande.
+- Action menée: Je lis le JSON de GitHub avec `ConvertFrom-Json` et je filtre les objets dans PowerShell.
+- Vérification: Le workflow Safety `34001862082` du commit `0701e41` termine avec succès : 863 tests réussis, aucun échec, archive `DonJCustomNpcPlacer-game-ready` publiée.
+- Résolution: Suivi rétabli sans modification du code ou du workflow.
+
+## 2026-09-06 02:44:41 +02:00 — Vérifications locales pendant une session GTA
+
+- Statut: Blocage local identifié; qualification complète réussie sur GitHub.
+- Contexte: Nouvelle exécution de `tools/run-safety-checks.ps1` avant clôture de la publication GitHub. GTA est lancé pendant cette vérification.
+- Symptôme: Les tests de déploiement temporaire qui attendent un remplacement réussi sont refusés par le garde-fou global des processus GTA.
+- Sources vérifiées: `TestResults/github-publication-20260906-023825/safety-local.log`; `tools/deploy-game-ready.ps1`, fonction `Assert-GameScriptHostsStopped`; processus Windows; collecte `bug-reports/20260906-024233-github-publication-monitoring`, logs NIB, ScriptHookV et Scripts Enhanced.
+- Extraits utiles: `Deploiement refuse: ferme GTA et ses hosts de scripts avant toute modification de Scripts. Processus detectes: PlayGTAV (PID 28032), GTA5_Enhanced (PID 28456)` dans `safety-local.log`, notamment pour `GameReadyDeployment_ReplacesVerifiedFilesThenRemovesLegacyAliases` et `GameReadyDeployment_UsesNativeFallbackWhenHudRuntimeIsMissing`.
+- Analyse / hypothèse: Le garde-fou vérifie les processus du poste même lorsque la destination du test est temporaire. La session GTA explique ces refus; ils ne prouvent pas une régression du binaire.
+- Action menée: Je conserve la protection et la session GTA ouverte. Je confie la vérification complète au workflow Windows isolé de GitHub, sans désactiver de test.
+- Vérification: Compilation locale et contrat ABI réussis; workflow Safety `34001862082` du même commit `0701e41` réussi avec 863/863 tests et package vérifié. La précédente qualification locale avec l'API NIB réelle avait réussi 691/691 tests avant le lancement du jeu.
+- Résolution: Publication qualifiée dans l'environnement CI isolé. La suite locale comprenant les déploiements temporaires reste à relancer lorsque le jeu est fermé; aucune modification des fichiers du jeu n'est effectuée pendant cette publication.
