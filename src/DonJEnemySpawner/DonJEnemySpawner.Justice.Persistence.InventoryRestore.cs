@@ -97,24 +97,49 @@ public sealed partial class DonJEnemySpawner
             JusticeMarkStateDirty();
             if (!owned)
             {
+                JusticeAmmoSnapshotItem projectilePool = null;
+                JusticeWalRecord projectileOperation = null;
                 try
                 {
-                    Function.Call((Hash)JusticeNativeGiveWeaponToPed, player.Handle, item.WeaponHash, item.AmmoTypeHash == 0 ? item.Ammo : 0, false, false);
-                    owned = Function.Call<bool>(Hash.HAS_PED_GOT_WEAPON, player.Handle, item.WeaponHash, false);
-                    if (!owned)
+                    int ammunition = item.AmmoTypeHash == 0 ? item.Ammo : 0;
+                    if (!PrepareJusticeDeferredProjectileAmmo(player, item, out projectilePool,
+                            out projectileOperation, out ammunition))
                     {
-                        // Le refus vérifié reste réessayable ; aucun succès n'est inventé.
-                        _justiceWriteAheadLog.Append(new JusticeWalRecord(operation.TransactionId,
-                            operation.OperationKind, operation.ProfileSlot, JusticeWalState.Rejected,
-                            operation.PersistenceRevision, operation.CreatedAtUtcTicks, operation.Fields));
-                        item.DeferredRestoreAttempted = false;
+                        // Je sais qu'aucun GIVE n'a été appelé : seule son intention
+                        // peut être rejetée. Le WAL des munitions garde sa propre preuve.
+                        RejectJusticeUnappliedWeaponRestore(operation, item);
                         complete = false;
                         continue;
                     }
+                    Function.Call((Hash)JusticeNativeGiveWeaponToPed, player.Handle, item.WeaponHash, ammunition, false, false);
+                    owned = Function.Call<bool>(Hash.HAS_PED_GOT_WEAPON, player.Handle, item.WeaponHash, false);
+                    if (!owned)
+                    {
+                        if (projectilePool != null && ReadJusticeAmmoPool(player, projectilePool.TypeHash) != 0)
+                        {
+                            // Je ne rejoue pas un GIVE dont le stock existe déjà,
+                            // même si GTA ne confirme pas encore la possession.
+                            complete = false;
+                            continue;
+                        }
+                        if (projectilePool != null)
+                        {
+                            RejectJusticeUnappliedProjectileRestore(projectileOperation, projectilePool);
+                        }
+                        // Le refus vérifié reste réessayable ; aucun succès n'est inventé.
+                        RejectJusticeUnappliedWeaponRestore(operation, item);
+                        complete = false;
+                        continue;
+                    }
+                    if (projectilePool != null) projectilePool.RestoreCompleted = true;
                     // Je configure seulement l'arme que je viens de rendre.
                     // Une arme déjà possédée conserve tous les choix du joueur.
                     Function.Call(Hash.SET_PED_WEAPON_TINT_INDEX, player.Handle, item.WeaponHash, item.Tint);
-                    if (item.AmmoTypeHash == 0) Function.Call(Hash.SET_AMMO_IN_CLIP, player.Handle, item.WeaponHash, item.AmmoInClip);
+                    if (item.AmmoTypeHash == 0 && !RestoreJusticeWeaponClipIfSupported(player, item))
+                    {
+                        complete = false;
+                        continue;
+                    }
                 }
                 catch
                 {
@@ -131,6 +156,51 @@ public sealed partial class DonJEnemySpawner
         complete &= RestoreJusticeDeferredAmmo(player);
         if (_justiceStateDirty) JusticeFlushStateNow();
         return complete;
+    }
+
+    private bool PrepareJusticeDeferredProjectileAmmo(Ped player, JusticeWeaponSnapshotItem item,
+        out JusticeAmmoSnapshotItem pool, out JusticeWalRecord operation, out int ammunition)
+    {
+        pool = null;
+        operation = null;
+        ammunition = item.AmmoTypeHash == 0 ? item.Ammo : 0;
+        if (item.AmmoTypeHash == 0 || item.Ammo <= 0 ||
+            Function.Call<int>((Hash)JusticeNativeGetWeaponGroup, item.WeaponHash) != 1548507267)
+            return true;
+        foreach (JusticeAmmoSnapshotItem candidate in _justiceWeaponSnapshot.AmmoPools)
+        {
+            if (candidate.TypeHash != item.AmmoTypeHash) continue;
+            // Je conserve les stocks déjà présents ou potentiellement rendus.
+            // Un projectile sans aucun stock doit recevoir son dépôt dès GIVE,
+            // car GTA peut refuser de matérialiser une grenade donnée avec zéro.
+            if (candidate.RestoreAttempted || ReadJusticeAmmoPool(player, candidate.TypeHash) != 0)
+                return true;
+            operation = BeginJusticeDeferredAmmoRestore(candidate);
+            if (operation == null) return false;
+            pool = candidate;
+            pool.RestoreAttempted = true;
+            ammunition = pool.Ammo;
+            JusticeMarkStateDirty();
+            return true;
+        }
+        return false;
+    }
+
+    private void RejectJusticeUnappliedWeaponRestore(JusticeWalRecord operation, JusticeWeaponSnapshotItem item)
+    {
+        _justiceWriteAheadLog.Append(new JusticeWalRecord(operation.TransactionId,
+            operation.OperationKind, operation.ProfileSlot, JusticeWalState.Rejected,
+            operation.PersistenceRevision, operation.CreatedAtUtcTicks, operation.Fields));
+        item.DeferredRestoreAttempted = false;
+    }
+
+    private void RejectJusticeUnappliedProjectileRestore(JusticeWalRecord operation, JusticeAmmoSnapshotItem pool)
+    {
+        _justiceWriteAheadLog.Append(new JusticeWalRecord(operation.TransactionId,
+            operation.OperationKind, operation.ProfileSlot, JusticeWalState.Rejected,
+            operation.PersistenceRevision, operation.CreatedAtUtcTicks, operation.Fields));
+        pool.RestoreAttempted = false;
+        pool.RestoreCompleted = false;
     }
 
     private static bool RestoreJusticeMissingWeaponComponents(Ped player, JusticeWeaponSnapshotItem item)

@@ -288,7 +288,7 @@ optionnel et son absence utilise le fallback HUD natif pris en charge.
 
 DonJEnemySpawner.Justice.Custody.cs
 
-Contient la détention Justice : transfert vers Mission Row ou Bolingbroke, identité canonique du protagoniste, transactions cash explicites, machine d'état d'inventaire, intégration police configurable, volumes autorisés, gardes et détenus laissés aux événements naturels de GTA, évasion, libération et reprise après chargement. Seule la mort en détention déclenche un retour en cellule hors transferts normaux. Il encapsule aussi le tampon unmanaged réutilisable de 312 octets nécessaire à `GET_DLC_WEAPON_DATA`.
+Contient la détention Justice : transfert vers Mission Row ou Bolingbroke, identité canonique du protagoniste, transactions cash explicites, machine d'état d'inventaire, intégration police configurable, volumes autorisés, gardes et détenus laissés aux événements naturels de GTA, évasion, libération et reprise après chargement. La mort en détention et la perte vérifiée du plancher déclenchent une reprise physique en cellule, sans réappliquer la condamnation. Il encapsule aussi le tampon unmanaged réutilisable de 312 octets nécessaire à `GET_DLC_WEAPON_DATA`.
 
 DonJEnemySpawner.RuntimeSafety.cs
 
@@ -807,7 +807,7 @@ Le masque suit un contrat visuel one-shot distinct de la durée métier du WAL :
 
 Si l'initialisation de la persistance devient définitivement impossible à cause d'un XML ou d'un WAL invalide, Justice ne transforme jamais cette panne en remise en liberté ni en admission partielle exposée aux gardes. Après validation du profil, de l'épisode et du site, le protagoniste est maintenu physiquement dans la cellule de Mission Row ou Bolingbroke sous masque, gel, invincibilité transitoire et contrôles bloqués. La phase, la peine, le mandat et l'inventaire restent intacts en mémoire; l'horloge est suspendue et aucune confiscation ni écriture police irréversible n'est tentée sans précommit. La réparation du fichier reste nécessaire au prochain chargement; le maintien fail-closed privilégie alors l'intégrité et la sécurité du détenu à une reprise de contrôle non durable.
 
-Avant un transfert, pendant tout maintien pré-jugement et à chaque tick de détention, les éventuels modes Placement et Terminator sont terminés avec restauration de leur caméra, gel et owner de protection; leurs commandes d'entrée sont refusées tant que Justice possède le suspect ou le détenu. Si ce nettoyage n'est pas vérifiable, la peine et le transfert restent suspendus. La baseline d'invincibilité partagée est ensuite normalisée à `false` : les anciennes sauvegardes portant `storedInvincible=true` restent lisibles mais sont réécrites à `false`. Le holding peut conserver temporairement gel et invincibilité tant que l'admission n'est pas durable; avant de valider la détention, de rendre l'écran ou de faire progresser la peine, Justice garantit en revanche que le protagoniste est mobile et mortel. Cette vérification est répétée à chaque tick stable, après chaque rebind et avant toute libération, évasion, amnistie, réinitialisation ou extinction du script. L'unique invincibilité Justice autorisée protège le streaming et l'admission sous écran noir; sa libération doit être suivie d'une relecture `false` avant le FadeIn. Le drapeau `FreezePosition` transitoire encore imposé par GTA après une arrestation ou un respawn est retiré à cette frontière finale. Tous les échecs de transfert — snapshot, précommit, inventaire, mortalité ou téléportation — conservent la phase `Transporting`, la condamnation, le dossier et la peine, puis retentent avec un délai borné de 750 à 5 000 ms. Le seuil de trente secondes active le secours mais ne crée aucune remise en liberté technique. Le précommit général n'est confirmé qu'une fois par tentative de transfert afin qu'une barrière `InventoryConfiscation` asynchrone puisse être reprise par son propre contrôleur ; le fallback sans confiscation conserve séparément son latch jusqu'à durabilité. Si le détenu meurt pendant qu'une barrière encore sans effet attend le disque, la barrière est effacée si aucune frame n'existe encore, ou sa frame `Prepared` est explicitement rejetée si elle a déjà été matérialisée. Le checkpoint de mort garde ensuite son propre latch jusqu'à `DiskRevision` : le rebind de respawn ne peut ni rester bloqué derrière l'ancien appelant ni dépendre d'un simple enqueue mémoire. Les WAL d'une ancienne politique, y compris `TransferRollback`, restent en quarantaine et ne sont jamais rejoués; seul un jeton de récupération sans contenu judiciaire peut survivre au reset. Le téléporteur partagé des intérieurs continue, lui, de restaurer exactement son état d'entrée hors contrat Justice.
+Avant un transfert, pendant tout maintien pré-jugement et à chaque tick de détention, les éventuels modes Placement et Terminator sont terminés avec restauration de leur caméra, gel et owner de protection; leurs commandes d'entrée sont refusées tant que Justice possède le suspect ou le détenu. Si ce nettoyage n'est pas vérifiable, la peine et le transfert restent suspendus. La baseline d'invincibilité partagée est ensuite normalisée à `false` : les anciennes sauvegardes portant `storedInvincible=true` restent lisibles mais sont réécrites à `false`. Le holding peut conserver temporairement gel et invincibilité tant que l'admission n'est pas durable; avant de valider la détention, de rendre l'écran ou de faire progresser la peine, Justice garantit en revanche que le protagoniste est mobile et mortel. Cette vérification est répétée à chaque tick stable, après chaque rebind et avant toute libération, évasion, amnistie, réinitialisation ou extinction du script. L'unique invincibilité Justice autorisée protège le streaming et l'admission sous écran noir; sa libération doit être suivie d'une relecture `false` avant le FadeIn. Le drapeau `FreezePosition` transitoire encore imposé par GTA après une arrestation ou un respawn est retiré à cette frontière finale. Tous les échecs de transfert — snapshot, précommit, inventaire, mortalité ou téléportation — conservent la phase `Transporting`, la condamnation, le dossier et la peine, puis retentent avec un délai borné de 750 à 5 000 ms. Le chargement de destination possède un délai nominal de trente secondes par site, constaté à la prochaine tentative autorisée (backoff de transfert jusqu'à cinq secondes) : Mission Row peut céder sa place à Bolingbroke sans changer la peine; un nouvel échec suspend le transfert en erreur technique stable, sans téléportation forcée ni remise en liberté. Le précommit général n'est confirmé qu'une fois par tentative de transfert afin qu'une barrière `InventoryConfiscation` asynchrone puisse être reprise par son propre contrôleur ; le fallback sans confiscation conserve séparément son latch jusqu'à durabilité. Si le détenu meurt pendant qu'une barrière encore sans effet attend le disque, la barrière est effacée si aucune frame n'existe encore, ou sa frame `Prepared` est explicitement rejetée si elle a déjà été matérialisée. Le checkpoint de mort garde ensuite son propre latch jusqu'à `DiskRevision` : le rebind de respawn ne peut ni rester bloqué derrière l'ancien appelant ni dépendre d'un simple enqueue mémoire. Les WAL d'une ancienne politique, y compris `TransferRollback`, restent en quarantaine et ne sont jamais rejoués; seul un jeton de récupération sans contenu judiciaire peut survivre au reset. Le téléporteur partagé des intérieurs continue, lui, de restaurer exactement son état d'entrée hors contrat Justice.
 
 L'admission en détention est atomique du point de vue du joueur. Le téléport de Justice diffère le `FADE_IN`; sous écran noir et contrôles verrouillés, il vérifie d'abord l'identité et le confinement, publie durablement le reset Recognition de capture, annule mandat et signalements, supprime la perte wanted annoncée, exige un niveau wanted relu à zéro, puis établit la quarantaine police/dispatch du mode configuré. Les erreurs transitoires conservent le masque et sont retentées sans faire progresser la peine; le secours de trente secondes peut replacer le protagoniste mais ne l'expose jamais aux gardes avec un wanted non nul. La phase stable, la scène et l'horloge sont préparées avant la restitution de l'écran. Pendant la détention normale, toute étoile réapparue est ramenée à zéro, sauf après la nouvelle agression post-admission qui déclenche explicitement la riposte locale.
 
@@ -2340,7 +2340,7 @@ réserves capturées est vérifiée. Les poings restent utilisables. La maintena
 retire les acquisitions une fois par seconde sans remplacer le dépôt initial ni
 répéter RemoveAll sur un inventaire vide. La restitution exacte normalise les
 réserves partagées après les armes et composants. En différé, les armes sont
-rendues sans munitions puis chaque réserve est traitée une fois, avec une intention
+rendues sans munitions puis chaque réserve est traitée une fois. Un projectile que GTA ne matérialise pas à zéro reçoit son stock dès GIVE, sous la même barrière WAL de réserve; le retry ne recharge jamais un stock déjà tenté. Chaque réserve possède une intention
 `InventoryRestoreResult` dans le WAL. Une tentative native ambiguë n'est jamais
 rejouée pour éviter de recharger un stock déjà consommé; une telle panne peut donc
 nécessiter une vérification manuelle du stock restant.
@@ -2350,3 +2350,42 @@ Le schéma XML reste en version 2. `AppearanceSnapshot`, `Weapon.ammoType` et
 DTO, clones, profils et récupérations de politique transportent ces données.
 Les tests ciblés sont dans `JusticeCustodyPersonalEffectsTests.cs`. La validation
 visuelle GTA reste distincte des simulations automatisées.
+
+## Admission en détention — chargement et confiscation du 6 septembre 2026
+
+`Justice.Custody.Inventory.cs` distingue un vrai échec de lecture d'un chargeur
+absent sur une catégorie reconnue. Une arme à feu illisible reste bloquante pour
+la capture exacte. Le diagnostic indique l'étape, le hash d'arme et l'index DLC.
+`UnsupportedPreserved` reste compatible avec les anciens XML, mais ne constitue
+plus un abandon définitif : le même propriétaire retente la capture toutes les
+cinq secondes, sans remplacer un dépôt valide. Dès la détention active, un verrou
+runtime interdit sélection/tir/visée même sans snapshot. Les poings redeviennent
+utilisables après confiscation vérifiée. La suppression attend toujours les
+barrières durables; un échec conserve le dépôt et le verrou.
+
+`Justice.Custody.Streaming.cs` charge les cartes MP avant Mission Row, conserve
+le focus de la destination entre les tentatives, épingle l'intérieur valide puis
+attend sa disponibilité et un rayon local vertical de ±2 m. Le plancher doit se
+trouver entre -1,5 m et +0,25 m de la destination, avec normale Z ≥ 0,5. Le sol de
+la rue au-dessus de la cellule ne satisfait pas cette preuve. Après déplacement,
+collision autour du ped et distance ≤ 2 m sont également exigées. Le FadeIn relit
+ces preuves. Les sondes de polling sont espacées d'au moins 250 ms; les contrôles de
+frontière relisent immédiatement le moteur. L'admission libère le focus et la
+scène de chargement, mais conserve le pin de Mission Row jusqu'au nettoyage.
+
+`Justice.Custody.Recovery.cs` autorise un seul repli Mission Row → Bolingbroke
+après trente secondes sans preuve physique. Le holding peut changer de destination
+pendant une transaction en attente, mais le site judiciaire ne change qu'après
+les barrières d'amende et de CustodyRebind. La peine, le cash, l'épisode et le dépôt
+ne sont pas recréés. L'échec de Bolingbroke devient une erreur technique stable,
+avec journal, personnage protégé, horloge suspendue et aucune boucle de téléport.
+Une chute sous le volume autorisé à l'intérieur de son polygone XY arme la reprise
+physique du même épisode au lieu d'une évasion. Une sortie horizontale réelle
+conserve les règles d'évasion. Le propriétaire du holding, y compris pendant une
+réparation d'un profil inactif, borne le secours et le nettoyage du focus/gel.
+
+Les tests dédiés sont `JusticeInventoryAdmissionRegressionTests.cs`,
+`JusticeCustodyStreamingTests.cs` et `JusticeCustodyRecoveryTests.cs`. Les fixtures
+historiques de mort/holding décrivent désormais explicitement intérieur et
+plancher. Les observations en jeu restent consignées séparément dans
+`docs/validation-justice-manuelle.md`.

@@ -59,7 +59,7 @@ public sealed class PlayerInvincibilityRegressionTests
             "if (_placementPlayerStateStored ||",
             "HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement)",
             "return;",
-            "_justiceCustodySite = GetJusticeCustodySiteForSentence");
+            "_justiceCustodySite = GetJusticeCustodyPhysicalDestinationSite");
     }
 
     [TestMethod]

@@ -267,6 +267,14 @@ public sealed class JusticeCustodyAdoptedRespawnIdentityTests
             1691.0f,
             2566.0f,
             45.5f);
+        GTA.StubRuntime.RaycastHandler = (source, target, options, ignored) =>
+        {
+            GTA.Math.Vector3 center = (source + target) * 0.5f;
+            return new GTA.RaycastResult(
+                center.DistanceTo(holding) <= 0.1f && options == GTA.IntersectOptions.Map,
+                holding - new GTA.Math.Vector3(0.0f, 0.0f, 1.0f),
+                new GTA.Math.Vector3(0.0f, 0.0f, 1.0f));
+        };
         object script = FormatterServices.GetUninitializedObject(ScriptType);
         SetField(script, "_justicePoliceDeathPreJudgmentHoldingOwnerSlot", 0);
         SetField(

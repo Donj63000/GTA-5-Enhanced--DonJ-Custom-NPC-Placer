@@ -92,6 +92,9 @@ public sealed class JusticeCustodyDeathFailClosedTests
     public void CustodyDeath_WalOutageReholdsRespawnAtPrisonAndFreezesSentence()
     {
         GTA.StubRuntime.Reset();
+        GTA.StubRuntime.RaycastHandler = (from, to, options, ignored) =>
+            new GTA.RaycastResult(true, new GTA.Math.Vector3(1690.86f, 2565.12f, 44.56f),
+                new GTA.Math.Vector3(0f, 0f, 1f));
         ulong groundProbe = GetPrivateConstant<ulong>(
             "JusticeNativeGetGroundZFor3DCoord");
         ulong collisionProbe = GetPrivateConstant<ulong>(

@@ -51,6 +51,80 @@ public class StubRuntimeBehaviorTests
     }
 
     [TestMethod]
+    public void WeaponComponents_ExposeLaSignatureV2EtDistingueAbsenceEtPanne()
+    {
+        MethodInfo components = typeof(Weapon).GetMethod(
+            "GetComponentsFromHash",
+            BindingFlags.Public | BindingFlags.Static,
+            null,
+            new[] { typeof(WeaponHash) },
+            null);
+        Assert.IsNotNull(components);
+        Assert.AreEqual(typeof(WeaponComponent[]), components.ReturnType);
+        Assert.AreEqual(typeof(uint), Enum.GetUnderlyingType(typeof(WeaponComponent)));
+        Assert.AreEqual(0, Weapon.GetComponentsFromHash(WeaponHash.Knife).Length);
+
+        WeaponComponent[] expected = { WeaponComponent.PistolClip01, WeaponComponent.AtPiSupp };
+        StubRuntime.WeaponComponentsHandler = weapon =>
+        {
+            Assert.AreEqual(WeaponHash.Pistol, weapon);
+            return expected;
+        };
+        CollectionAssert.AreEqual(expected, Weapon.GetComponentsFromHash(WeaponHash.Pistol));
+
+        StubRuntime.WeaponComponentsHandler = weapon => null;
+        Assert.IsNull(Weapon.GetComponentsFromHash(WeaponHash.Pistol));
+        StubRuntime.WeaponComponentsHandler = weapon => throw new InvalidOperationException("Catalogue indisponible");
+        Assert.ThrowsException<InvalidOperationException>(() => Weapon.GetComponentsFromHash(WeaponHash.Pistol));
+
+        StubRuntime.Reset();
+        Assert.IsNull(StubRuntime.WeaponComponentsHandler);
+        Assert.AreEqual(0, Weapon.GetComponentsFromHash(WeaponHash.Pistol).Length);
+    }
+
+    [TestMethod]
+    public void Raycast_PermetDeSimulerLePlancherSansModifierLeContratV2()
+    {
+        GTA.Math.Vector3 source = new GTA.Math.Vector3(459.86f, -994.38f, 26.91f);
+        GTA.Math.Vector3 target = new GTA.Math.Vector3(459.86f, -994.38f, 22.91f);
+        GTA.Math.Vector3 floor = new GTA.Math.Vector3(459.86f, -994.38f, 24.91f);
+        GTA.Math.Vector3 normal = new GTA.Math.Vector3(0.0f, 0.0f, 1.0f);
+        Ped player = Game.Player.Character;
+        Assert.IsFalse(World.Raycast(source, target, IntersectOptions.Map, player).DitHitAnything);
+
+        int calls = 0;
+        StubRuntime.RaycastHandler = (observedSource, observedTarget, options, ignored) =>
+        {
+            calls++;
+            Assert.AreEqual(source, observedSource);
+            Assert.AreEqual(target, observedTarget);
+            Assert.AreEqual(IntersectOptions.Map, options);
+            Assert.AreSame(player, ignored);
+            return new RaycastResult(true, floor, normal);
+        };
+        RaycastResult hit = World.Raycast(source, target, IntersectOptions.Map, player);
+        Assert.IsTrue(hit.DitHitAnything);
+        Assert.AreEqual(floor, hit.HitCoords);
+        Assert.AreEqual(normal, hit.SurfaceNormal);
+        Assert.IsFalse(hit.DitHitEntity);
+        Assert.IsNull(hit.HitEntity);
+        Assert.IsFalse(typeof(RaycastResult).GetProperty("HitCoords").CanWrite);
+        Assert.IsFalse(typeof(RaycastResult).GetProperty("SurfaceNormal").CanWrite);
+
+        Assert.IsTrue(World.Raycast(
+            source,
+            new GTA.Math.Vector3(0.0f, 0.0f, -1.0f),
+            4.0f,
+            IntersectOptions.Map,
+            player).DitHitAnything);
+        Assert.AreEqual(2, calls);
+
+        StubRuntime.Reset();
+        Assert.IsNull(StubRuntime.RaycastHandler);
+        Assert.IsFalse(World.Raycast(source, target, IntersectOptions.Map, player).DitHitAnything);
+    }
+
+    [TestMethod]
     public void StubApi_ExposeUniquementLesSignaturesNib2116Consommees()
     {
         MethodInfo[] calls = typeof(Function).GetMethods(

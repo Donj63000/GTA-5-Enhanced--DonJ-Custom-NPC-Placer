@@ -85,7 +85,9 @@ public sealed partial class DonJEnemySpawner
         foreach (JusticeWeaponSnapshotItem item in _justiceWeaponSnapshot.Weapons)
             if (item.AmmoTypeHash != 0 && Function.Call<bool>(Hash.HAS_PED_GOT_WEAPON, player.Handle, item.WeaponHash, false))
             {
-                Function.Call(Hash.SET_AMMO_IN_CLIP, player.Handle, item.WeaponHash, 0);
+                // Je laisse RemoveAll et la vérification finale garantir le retrait
+                // même si la lecture d'un chargeur est devenue indisponible.
+                TryClearJusticeWeaponClipIfSupported(player, item.WeaponHash);
                 Function.Call((Hash)JusticeNativeSetPedAmmo, player.Handle, item.WeaponHash, 0, false);
             }
         foreach (JusticeAmmoSnapshotItem pool in _justiceWeaponSnapshot.AmmoPools)
@@ -126,7 +128,19 @@ public sealed partial class DonJEnemySpawner
                     Function.Call((Hash)JusticeNativeSetAmmoByType, player.Handle, pool, 0);
             // Je ne remplace jamais le dépôt initial par une arme récupérée en prison.
             // Un inventaire vide ne reçoit aucun nouvel appel destructif.
-            if (foundWeapon) RemoveJusticePlayerWeaponsSafe(player);
+            if (foundWeapon)
+            {
+                JusticeInventoryRemovalResult result = RemoveJusticePlayerWeaponsSafe(player);
+                if (result != JusticeInventoryRemovalResult.RemovedVerified)
+                {
+                    RegisterJusticeInventoryRemovalFailure(result, now);
+                    LogWarning("Justice.Inventaire.Maintien",
+                        "Arme acquise pendant la détention : retrait non vérifié, dépôt conservé et utilisation interdite.");
+                }
+            }
+            foreach (int pool in pools)
+                if (ReadJusticeAmmoPool(player, pool) != 0)
+                    throw new InvalidOperationException("Retrait des munitions de détention non vérifié.");
         }
         catch (Exception ex) { LogException("Justice.Inventaire.Maintien", ex); }
     }
@@ -230,7 +244,8 @@ public sealed partial class DonJEnemySpawner
                     foreach (JusticeWeaponSnapshotItem weapon in _justiceWeaponSnapshot.Weapons)
                         if (weapon.AmmoTypeHash == pool.TypeHash &&
                             Function.Call<bool>(Hash.HAS_PED_GOT_WEAPON, player.Handle, weapon.WeaponHash, false))
-                            Function.Call(Hash.SET_AMMO_IN_CLIP, player.Handle, weapon.WeaponHash, weapon.AmmoInClip);
+                            if (!RestoreJusticeWeaponClipIfSupported(player, weapon))
+                                throw new InvalidOperationException("Chargeur rendu non vérifié.");
                     // Je normalise une seule fois le total partagé après les chargeurs.
                     if (ReadJusticeAmmoPool(player, pool.TypeHash) != pool.Ammo)
                         Function.Call((Hash)JusticeNativeSetAmmoByType, player.Handle, pool.TypeHash, pool.Ammo);

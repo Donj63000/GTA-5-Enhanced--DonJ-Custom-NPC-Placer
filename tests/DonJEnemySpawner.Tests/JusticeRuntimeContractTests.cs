@@ -2413,6 +2413,15 @@ public sealed class JusticeRuntimeContractTests
         ((IList)GetFieldValue<object>(script, "_justiceCustodyGuards")).Add(guard);
         GTA.StubRuntime.DamageHandler = (target, attacker) =>
             ReferenceEquals(target, guard) && ReferenceEquals(attacker, player);
+        GTA.StubRuntime.NativeCallHandler = (hash, arguments) =>
+        {
+            if (hash == 0xB0F7F8663821D9C3UL) return 123;
+            if (hash == 0x26B0E73D7EAAF4D3UL || hash == 0x6726BDCCC1932F0EUL ||
+                hash == 0xE9676F61BC0B3321UL) return true;
+            return null;
+        };
+        GTA.StubRuntime.RaycastHandler = (from, to, options, ignored) =>
+            new GTA.RaycastResult(true, (from + to) * 0.5f - new Vector3(0, 0, 1), new Vector3(0, 0, 1));
         try
         {
             InvokeInstance(script, "JusticeUpdateCustody", player, 1000);
@@ -2420,6 +2429,8 @@ public sealed class JusticeRuntimeContractTests
         finally
         {
             GTA.StubRuntime.DamageHandler = null;
+            GTA.StubRuntime.NativeCallHandler = null;
+            GTA.StubRuntime.RaycastHandler = null;
         }
 
         Assert.AreEqual(positionBefore, player.Position);
@@ -3369,11 +3380,9 @@ public sealed class JusticeRuntimeContractTests
             protectedMove,
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
             "return true;",
-            "JusticeCustodyTransferTimeoutMs",
-            "TryJusticeEmergencyTeleport(",
-            "false)",
-            "_justicePreJudgmentHoldingPositionApplied =",
-            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(");
+            "HasJusticeCustodyDestinationStreamingTimedOut(",
+            "HandleJusticeCustodyDestinationStreamingTimeout(");
+        Assert.IsFalse(protectedMove.Contains("TryJusticeEmergencyTeleport("));
         Assert.IsFalse(transfer.Contains("TeleportPlayerWithFadeSafe("));
         Assert.IsFalse(protectedMove.Contains("DO_SCREEN_FADE_IN"));
         Assert.IsFalse(custodySource.Contains("CompleteJusticeCustodyDiscipline"));
@@ -4014,9 +4023,9 @@ public sealed class JusticeRuntimeContractTests
         AssertOrdered(
             protectedMove,
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
-            "JusticeCustodyTransferTimeoutMs",
-            "TryJusticeEmergencyTeleport(",
-            "false)");
+            "HasJusticeCustodyDestinationStreamingTimedOut(",
+            "HandleJusticeCustodyDestinationStreamingTimeout(");
+        Assert.IsFalse(protectedMove.Contains("TryJusticeEmergencyTeleport("));
         Assert.IsFalse(protectedMove.Contains("DO_SCREEN_FADE_IN"));
         Assert.AreEqual(
             0,
@@ -4125,7 +4134,7 @@ public sealed class JusticeRuntimeContractTests
             "GetJusticeCustodySiteForSentence(",
             "_justiceCustodyRespawnTransferPending = true",
             "ReassertJusticeCustodyRespawnTransferMask()",
-            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
+            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
             "IsInsideJusticeCustodyLayout(layout, player.Position)",
             "EnforceJusticePreJudgmentHoldingControlLock(player)",
             "_justiceCustodyPersistenceOutageHoldingEstablished = true",
@@ -4171,6 +4180,8 @@ public sealed class JusticeRuntimeContractTests
             "JusticeNativeHasCollisionLoadedAroundEntity");
         GTA.StubRuntime.NativeCallHandler = (hash, arguments) =>
             hash == groundProbe || hash == collisionProbe ? (object)true : null;
+        GTA.StubRuntime.RaycastHandler = (from, to, options, ignored) =>
+            new GTA.RaycastResult(true, (from + to) * 0.5f - new Vector3(0, 0, 1), new Vector3(0, 0, 1));
         try
         {
             InvokeInstance(script, "JusticeUpdateCustody", player, 1000);
@@ -4178,6 +4189,7 @@ public sealed class JusticeRuntimeContractTests
         finally
         {
             GTA.StubRuntime.NativeCallHandler = null;
+            GTA.StubRuntime.RaycastHandler = null;
         }
         Assert.IsTrue(GetFieldValue<bool>(
             script,
@@ -4551,14 +4563,11 @@ public sealed class JusticeRuntimeContractTests
             "return false",
             "candidate.IsValidated = true");
 
-        int clipReadAt = capture.IndexOf("bool clipRead = Function.Call<bool>", StringComparison.Ordinal);
-        Assert.IsTrue(clipReadAt >= 0, "La lecture fidèle du chargeur doit être explicite.");
-        string clipSection = capture.Substring(clipReadAt);
         AssertOrdered(
-            clipSection,
-            "if (!clipRead)",
+            capture,
+            "TryReadJusticeWeaponClip(player, weaponHash",
             "return false;",
-            "item.AmmoInClip = Math.Max");
+            "item.AmmoInClip = clipAmmo");
     }
 
     [TestMethod]

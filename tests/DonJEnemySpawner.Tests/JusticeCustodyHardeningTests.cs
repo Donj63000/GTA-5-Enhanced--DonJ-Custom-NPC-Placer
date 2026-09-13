@@ -71,7 +71,7 @@ public sealed class JusticeCustodyHardeningTests
         StringAssert.Contains(merge, "JusticeNativeSetPedAmmo");
         StringAssert.Contains(merge, "GIVE_WEAPON_COMPONENT_TO_PED");
         StringAssert.Contains(merge, "SET_PED_WEAPON_TINT_INDEX");
-        StringAssert.Contains(merge, "SET_AMMO_IN_CLIP");
+        StringAssert.Contains(merge, "RestoreJusticeWeaponClipIfSupported(player, item)");
         AssertOrdered(
             merge,
             "SET_CURRENT_PED_WEAPON",
@@ -317,7 +317,9 @@ public sealed class JusticeCustodyHardeningTests
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(",
             "IsInsideJusticeCustodyLayout(layout, player.Position)",
             "TrySecureJusticeCustodyAdmission(player, now)");
-        StringAssert.Contains(move, "TryJusticeEmergencyTeleport(");
+        StringAssert.Contains(move, "HasJusticeCustodyDestinationStreamingTimedOut(");
+        StringAssert.Contains(move, "HandleJusticeCustodyDestinationStreamingTimeout(");
+        Assert.IsFalse(move.Contains("TryJusticeEmergencyTeleport("));
         Assert.IsFalse(move.Contains("DO_SCREEN_FADE_IN"));
         Assert.IsFalse(transfer.Contains("_justiceCaseState.SentenceSeconds ="));
     }
@@ -335,13 +337,14 @@ public sealed class JusticeCustodyHardeningTests
             "EnforceJusticeCustodyWeaponLock");
         AssertOrdered(
             weaponLock,
+            "SelectJusticeUnarmedSafe(player)",
+            "IsJusticePlayerUnarmedVerified(player)",
             "CanUseCustodyUnarmedCombat",
             "if (!canUseUnarmedCombat)",
             "GtaControl.Attack",
             "GtaControl.Aim",
             "GtaControl.SelectWeapon",
-            "GtaControl.Reload",
-            "SelectJusticeUnarmedSafe(player)");
+            "GtaControl.Reload");
         Assert.AreEqual(1, CountOccurrences(weaponLock, "GtaControl.Attack"));
         Assert.AreEqual(1, CountOccurrences(weaponLock, "GtaControl.SelectWeapon"));
     }
@@ -379,9 +382,9 @@ public sealed class JusticeCustodyHardeningTests
             "Le snapshot différé ne doit jamais verrouiller les contrôles après la libération.");
 
         SetField(script, "_justiceInventoryRemoved", true);
-        Assert.IsTrue(
+        Assert.IsFalse(
             (bool)Invoke(script, "ShouldEnforceJusticeCustodyWeaponLock"),
-            "Une confiscation vérifiée conserve le verrou de sélection d'arme.");
+            "Un ancien flag de confiscation ne verrouille jamais un joueur libéré.");
 
         string weaponLock = ExtractMethodBody(
             ReadCustodySource(),
@@ -763,7 +766,7 @@ public sealed class JusticeCustodyHardeningTests
     }
 
     [TestMethod]
-    public void InventorySnapshotFailure_ImmediatelyUsesTheSafePreservedFallback()
+    public void InventorySnapshotFailure_UsesThePreservedFallbackWithACustodyDerivedLock()
     {
         object script = FormatterServices.GetUninitializedObject(ScriptType);
         Type preparationType = GetNestedType("JusticeInventoryPreparationResult");
@@ -861,11 +864,17 @@ public sealed class JusticeCustodyHardeningTests
             "RetryJusticeInventoryConfiscationIfDue");
         AssertOrdered(
             confiscationRetry,
-            "JusticeInventoryCustodyState.UnsupportedPreserved",
             "JusticeInventoryCustodyState.RestoreAmbiguous",
             "JusticeInventoryCustodyState.RestorePending",
             "return JusticeInventoryPreparationResult.Ready",
+            "bool preservedCapture",
+            "JusticeCustodyPreservedInventoryRetryMs",
+            "PrepareJusticeInventoryConfiscation(player)",
             "RemoveJusticePlayerWeaponsSafe(player)");
+        StringAssert.Contains(ExtractMethodBody(source, "ShouldEnforceJusticeCustodyWeaponLock"),
+            "JusticeIsCustodyActive");
+        Assert.IsFalse(ExtractMethodBody(source, "ShouldEnforceJusticeCustodyWeaponLock").Contains(
+            "_justiceInventoryCustodyState"));
 
         string deferredRestore = ExtractMethodBody(
             source,
@@ -958,7 +967,7 @@ public sealed class JusticeCustodyHardeningTests
             "if (_placementPlayerStateStored ||",
             "HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement)",
             "return;",
-            "_justiceCustodySite = GetJusticeCustodySiteForSentence",
+            "_justiceCustodySite = GetJusticeCustodyPhysicalDestinationSite",
             "CompleteJusticeCustodyTransfer(player, Game.GameTime)");
         AssertOrdered(
             transfer,

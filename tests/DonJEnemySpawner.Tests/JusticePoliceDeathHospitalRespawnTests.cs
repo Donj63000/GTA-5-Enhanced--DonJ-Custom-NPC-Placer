@@ -27,6 +27,9 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
 #if DONJ_STUB_API
     private const ulong GroundReadyNative = 0xC906A7DAB05C8D2BUL;
     private const ulong CollisionReadyNative = 0xE9676F61BC0B3321UL;
+    private const ulong InteriorAtNative = 0xB0F7F8663821D9C3UL;
+    private const ulong InteriorValidNative = 0x26B0E73D7EAAF4D3UL;
+    private const ulong InteriorReadyNative = 0x6726BDCCC1932F0EUL;
     private const ulong ScreenFadedOutNative = 0xB16FCE9DDC7BA182UL;
     private const ulong ScreenFadingOutNative = 0x797AC7CB535BA28FUL;
     private const ulong ScreenFadedInNative = 0x5A859503B0C08678UL;
@@ -36,6 +39,20 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
     private const ulong CutsceneNative = 0x991251AFC3981F84UL;
     private const ulong PlayerSwitchNative = 0xD9D2CFFF49FAB35FUL;
     private const ulong PlayerBeingArrestedNative = 0x388A47C51ABDAC8EUL;
+
+    [TestMethod]
+    public void HoldingFixture_ResolvesNativeCoordinatesWithoutAcceptingTheStreetAboveTheCell()
+    {
+        StubRuntime.Reset();
+        ConfigureHoldingStreamingReady();
+
+        Assert.AreEqual(123, Function.Call<int>(
+            (Hash)InteriorAtNative, 459.86f, -994.38f, 24.91f));
+        Assert.AreEqual(0, Function.Call<int>(
+            (Hash)InteriorAtNative, 459.86f, -994.38f, 30.71f));
+        Assert.IsTrue(Function.Call<bool>((Hash)InteriorValidNative, 123));
+        Assert.IsFalse(Function.Call<bool>((Hash)InteriorValidNative, 124));
+    }
 
     [TestMethod]
     public void RespawnMask_VerifiesTheRealFadeAndReassertsWhileGtaKeepsTheScreenOpen()
@@ -209,6 +226,54 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
         Assert.AreEqual(fineBefore, state.FineDue);
         Assert.AreEqual(episodeBefore, state.WantedEpisodeId);
         Assert.AreEqual(4321, Game.Player.Money);
+    }
+
+    [TestMethod]
+    public void PoliceCapture_MissionRowCellAbsentDespiteStreetCollisionNeverAdmitsOverVoid()
+    {
+        StubRuntime.Reset();
+        ConfigureHoldingStreamingReady();
+        // Je laisse le sol général, l'intérieur annoncé prêt et la collision
+        // globale positifs, mais aucun plancher n'existe au niveau de la cellule.
+        StubRuntime.RaycastHandler = (source, target, options, ignored) =>
+        {
+            Assert.AreEqual(4.0f, source.Z - target.Z, 0.001f);
+            Assert.IsTrue(source.Z < 30.71f, "Le rayon local ne doit pas atteindre la rue supérieure.");
+            return new RaycastResult(false, GTA.Math.Vector3.Zero, GTA.Math.Vector3.Zero);
+        };
+        Ped player = Game.Player.Character;
+        player.Handle = 1902;
+        player.Model = new Model("player_zero");
+        player.Position = new GTA.Math.Vector3(310.0f, -590.0f, 43.0f);
+        player.IsDead = true;
+        Game.Player.IsDead = true;
+        Game.Player.Money = 4321;
+        object script = CreatePendingProfileScenario(player, 180,
+            CreatePoliceDeathRecord(player.Model.Hash, JusticeWalState.Ambiguous));
+        JusticeCaseState state = GetField<JusticeCaseState>(script, "_justiceCaseState");
+        int score = state.ActiveScore;
+        long fine = state.FineDue;
+        Game.GameTime = 100;
+        Invoke(script, "UpdateJusticeEarly");
+        Invoke(script, "UpdateJusticeSystem");
+        player.IsDead = false;
+        Game.Player.IsDead = false;
+        for (int now = 1000; now <= 28000; now += 1000)
+        {
+            Game.GameTime = now;
+            Invoke(script, "UpdateJusticeEarly");
+            Invoke(script, "UpdateJusticeSystem");
+        }
+        Assert.AreEqual(310.0f, player.Position.X, 0.001f);
+        Assert.IsFalse(GetField<bool>(script, "_justicePoliceDeathPreJudgmentHoldingEstablished"));
+        Assert.IsFalse(GetField<bool>(script, "_justiceCustodyContainmentEstablished"));
+        Assert.AreEqual(JusticePhase.Wanted, state.Phase);
+        Assert.AreEqual(180, state.SentenceSeconds);
+        Assert.AreEqual(score, state.ActiveScore);
+        Assert.AreEqual(fine, state.FineDue);
+        Assert.AreEqual(4321, Game.Player.Money);
+        Assert.IsTrue(player.FreezePosition);
+        Assert.AreEqual(0, CountNative(Hash.DO_SCREEN_FADE_IN));
     }
 
     [TestMethod]
@@ -875,9 +940,16 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
         internal bool IsFadingIn { get { return _fadeInEndsAt >= 0 && Game.GameTime < _fadeInEndsAt; } }
         internal bool IsVisible { get { return _visible || (_fadeInEndsAt >= 0 && !IsFadingIn); } }
 
+        internal RuntimeAdmissionScreen()
+        {
+            ConfigureHoldingFloor(null);
+        }
+
         internal object Call(ulong hash, object[] arguments)
         {
             if (hash == GroundReadyNative || hash == CollisionReadyNative) return true;
+            object interior = ReadHoldingInteriorProbe(hash, arguments, null);
+            if (interior != null) return interior;
             if (hash == MissionFlagNative) return ResidualMissionFlag;
             if (hash == (ulong)Hash.DO_SCREEN_FADE_OUT)
             {
@@ -5689,12 +5761,15 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
         Func<bool> screenFadedIn = null,
         Func<bool> screenFadingIn = null)
     {
+        ConfigureHoldingFloor(streamingReady);
         StubRuntime.NativeCallHandler = (hash, arguments) =>
         {
             if (hash == GroundReadyNative || hash == CollisionReadyNative)
             {
                 return streamingReady == null || streamingReady();
             }
+            object interior = ReadHoldingInteriorProbe(hash, arguments, streamingReady);
+            if (interior != null) return interior;
             if ((hash == ScreenFadedOutNative ||
                  hash == ScreenFadingOutNative) &&
                 rejectFadeOutState != null && rejectFadeOutState())
@@ -5780,10 +5855,57 @@ public sealed class JusticePoliceDeathHospitalRespawnTests
 
     private static void ConfigureHoldingStreamingReady()
     {
+        ConfigureHoldingFloor(null);
         StubRuntime.NativeCallHandler = (hash, arguments) =>
             hash == GroundReadyNative || hash == CollisionReadyNative
                 ? (object)true
-                : null;
+                : ReadHoldingInteriorProbe(hash, arguments, null);
+    }
+
+    private static object ReadHoldingInteriorProbe(
+        ulong hash, object[] arguments, Func<bool> streamingReady)
+    {
+        if (hash == InteriorAtNative)
+        {
+            GTA.Math.Vector3 position = new GTA.Math.Vector3(
+                Convert.ToSingle(ReadHoldingNativeValue(arguments[0]), CultureInfo.InvariantCulture),
+                Convert.ToSingle(ReadHoldingNativeValue(arguments[1]), CultureInfo.InvariantCulture),
+                Convert.ToSingle(ReadHoldingNativeValue(arguments[2]), CultureInfo.InvariantCulture));
+            return IsHoldingFloorLocation(position) ? 123 : 0;
+        }
+        if (hash == InteriorValidNative)
+            return Convert.ToInt32(ReadHoldingNativeValue(arguments[0]), CultureInfo.InvariantCulture) == 123;
+        if (hash == InteriorReadyNative) return streamingReady == null || streamingReady();
+        return null;
+    }
+
+    private static object ReadHoldingNativeValue(object argument)
+    {
+        // Je lis la valeur du wrapper natif transmis par le stub, comme le fait le moteur.
+        Assert.IsInstanceOfType(argument, typeof(InputArgument));
+        return typeof(InputArgument).GetProperty("Value", PrivateInstance).GetValue(argument);
+    }
+
+    private static void ConfigureHoldingFloor(Func<bool> streamingReady)
+    {
+        // Je décris le plancher physique des deux destinations de ce scénario,
+        // séparément de la collision générale autour du personnage.
+        StubRuntime.RaycastHandler = (source, target, options, ignored) =>
+        {
+            GTA.Math.Vector3 center = (source + target) * 0.5f;
+            bool ready = (streamingReady == null || streamingReady()) &&
+                IsHoldingFloorLocation(center) && options == IntersectOptions.Map;
+            float floorZ = center.X < 1000.0f ? 23.91f : 44.56f;
+            return new RaycastResult(ready,
+                new GTA.Math.Vector3(center.X, center.Y, floorZ),
+                new GTA.Math.Vector3(0.0f, 0.0f, 1.0f));
+        };
+    }
+
+    private static bool IsHoldingFloorLocation(GTA.Math.Vector3 position)
+    {
+        return position.DistanceTo(new GTA.Math.Vector3(459.86f, -994.38f, 24.91f)) <= 4.0f ||
+            position.DistanceTo(new GTA.Math.Vector3(1690.86f, 2565.12f, 45.56f)) <= 4.0f;
     }
 
     private static int CountNative(Hash hash)

@@ -2833,3 +2833,39 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Je conserve la protection et la session GTA ouverte. Je confie la vérification complète au workflow Windows isolé de GitHub, sans désactiver de test.
 - Vérification: Compilation locale et contrat ABI réussis; workflow Safety `34001862082` du même commit `0701e41` réussi avec 863/863 tests et package vérifié. La précédente qualification locale avec l'API NIB réelle avait réussi 691/691 tests avant le lancement du jeu.
 - Résolution: Publication qualifiée dans l'environnement CI isolé. La suite locale comprenant les déploiements temporaires reste à relancer lorsque le jeu est fermé; aucune modification des fichiers du jeu n'est effectuée pendant cette publication.
+
+## 2026-09-06 03:38:52 +02:00 — Armes disponibles en détention et cellule absente
+
+- Statut: Correctif implémenté; qualification automatisée en cours, observation GTA restant à effectuer.
+- Contexte: Après la mise à jour du bleu de travail, l'utilisateur conserve ses armes au poste et en prison; à Mission Row, la cellule absente provoque une chute puis une évasion automatique.
+- Symptôme: Le premier échec de snapshot devient immédiatement UnsupportedPreserved sans verrouillage des armes. Le déplacement de secours pouvait contourner la preuve du plancher de cellule.
+- Sources vérifiées: Collecte bug-reports/20260906-031719-custody-weapons-missing-cell : NIBScriptHookVDotNet.log, ScriptHookV.log, asiloader.log, Scripts/DonJCustomNpcPlacer.log, logs tiers et événements Windows; sources Custody, Ammo et AdvancedLoading.
+- Extraits utiles: Scripts/DonJCustomNpcPlacer.log, 02:43:02.416 et 02:43:02.418 : « Snapshot momentanément indisponible » suivi de « Snapshot incompatible : inventaire préservé, transfert en détention maintenu. » Même séquence à 02:46 et 02:50. Aucun ancien log ne nomme l'arme ayant refusé la lecture; aucun log exploitable ne prouve directement le plancher manquant.
+- Analyse / hypothèse: Le terminal UnsupportedPreserved empêchait toute récupération de confiscation. GET_AMMO_IN_CLIP était exigé même pour les catégories sans chargeur. Le transfert n'activait pas les cartes MP et acceptait collision générale/sol supérieur sans preuve locale; le timeout supprimait encore une partie de ces contrôles.
+- Action menée: Classification stricte des chargeurs, diagnostic par étape/arme, verrou runtime et reprise à 5 s sans écraser le dépôt; chargement MP/intérieur/plancher local avec délai de 30 s par site, secours physique Bolingbroke à peine identique, erreur stable si la seconde destination échoue. Reprise de géométrie sous protection sans évasion fictive.
+- Vérification: Première compilation avec API NIB réelle réussie; la suite initiale a identifié des fixtures et contrats source à adapter aux preuves physiques strictes. Résultats finaux consignés dans l'entrée de qualification et la documentation de validation.
+- Résolution: Les causes de code sont traitées. La validation native et visuelle dans GTA ne peut pas être déduite des tests hors jeu.
+
+## 2026-09-06 03:38:52 +02:00 — Première qualification du chargement strict
+
+- Statut: Corrections des fixtures et reprise de qualification en cours.
+- Contexte: Première suite run-safety-checks -UseStubApi après remplacement du téléporteur de secours permissif.
+- Symptôme: 57 échecs sur 901 tests; 844 réussites. Un avertissement CS0414 sur un ancien drapeau de secours inutilisé.
+- Sources vérifiées: TestResults/safety-20260906-033033/logs/build-release.log et test-release.log, safety-tests.trx; collecte automatique bug-reports/20260906-033438-safety-failure et collecte GTA du signalement ci-dessus.
+- Extraits utiles: « échec : 57, réussite : 844 »; fixtures historiques ne fournissant que collision/ground booléens, marqueurs source du secours supprimé, état de peine incohérent dans deux nouveaux tests d'inventaire.
+- Analyse / hypothèse: Les anciennes fixtures ne prouvaient ni intérieur MP ni plancher local. Les tests de restitution différée supposaient également une arme rendue à zéro munition sans simuler sa présence. Aucun de ces tests n'est une reproduction visuelle GTA.
+- Action menée: Preuves physiques explicites dans les fixtures, conservation des assertions métier, contrats source mis à jour, suppression du drapeau inutilisé et ajout des régressions pour owner, déplacement de trois mètres, échec des deux sites et projectiles différés.
+- Vérification: Nouvelle suite complète requise après stabilisation des fichiers; aucun test supprimé ni désactivé.
+- Résolution: Résultats définitifs et éventuels nouveaux incidents consignés séparément à la fin de la qualification.
+
+## 2026-09-06 03:47:26 +02:00 — Seconde qualification des preuves de cellule
+
+- Statut: Causes de fixtures identifiées, nouvelle qualification en préparation.
+- Contexte: Suite complète stub après correction des premières simulations.
+- Symptôme: 22 échecs sur 928 tests, 906 réussites; compilation et ABI sans erreur.
+- Sources vérifiées: TestResults/safety-20260906-034350/logs/test-release.log et safety-tests.trx; collecte automatique bug-reports/20260906-034719-safety-failure; fixtures PoliceDeathHospitalRespawn, Recovery et RuntimeContract.
+- Extraits utiles: 20 échecs de scénarios Mission Row; RepairHoldingFallback line263; CustodyRespawn_MaskPrecedesPersistenceAndSurvivesBlockedTicks line4142.
+- Analyse / hypothèse: La sonde d'intérieur simulée convertissait directement InputArgument en nombre, au lieu d'en lire Value, ce qui faisait refuser Mission Row. Le test de changement de héros modifiait un hook mais pas le modèle réellement consulté. Un contrat attendait encore le téléporteur direct dans le chemin de panne du writer.
+- Action menée: Décodage des paramètres natifs simulés, changement réel du modèle du ped dans la fixture d'identité, attente du wrapper WithFallback et ajout du plancher dans la dernière fixture runtime. Les assertions de peine, de cash et d'admission sont conservées.
+- Vérification: Nouvelle suite complète requise sur ces corrections; aucun changement de native de production motivé par ces erreurs de simulation.
+- Résolution: Résultats finaux consignés séparément; aucun nouveau crash GTA observé pendant ces tests.

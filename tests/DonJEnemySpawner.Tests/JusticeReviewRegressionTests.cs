@@ -300,6 +300,12 @@ public sealed class JusticeReviewRegressionTests
         {
             if (hash == (ulong)Hash.HAS_PED_GOT_WEAPON) return owned.Contains(ReadNativeInt(args[1]));
             if (hash == 0xBF0FD6E56C964FCBUL) owned.Add(ReadNativeInt(args[1]));
+            if (hash == (ulong)Hash.GET_AMMO_IN_CLIP)
+            {
+                typeof(OutputArgument).GetMethod("SetResult", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .MakeGenericMethod(typeof(int)).Invoke(args[2], new object[] { 12 });
+                return owned.Contains(ReadNativeInt(args[1]));
+            }
             return null;
         };
         CompleteBarrier(script);
@@ -335,6 +341,12 @@ public sealed class JusticeReviewRegressionTests
             }
             if (hash == (ulong)Hash.HAS_PED_GOT_WEAPON_COMPONENT) return components.Contains(weapon);
             if (hash == (ulong)Hash.GIVE_WEAPON_COMPONENT_TO_PED) components.Add(weapon);
+            if (hash == (ulong)Hash.GET_AMMO_IN_CLIP)
+            {
+                typeof(OutputArgument).GetMethod("SetResult", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .MakeGenericMethod(typeof(int)).Invoke(args[2], new object[] { 12 });
+                return owned.Contains(weapon);
+            }
             return null;
         };
         CompleteBarrier(script);

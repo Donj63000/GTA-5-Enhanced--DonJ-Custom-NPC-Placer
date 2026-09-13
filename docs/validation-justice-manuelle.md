@@ -323,3 +323,21 @@ dans GTA Enhanced; les simulations automatisées ne les remplacent pas.
 | Pause/reprise Justice et arrêt du script | Pause conservant la tenue, arrêt la rendant provisoirement, reprise conservant la peine et le dépôt | NON EXÉCUTÉ |
 | Évasion confirmée | Combinaison conservée, dépôt abandonné sans restitution automatique | NON EXÉCUTÉ |
 | Restitution partielle, utilisation de munitions, changement de vêtement, reload | Aucun remplissage d'un stock déjà rendu ni écrasement des nouveaux vêtements | NON EXÉCUTÉ |
+
+## Admission : armes et plancher — régression du 6 septembre 2026
+
+Les contrôles automatisés ne valent pas observation des natives dans GTA. Cette
+matrice cible le signalement des armes disponibles et de la cellule absente.
+L'échec des deux destinations doit être enregistré comme une erreur technique;
+il ne peut être accepté comme une admission ni une évasion.
+
+| Scénario | Résultat attendu | État en jeu | Preuve attendue |
+|---|---|---|---|
+| Michael, Franklin, Trevor; capture et décès policier; Mission Row puis Bolingbroke | Aucune arme utilisable pendant le transfert et la détention; dépôt conservé; poings après confiscation | NON EXÉCUTÉ | Vidéo roue d'armes et log du même épisode |
+| Mission Row avant tout chargement MP par un trainer | Intérieur et plancher visibles; aucune chute; image rendue après preuve locale | NON EXÉCUTÉ | Vidéo depuis le respawn et journal |
+| Mission Row indisponible 30 s | Un seul repli à Bolingbroke avec la même peine, la même amende et le même dépôt | NON EXÉCUTÉ | Logs des destinations + XML avant/après |
+| Deux destinations indisponibles | Erreur technique unique, personnage protégé, aucune nouvelle évasion, aucune boucle de chargement | NON EXÉCUTÉ | Trace de 2 min après les deux délais |
+| Ancien UnsupportedPreserved chargé, mêlée/projectiles/armes à feu et composants | Contrôles verrouillés immédiatement, nouvelle capture après 5 s, confiscation après sauvegarde durable | NON EXÉCUTÉ | Log étape/hash + inventaire avant/après |
+| Plancher perdu en cellule, puis vraie sortie des murs | Chute récupérée sans nouvelle charge; sortie horizontale réelle toujours reconnue comme évasion | NON EXÉCUTÉ | Coordonnées, casier, vidéo |
+| Changement de héros, abort et reload pendant chargement ou FadeIn | Aucun focus/gel/verrou appliqué au mauvais héros; reprise du seul dossier propriétaire | NON EXÉCUTÉ | Trois profils, logs, état des contrôles |
+| Libération avec projectiles, réserves partagées et restitution interrompue | Armes, composants et stocks rendus sans duplication après retry/reload | NON EXÉCUTÉ | Inventaire et XML/WAL avant/après |

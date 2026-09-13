@@ -58,6 +58,9 @@ public sealed partial class DonJEnemySpawner
     private const ulong AdvancedNativeSetEntityLoadCollisionFlag = 0x0DC7CABAB1E9B67EUL;
 
     private bool _advancedInteriorMpMapLoadRequested;
+    private bool _advancedInteriorMpDlcLoadRequested;
+    private bool _advancedInteriorMpMapLoadFailureLogged;
+    private int _advancedInteriorMpMapNextAttemptAt;
     private int _advancedInteriorForcedInteriorId;
     private int _advancedInteriorForcedRoomKey;
     private int _advancedInteriorNextMaintainAt;
@@ -181,27 +184,45 @@ public sealed partial class DonJEnemySpawner
 
     private void EnsureMultiplayerInteriorMapLoadedSafe()
     {
+        TryEnsureMultiplayerInteriorMapLoadedSafe(Game.GameTime);
+    }
+
+    private bool TryEnsureMultiplayerInteriorMapLoadedSafe(int now)
+    {
         if (_advancedInteriorMpMapLoadRequested)
         {
-            return;
+            return true;
         }
-
-        _advancedInteriorMpMapLoadRequested = true;
-
-        try
+        if (_advancedInteriorMpMapNextAttemptAt != 0 &&
+            unchecked((int)(now - _advancedInteriorMpMapNextAttemptAt)) < 0)
         {
-            Function.Call((Hash)AdvancedNativeOnEnterMp);
-        }
-        catch
-        {
+            return false;
         }
 
         try
         {
+            // Je mémorise chaque étape réussie : un refus de la seconde native
+            // ne doit pas relancer le chargement multijoueur déjà demandé.
+            if (!_advancedInteriorMpDlcLoadRequested)
+            {
+                Function.Call((Hash)AdvancedNativeOnEnterMp);
+                _advancedInteriorMpDlcLoadRequested = true;
+            }
             Function.Call((Hash)AdvancedNativeSetInstancePriorityMode, 1);
+            _advancedInteriorMpMapLoadRequested = true;
+            _advancedInteriorMpMapNextAttemptAt = 0;
+            _advancedInteriorMpMapLoadFailureLogged = false;
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
+            _advancedInteriorMpMapNextAttemptAt = unchecked(now + 1000);
+            if (!_advancedInteriorMpMapLoadFailureLogged)
+            {
+                _advancedInteriorMpMapLoadFailureLogged = true;
+                LogException("Interieurs.ChargementMultijoueur", ex);
+            }
+            return false;
         }
     }
 

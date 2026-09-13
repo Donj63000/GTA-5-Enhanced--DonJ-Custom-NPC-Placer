@@ -68,6 +68,9 @@ public sealed class JusticePersistenceStallContractTests
             ulong collisionProbe = GetPrivateConstant<ulong>(
                 "JusticeNativeHasCollisionLoadedAroundEntity");
 
+            GTA.StubRuntime.RaycastHandler = (from, to, options, ignored) =>
+                new GTA.RaycastResult(true, new GTA.Math.Vector3(1690.86f, 2565.12f, 44.56f),
+                    new GTA.Math.Vector3(0f, 0f, 1f));
             GTA.StubRuntime.NativeCallHandler = (hash, arguments) =>
             {
                 if (hash == (ulong)GTA.Native.Hash.DO_SCREEN_FADE_IN)

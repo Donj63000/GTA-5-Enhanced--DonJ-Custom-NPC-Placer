@@ -46,6 +46,9 @@ namespace GTA
             new List<StubNativeInvocation>();
 
         public static Func<ulong, object[], object> NativeCallHandler { get; set; }
+        public static Func<WeaponHash, WeaponComponent[]> WeaponComponentsHandler { get; set; }
+        public static Func<Math.Vector3, Math.Vector3, IntersectOptions, Entity, RaycastResult> RaycastHandler { get; set; }
+        public static Action<int, Control> ControlDisabledHandler { get; set; }
         public static Func<Entity, Entity, bool> DamageHandler { get; set; }
         public static Func<Ped, Ped, bool> CombatHandler { get; set; }
         public static Func<Ped, Entity> KillerHandler { get; set; }
@@ -75,6 +78,9 @@ namespace GTA
             }
 
             NativeCallHandler = null;
+            WeaponComponentsHandler = null;
+            RaycastHandler = null;
+            ControlDisabledHandler = null;
             DamageHandler = null;
             CombatHandler = null;
             KillerHandler = null;
@@ -438,6 +444,13 @@ namespace GTA
         public int AmmoInClip { get; set; }
         public WeaponHash Hash { get; set; }
         public bool IsPresent => _owner != null && _owner.Weapons.HasWeapon(Hash);
+
+        public static WeaponComponent[] GetComponentsFromHash(WeaponHash hash)
+        {
+            // Je distingue le catalogue vide valide d'une lecture nulle ou en erreur.
+            Func<WeaponHash, WeaponComponent[]> handler = StubRuntime.WeaponComponentsHandler;
+            return handler == null ? new WeaponComponent[0] : handler(hash);
+        }
     }
 
     public sealed class TaskInvoker
@@ -492,7 +505,8 @@ namespace GTA
             return handler != null && handler(key);
         }
         public static void DisableAllControlsThisFrame(int index) { }
-        public static void DisableControlThisFrame(int index, Control control) { }
+        public static void DisableControlThisFrame(int index, Control control) =>
+            StubRuntime.ControlDisabledHandler?.Invoke(index, control);
         public static float GetDisabledControlNormal(int index, Control control) => 0.0f;
         public static string GetUserInput(string defaultText, int maxLength) => defaultText;
         public static int GenerateHash(string value) => string.IsNullOrEmpty(value) ? 0 : StringComparer.OrdinalIgnoreCase.GetHashCode(value);
@@ -514,13 +528,30 @@ namespace GTA
         public static Ped[] GetNearbyPeds(Ped center, float radius) => StubRuntime.NearbyPeds ?? new Ped[0];
         public static Math.Vector3 GetSafeCoordForPed(Math.Vector3 position, bool sidewalk, int flags) => position;
         public static float GetGroundHeight(Math.Vector3 position) => position.Z;
-        public static RaycastResult Raycast(Math.Vector3 source, Math.Vector3 target, IntersectOptions options, Entity ignoreEntity) => new RaycastResult();
-        public static RaycastResult Raycast(Math.Vector3 source, Math.Vector3 direction, float maxDistance, IntersectOptions options, Entity ignoreEntity) => new RaycastResult();
+        public static RaycastResult Raycast(Math.Vector3 source, Math.Vector3 target, IntersectOptions options, Entity ignoreEntity)
+        {
+            Func<Math.Vector3, Math.Vector3, IntersectOptions, Entity, RaycastResult> handler = StubRuntime.RaycastHandler;
+            return handler == null ? new RaycastResult() : handler(source, target, options, ignoreEntity);
+        }
+
+        public static RaycastResult Raycast(Math.Vector3 source, Math.Vector3 direction, float maxDistance, IntersectOptions options, Entity ignoreEntity) =>
+            Raycast(source, source + direction * maxDistance, options, ignoreEntity);
         public static void DrawMarker(MarkerType type, Math.Vector3 position, Math.Vector3 direction, Math.Vector3 rotation, Math.Vector3 scale, Color color) { }
     }
 
     public struct RaycastResult
     {
+        // Je configure les résultats simulés sans ajouter de setters absents de l'API v2.
+        public RaycastResult(bool hit, Math.Vector3 hitCoords, Math.Vector3 surfaceNormal)
+        {
+            Result = 0;
+            DitHitAnything = hit;
+            DitHitEntity = false;
+            HitCoords = hitCoords;
+            HitEntity = null;
+            SurfaceNormal = surfaceNormal;
+        }
+
         public RaycastResult(int result)
         {
             Result = result;
@@ -741,6 +772,10 @@ namespace GTA.Native
     {
         Unarmed = 0xA2719263u,
         Knife = 0x99B507EAu,
+        Grenade = 0x93E220BDu,
+        PetrolCan = 0x34A67B97u,
+        StunGun = 0x3656C8C1u,
+        Parachute = 0xFBAB5776u,
         Pistol = 0x1B06D571u,
         MicroSMG = 0x13532244u,
         SMG = 0x2BE6766Bu,
@@ -765,6 +800,12 @@ namespace GTA.Native
         Business01AMM = 0x7E6A64B7u,
         Business01AFY = 0x2799EFD8u,
         Michael = 0x0D7114C9u
+    }
+
+    public enum WeaponComponent : uint
+    {
+        PistolClip01 = 0xFED0FD71u,
+        AtPiSupp = 0xC304849Au
     }
 
     public enum WeaponComponentHash

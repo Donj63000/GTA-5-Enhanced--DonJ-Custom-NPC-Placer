@@ -85,16 +85,15 @@ public sealed class JusticePreJudgmentHoldingTests
             "EnforceJusticePreJudgmentHoldingControlLock(player)");
         AssertOrdered(
             move,
-            "REQUEST_COLLISION_AT_COORD",
-            "IsJusticePreJudgmentHoldingGroundReady(safeTarget)",
+            "PrepareJusticeCustodyDestinationStreaming(",
             "SetEntityCoordsNoOffsetSafe(player, safeTarget)",
-            "JusticeNativeHasCollisionLoadedAroundEntity");
+            "IsJusticeCustodyDestinationStreamingReadyForPlayer(");
         AssertOrdered(
             moveWithFallback,
             "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(",
-            "JusticeCustodyTransferTimeoutMs",
-            "TryJusticeEmergencyTeleport(",
-            "TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(");
+            "HasJusticeCustodyDestinationStreamingTimedOut(",
+            "HandleJusticeCustodyDestinationStreamingTimeout(");
+        AssertDoesNotContain(moveWithFallback, "TryJusticeEmergencyTeleport(");
 
         AssertOrdered(
             holding,
@@ -734,6 +733,10 @@ public sealed class JusticePreJudgmentHoldingTests
         object script = CreatePendingPoliceDeathScript(player, 600);
         bool groundReady = false;
         bool collisionReady = false;
+        GTA.StubRuntime.RaycastHandler = (source, target, options, ignored) =>
+            new GTA.RaycastResult(groundReady,
+                (source + target) * 0.5f - new GTA.Math.Vector3(0, 0, 1),
+                new GTA.Math.Vector3(0, 0, 1));
         GTA.StubRuntime.NativeCallHandler = (hash, arguments) =>
         {
             if (hash == GroundReadyNative)
@@ -1083,10 +1086,15 @@ public sealed class JusticePreJudgmentHoldingTests
 
     private static void ConfigureHoldingStreamingReady()
     {
+        GTA.StubRuntime.RaycastHandler = (source, target, options, ignored) =>
+            new GTA.RaycastResult(true,
+                (source + target) * 0.5f - new GTA.Math.Vector3(0, 0, 1),
+                new GTA.Math.Vector3(0, 0, 1));
         GTA.StubRuntime.NativeCallHandler = (hash, arguments) =>
-            hash == GroundReadyNative || hash == CollisionReadyNative
-                ? (object)true
-                : null;
+            hash == 0xB0F7F8663821D9C3UL ? (object)123 :
+            hash == GroundReadyNative || hash == CollisionReadyNative ||
+            hash == 0x26B0E73D7EAAF4D3UL || hash == 0x6726BDCCC1932F0EUL
+                ? (object)true : null;
     }
 
     private static JusticeWalRecord CreatePendingDeathWalRecord(
@@ -1242,6 +1250,14 @@ public sealed class JusticePreJudgmentHoldingTests
         string methodName,
         params object[] arguments)
     {
+#if DONJ_STUB_API
+        if (methodName == "UpdateJusticePoliceDeathPreJudgmentHolding" &&
+            arguments.Length == 2 && arguments[1] is int)
+        {
+            // Je fais progresser ensemble l'horloge native et celle du tick simulé.
+            GTA.Game.GameTime = (int)arguments[1];
+        }
+#endif
         MethodInfo[] methods = target.GetType()
             .GetMethods(PrivateInstance)
             .Where(method => method.Name == methodName &&

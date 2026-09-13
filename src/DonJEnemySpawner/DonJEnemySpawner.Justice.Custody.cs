@@ -170,9 +170,14 @@ public sealed partial class DonJEnemySpawner
 
         internal bool Contains(Vector3 position)
         {
+            return position.Z >= Minimum.Z && position.Z <= Maximum.Z &&
+                ContainsHorizontal(position);
+        }
+
+        internal bool ContainsHorizontal(Vector3 position)
+        {
             if (position.X < Minimum.X || position.X > Maximum.X ||
-                position.Y < Minimum.Y || position.Y > Maximum.Y ||
-                position.Z < Minimum.Z || position.Z > Maximum.Z)
+                position.Y < Minimum.Y || position.Y > Maximum.Y)
             {
                 return false;
             }
@@ -386,7 +391,6 @@ public sealed partial class DonJEnemySpawner
     private int _justiceNextPoliceDeathPreJudgmentHoldingAttemptAt;
     private int _justicePoliceDeathPreJudgmentHoldingFailureCount;
     private int _justicePoliceDeathPreJudgmentHoldingStartedAt;
-    private bool _justicePoliceDeathPreJudgmentHoldingFallbackLogged;
     private bool _justicePreJudgmentHoldingStreamingPending;
     private bool _justicePreJudgmentHoldingPositionApplied;
     private bool _justicePreJudgmentHoldingProtectionOwned;
@@ -788,8 +792,9 @@ public sealed partial class DonJEnemySpawner
 
         // Je reclasse après la conversion de l'amende : une peine ayant atteint
         // exactement cinq minutes part directement à Bolingbroke.
-        _justiceCustodySite = GetJusticeCustodySiteForSentence(
-            GetJusticeCustodyTotalRemainingSecondsForRuntime(_justiceCaseState));
+        _justiceCustodySite = GetJusticeCustodyPhysicalDestinationSite(
+            GetJusticeCustodySiteForSentence(
+                GetJusticeCustodyTotalRemainingSecondsForRuntime(_justiceCaseState)));
         _justiceCustodyInitialSentenceSeconds = Math.Max(
             _justiceCustodyInitialSentenceSeconds,
             GetJusticeCustodyTotalRemainingSecondsForRuntime(_justiceCaseState));
@@ -839,6 +844,11 @@ public sealed partial class DonJEnemySpawner
             return;
         }
 
+        EnforceJusticeCustodyWeaponLock(player);
+        if (MaintainJusticeCustodyStreamingTechnicalFailure(player, now))
+        {
+            return;
+        }
         if (!StopJusticeConcurrentPlayerProtectionModes())
         {
             // Je ne fais progresser ni transfert ni peine tant qu'un autre mode
@@ -1091,6 +1101,11 @@ public sealed partial class DonJEnemySpawner
         {
             InterruptJusticeCustodyEscapeObservation();
             ResetJusticeCustodyClock(now);
+            return;
+        }
+
+        if (TryRecoverJusticeCustodyMissingGeometry(player, now))
+        {
             return;
         }
 
@@ -1372,7 +1387,10 @@ public sealed partial class DonJEnemySpawner
         {
             _justiceCustodySite = requiredSite;
         }
-        JusticeCustodyLayout layout = GetJusticeCustodyLayout();
+        // Je ne modifie pas le site judiciaire pendant la panne du writer :
+        // seul le lieu du maintien physique suit le secours de chargement.
+        JusticeCustodyLayout layout = GetJusticeCustodyLayoutForSite(
+            GetJusticeCustodyPhysicalDestinationSite(_justiceCustodySite));
         if (layout == null)
         {
             return false;
@@ -1390,10 +1408,11 @@ public sealed partial class DonJEnemySpawner
         // Je réutilise systématiquement le déplacement non bloquant du holding,
         // même si GTA a déjà replacé le ped dans l'enceinte. Il acquiert ainsi
         // la protection et le gel qui doivent survivre à toute panne du writer.
-        bool moved = TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(
+        bool moved = TryMoveJusticePoliceDeathPreJudgmentHoldingPlayerWithFallback(
             player,
             layout.CellPosition,
-            layout.CellHeading);
+            layout.CellHeading,
+            now);
 
         if (!moved ||
             !IsInsideJusticeCustodyLayout(layout, player.Position))
@@ -1450,6 +1469,16 @@ public sealed partial class DonJEnemySpawner
     {
         if (!Entity.Exists(player) || player.IsDead || _justiceCaseState == null)
         {
+            return;
+        }
+        EnforceJusticeCustodyWeaponLock(player);
+        if (MaintainJusticeCustodyStreamingTechnicalFailure(player, now))
+        {
+            return;
+        }
+        if (!ApplyJusticeCustodyStreamingFallbackSite())
+        {
+            EnforceJusticePreJudgmentHoldingControlLock(player);
             return;
         }
         bool resumingCustody = _justiceCustodyResumePending;
@@ -1746,7 +1775,9 @@ public sealed partial class DonJEnemySpawner
             !Entity.Exists(player) || player.IsDead ||
             !IsJusticeCustodyPlayerIdentityCompatible(player) ||
             !IsInsideJusticeCustodyLayout(layout, player.Position) ||
-            !IsJusticeTeleportVerified(player, transferPosition, 8.0f))
+            !IsJusticeTeleportVerified(player, transferPosition, 8.0f) ||
+            !IsJusticeCustodyDestinationStreamingReadyForPlayer(
+                player, layout.Site, transferPosition, now))
         {
             // Je traite une pause forte, une identité ambiguë, un décès ou un
             // déplacement concurrent comme une interruption complète du FadeIn.
@@ -1939,6 +1970,7 @@ public sealed partial class DonJEnemySpawner
         _justiceCustodyWaitingForRespawn = false;
         _justiceCustodyDeathRebindPending = false;
         _justiceCustodyRespawnIdentityRebindConfirmed = false;
+        CompleteJusticeCustodyDestinationStreaming();
         ResetJusticePoliceDeathPreJudgmentHoldingState();
         ResetJusticeCapturePrecommitConfirmation();
         _justicePoliceDeathRespawnMaskIntentPending = false;
@@ -3601,6 +3633,7 @@ public sealed partial class DonJEnemySpawner
                 // Je rends l'écran au héros entrant sans toucher à son wanted. Le
                 // profil propriétaire conservera son admission durable à reprendre.
                 _justiceCustodyAdmissionFadeInRequested = false;
+                ResetJusticeCustodyStreamingRecovery();
                 ResetJusticePoliceDeathPreJudgmentHoldingState();
                 TryRestoreJusticeCustodyRespawnTransferMask();
                 return;
@@ -3642,6 +3675,7 @@ public sealed partial class DonJEnemySpawner
             {
                 // Je ne laisse jamais le noir d'un détenu suivre un autre héros
                 // canonique. Le front reste sauvegardé sur son profil propriétaire.
+                ResetJusticeCustodyStreamingRecovery();
                 ResetJusticePoliceDeathPreJudgmentHoldingState();
                 TryRestoreJusticeCustodyRespawnTransferMask();
                 return;
@@ -3682,6 +3716,7 @@ public sealed partial class DonJEnemySpawner
         }
         if (HasJusticePoliceDeathPreJudgmentHoldingChangedCanonicalPlayer(player))
         {
+            ResetJusticeCustodyStreamingRecovery();
             // Je rends immédiatement l'écran au héros entrant sans consommer le
             // front durable de celui qui attend encore son jugement sur son profil.
             ResetJusticePoliceDeathPreJudgmentHoldingState();
@@ -3715,6 +3750,11 @@ public sealed partial class DonJEnemySpawner
             // contrôleur d'identité décidera ensuite reprise ou mandat.
             EnforceJusticePreJudgmentHoldingControlLock(player);
             return mustBlockLate;
+        }
+
+        if (MaintainJusticeCustodyStreamingTechnicalFailure(player, now))
+        {
+            return true;
         }
 
         JusticeCustodySite requiredSite =
@@ -3780,7 +3820,8 @@ public sealed partial class DonJEnemySpawner
         insideContainment = IsInsideJusticeCustodyLayout(
             layout,
             player.Position);
-        if (insideContainment)
+        if (insideContainment && IsJusticeCustodyDestinationStreamingReadyForPlayer(
+                player, layout.Site, layout.CellPosition, now))
         {
             bool firstVerifiedHolding =
                 !_justicePoliceDeathPreJudgmentHoldingEstablished;
@@ -4667,6 +4708,7 @@ public sealed partial class DonJEnemySpawner
              _justicePoliceDeathPreJudgmentHoldingOwnerModelHash != ownerModel);
         if (ownerChanged)
         {
+            ResetJusticeCustodyStreamingRecovery();
             // Je ne transporte jamais une position ni un backoff physique vers
             // un autre couple slot/modèle, même au milieu d'une réparation.
             ResetJusticePreJudgmentHoldingStreamingState(null);
@@ -4682,7 +4724,6 @@ public sealed partial class DonJEnemySpawner
         {
             _justicePoliceDeathPreJudgmentHoldingStartedAt =
                 GetJusticeRawGameTimeSafe();
-            _justicePoliceDeathPreJudgmentHoldingFallbackLogged = false;
         }
     }
 
@@ -4774,6 +4815,13 @@ public sealed partial class DonJEnemySpawner
 
     private JusticeCustodySite GetJusticePreJudgmentHoldingRequiredSite()
     {
+        if (HasJusticeCustodyStreamingRecoveryOwner() &&
+            _justiceCustodyStreamingFallbackToPrison)
+        {
+            // Je change ici seulement la destination physique : le site du WAL
+            // et le plan d'amende restent figés jusqu'à leur acquittement.
+            return JusticeCustodySite.Bolingbroke;
+        }
         if (_justicePreJudgmentHoldingSource ==
                 JusticePreJudgmentHoldingSource.PendingWalCustodyRebind)
         {
@@ -4804,6 +4852,12 @@ public sealed partial class DonJEnemySpawner
             }
         }
 
+        if (_justiceCaseState != null &&
+            _justiceCaseState.Phase != JusticePhase.Captured &&
+            _justiceCustodySite == JusticeCustodySite.Bolingbroke)
+        {
+            return _justiceCustodySite;
+        }
         return GetJusticeCustodySiteForSentence(
             GetJusticePreJudgmentHoldingSentenceSeconds());
     }
@@ -5033,7 +5087,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         if (_justicePreJudgmentHoldingPositionApplied &&
-            !IsJusticeTeleportVerified(player, targetPosition, 8.0f))
+            !IsJusticeTeleportVerified(player, targetPosition, 2.0f))
         {
             // Je réarme immédiatement le déplacement si GTA ou un autre script a
             // sorti le ped du holding après une première téléportation validée.
@@ -5042,25 +5096,20 @@ public sealed partial class DonJEnemySpawner
 
         try
         {
-            // Je n'appelle pas TeleportPlayerWithFadeSafe ici : son FadeIn interne
-            // précède la preuve de mobilité exigée par ce holding fail-closed.
-            _activeInteriorSession = null;
-            ClearInteriorRenderingFocusSafe(player);
-            Function.Call(
-                Hash.REQUEST_COLLISION_AT_COORD,
-                safeTarget.X,
-                safeTarget.Y,
-                safeTarget.Z);
+            JusticeCustodySite site = GetJusticeCustodyStreamingSiteForTarget(targetPosition);
+            int now = GetJusticeRawGameTimeSafe();
+            // Je garde le ped protégé pendant le chargement MP, puis j'exige le
+            // plancher local avant tout déplacement, même après le délai de secours.
+            player.FreezePosition = true;
+            if (PrepareJusticeCustodyDestinationStreaming(
+                    player, site, targetPosition, now) !=
+                JusticeCustodyStreamingResult.Ready)
+            {
+                return false;
+            }
             SetEntityLoadCollisionFlagSafe(player, true);
             if (!_justicePreJudgmentHoldingPositionApplied)
             {
-                if (!IsJusticePreJudgmentHoldingGroundReady(safeTarget))
-                {
-                    // Je garde l'écran noir sans Wait : le tick suivant retente
-                    // le streaming au lieu de placer le ped au-dessus du vide.
-                    return false;
-                }
-
                 player.FreezePosition = true;
                 SetEntityCoordsNoOffsetSafe(player, safeTarget);
                 player.Heading = NormalizeHeading(heading);
@@ -5070,7 +5119,7 @@ public sealed partial class DonJEnemySpawner
                     0.0f,
                     0.0f,
                     0.0f);
-                if (!IsJusticeTeleportVerified(player, targetPosition, 8.0f))
+                if (!IsJusticeTeleportVerified(player, targetPosition, 2.0f))
                 {
                     // Je garde la propriété v2 comme fallback indépendant,
                     // toujours sous masque et protection temporaire.
@@ -5078,23 +5127,16 @@ public sealed partial class DonJEnemySpawner
                     player.Heading = NormalizeHeading(heading);
                 }
                 _justicePreJudgmentHoldingPositionApplied =
-                    IsJusticeTeleportVerified(player, targetPosition, 8.0f);
+                    IsJusticeTeleportVerified(player, targetPosition, 2.0f);
                 if (!_justicePreJudgmentHoldingPositionApplied)
                 {
                     return false;
                 }
             }
 
-            Function.Call(
-                Hash.REQUEST_COLLISION_AT_COORD,
-                safeTarget.X,
-                safeTarget.Y,
-                safeTarget.Z);
-            bool collisionReady = Function.Call<bool>(
-                (Hash)JusticeNativeHasCollisionLoadedAroundEntity,
-                player.Handle);
-            return collisionReady &&
-                   IsJusticeTeleportVerified(player, targetPosition, 8.0f);
+            return IsJusticeCustodyDestinationStreamingReadyForPlayer(
+                    player, site, targetPosition, now) &&
+                   IsJusticeTeleportVerified(player, targetPosition, 2.0f);
         }
         catch (Exception ex)
         {
@@ -5109,6 +5151,10 @@ public sealed partial class DonJEnemySpawner
         float heading,
         int now)
     {
+        if (MaintainJusticeCustodyStreamingTechnicalFailure(player, now))
+        {
+            return false;
+        }
         if (TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(
                 player,
                 targetPosition,
@@ -5117,51 +5163,13 @@ public sealed partial class DonJEnemySpawner
             return true;
         }
 
-        if (unchecked((uint)(now -
-                _justicePoliceDeathPreJudgmentHoldingStartedAt)) <
-            (uint)JusticeCustodyTransferTimeoutMs)
+        JusticeCustodySite site = GetJusticeCustodyStreamingSiteForTarget(targetPosition);
+        if (HasJusticeCustodyDestinationStreamingTimedOut(
+                player, site, targetPosition, now))
         {
-            return false;
+            HandleJusticeCustodyDestinationStreamingTimeout(player, site, now);
         }
-
-        if (!_justicePoliceDeathPreJudgmentHoldingFallbackLogged)
-        {
-            _justicePoliceDeathPreJudgmentHoldingFallbackLogged = true;
-            LogWarning(
-                "Justice.MaintienAvantJugement",
-                "Streaming non confirmé après 30 secondes : passage au téléport de secours sous masque.");
-        }
-
-        Vector3 safeTarget = targetPosition +
-            new Vector3(0.0f, 0.0f, 0.35f);
-        if (!EnsureJusticePreJudgmentHoldingStreamingState(
-                player,
-                safeTarget,
-                heading))
-        {
-            return false;
-        }
-        if (_justiceCustodyRespawnMaskNeedsRearm)
-        {
-            EnforceJusticePreJudgmentHoldingControlLock(player);
-            return false;
-        }
-        if (!TryJusticeEmergencyTeleport(
-                player,
-                targetPosition,
-                heading,
-                false))
-        {
-            return false;
-        }
-
-        _justicePreJudgmentHoldingPositionApplied =
-            IsJusticeTeleportVerified(player, targetPosition, 8.0f);
-        return _justicePreJudgmentHoldingPositionApplied &&
-            TryMoveJusticePoliceDeathPreJudgmentHoldingPlayer(
-                player,
-                targetPosition,
-                heading);
+        return false;
     }
 
     private void EnforceJusticePreJudgmentHoldingControlLock(Ped player)
@@ -5242,10 +5250,20 @@ public sealed partial class DonJEnemySpawner
         {
             _justicePreJudgmentHoldingStoredCanRagdoll = player.CanRagdoll;
             _justicePreJudgmentHoldingCanRagdollCaptured = true;
+            _justiceCustodyHoldingStoredFrozen = player.FreezePosition;
+            _justiceCustodyHoldingFreezeCaptured = true;
+            player.FreezePosition = true;
             player.CanRagdoll = false;
         }
         catch
         {
+            try
+            {
+                if (_justiceCustodyHoldingFreezeCaptured)
+                    player.FreezePosition = _justiceCustodyHoldingStoredFrozen;
+            }
+            catch { }
+            _justiceCustodyHoldingFreezeCaptured = false;
             TryReleasePlayerInvincibility(
                 player,
                 PlayerInvincibilityOwner.JusticePreJudgmentHolding,
@@ -5273,24 +5291,8 @@ public sealed partial class DonJEnemySpawner
     {
         try
         {
-            using (OutputArgument groundZ = new OutputArgument())
-            {
-                // Je passe le lot explicitement pour rester lié à la surcharge
-                // params InputArgument[] réellement validée par NIB v2, quel que
-                // soit le nombre d'arguments de cette native.
-                InputArgument[] arguments =
-                {
-                    safeTarget.X,
-                    safeTarget.Y,
-                    safeTarget.Z + 50.0f,
-                    groundZ,
-                    false,
-                    false
-                };
-                return Function.Call<bool>(
-                    (Hash)JusticeNativeGetGroundZFor3DCoord,
-                    arguments);
-            }
+            return IsJusticeCustodyLocalFloorReady(
+                Game.Player.Character, safeTarget - new Vector3(0.0f, 0.0f, 0.35f));
         }
         catch (Exception ex)
         {
@@ -5363,6 +5365,22 @@ public sealed partial class DonJEnemySpawner
             }
         }
 
+        // Je retrouve le ped quitté encore vivant avant de libérer l'owner partagé.
+        // Le héros entrant ne reçoit jamais les anciens flags de gel ou de ragdoll.
+        if (_justicePreJudgmentHoldingProtectionOwned &&
+            (!Entity.Exists(player) ||
+             player.Handle != _justicePreJudgmentHoldingStreamingPlayerHandle ||
+             GetJusticePedModelHashSafe(player) != _justicePreJudgmentHoldingStreamingPlayerModelHash))
+        {
+            Ped trackedPlayer = ResolveTrackedPlayerInvincibilityPed(null);
+            if (Entity.Exists(trackedPlayer) &&
+                trackedPlayer.Handle == _justicePreJudgmentHoldingStreamingPlayerHandle &&
+                GetJusticePedModelHashSafe(trackedPlayer) == _justicePreJudgmentHoldingStreamingPlayerModelHash)
+            {
+                player = trackedPlayer;
+            }
+        }
+
         bool exactPlayer = Entity.Exists(player) &&
             player.Handle == _justicePreJudgmentHoldingStreamingPlayerHandle &&
             GetJusticePedModelHashSafe(player) ==
@@ -5371,7 +5389,11 @@ public sealed partial class DonJEnemySpawner
         {
             try
             {
-                if (_justicePreJudgmentHoldingPositionApplied)
+                if (_justiceCustodyHoldingFreezeCaptured)
+                {
+                    player.FreezePosition = _justiceCustodyHoldingStoredFrozen;
+                }
+                else if (_justicePreJudgmentHoldingPositionApplied)
                 {
                     player.FreezePosition = false;
                 }
@@ -5397,6 +5419,8 @@ public sealed partial class DonJEnemySpawner
 
     private void ClearJusticePreJudgmentHoldingStreamingFields()
     {
+        _justiceCustodyHoldingFreezeCaptured = false;
+        _justiceCustodyHoldingStoredFrozen = false;
         _justicePreJudgmentHoldingStreamingPending = false;
         _justicePreJudgmentHoldingPositionApplied = false;
         _justicePreJudgmentHoldingProtectionOwned = false;
@@ -5449,7 +5473,6 @@ public sealed partial class DonJEnemySpawner
         _justicePoliceDeathPreJudgmentHoldingOwnerSlot = -1;
         _justicePoliceDeathPreJudgmentHoldingOwnerModelHash = 0;
         _justicePoliceDeathPreJudgmentHoldingStartedAt = 0;
-        _justicePoliceDeathPreJudgmentHoldingFallbackLogged = false;
         ResetJusticePoliceDeathPreJudgmentHoldingRetryState();
     }
 
@@ -8542,8 +8565,9 @@ public sealed partial class DonJEnemySpawner
             ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
         if (preservedInventoryReady || ambiguousInventoryReady)
         {
-            // Je reprends directement un fallback déjà précommité. Je ne relance
-            // ni le snapshot ni RemoveAll après un reload ou un téléport refusé.
+            // Je reprends l'admission physique avec le verrou runtime du détenu.
+            // Une capture jamais réussie sera réessayée après le transfert,
+            // sans redéclencher le masque ni remplacer un dépôt de récupération.
             return JusticeInventoryPreparationResult.Ready;
         }
 
@@ -8587,13 +8611,16 @@ public sealed partial class DonJEnemySpawner
     private JusticeInventoryPreparationResult PrepareJusticeInventoryConfiscation(Ped player)
     {
         JusticeWeaponSnapshot snapshot;
-        if (!TryCaptureJusticeWeaponSnapshot(player, out snapshot) ||
-            !ValidateJusticeWeaponSnapshot(snapshot))
+        bool captured = TryCaptureJusticeWeaponSnapshot(player, out snapshot);
+        if (!captured || !ValidateJusticeWeaponSnapshot(snapshot))
         {
+            if (captured) _justiceInventoryCaptureStage = "validation";
             _justiceWeaponSnapshot = null;
             _justiceInventoryRemoved = false;
             _justiceWeaponControlsLocked = false;
-            _justiceInventoryCaptureFailureCount++;
+            _justiceInventoryCaptureFailureCount = Math.Min(
+                JusticeCustodyInventoryCaptureMaximumAttempts,
+                _justiceInventoryCaptureFailureCount + 1);
             bool unsupported = _justiceInventoryCaptureFailureCount >=
                 JusticeCustodyInventoryCaptureMaximumAttempts;
             _justiceInventoryCustodyState = unsupported
@@ -8601,13 +8628,9 @@ public sealed partial class DonJEnemySpawner
                 : JusticeInventoryCustodyState.CapturePending;
             _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(
                 Game.GameTime,
-                unsupported ? 0 : 1000);
+                JusticeCustodyPreservedInventoryRetryMs);
             JusticeMarkStateDirty();
-            LogWarning(
-                "Justice.Inventaire",
-                unsupported
-                    ? "Inventaire incompatible après trois essais : aucune arme retirée, fallback non destructif."
-                    : "Snapshot momentanément indisponible : inventaire et contrôles préservés avant retry.");
+            TraceJusticeInventoryCaptureFailure();
             return unsupported
                 ? JusticeInventoryPreparationResult.UnsupportedLoadout
                 : JusticeInventoryPreparationResult.RetryableFailure;
@@ -8644,7 +8667,7 @@ public sealed partial class DonJEnemySpawner
                 "Justice.Inventaire",
                 removalResult == JusticeInventoryRemovalResult.EffectMayHaveApplied
                     ? "Confiscation non vérifiable : snapshot conservé pour restitution différée."
-                    : "Confiscation refusée par GTA; le joueur reste hors prison avec ses contrôles.");
+                    : "Confiscation refusée par GTA; dépôt conservé et transfert en attente de vérification.");
             return RegisterJusticeInventoryRemovalFailure(
                 removalResult,
                 Game.GameTime);
@@ -8674,16 +8697,38 @@ public sealed partial class DonJEnemySpawner
             return JusticeInventoryPreparationResult.Ready;
         }
 
-        if (_justiceInventoryCustodyState ==
-                JusticeInventoryCustodyState.UnsupportedPreserved ||
-            ((_justiceInventoryCustodyState ==
+        if ((_justiceInventoryCustodyState ==
                   JusticeInventoryCustodyState.RestoreAmbiguous ||
-              _justiceInventoryCustodyState ==
-                  JusticeInventoryCustodyState.RestorePending) &&
-             _justiceDeferredInventoryRestore))
+               _justiceInventoryCustodyState ==
+                   JusticeInventoryCustodyState.RestorePending) &&
+             _justiceDeferredInventoryRestore)
         {
-            // Je ne réarme jamais RemoveAll après l'adoption du fallback. Un
-            // snapshot ambigu reste réservé au merge post-libération.
+            // Je ne réarme jamais RemoveAll pour un dépôt ambigu déjà touché.
+            // Je le réserve au merge après la libération effective.
+            return JusticeInventoryPreparationResult.Ready;
+        }
+
+        bool preservedCapture =
+            (_justiceInventoryCustodyState == JusticeInventoryCustodyState.UnsupportedPreserved ||
+             _justiceInventoryCustodyState == JusticeInventoryCustodyState.CapturePending) &&
+            !_justiceInventoryRemoved && !_justiceDeferredInventoryRestore &&
+            !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot);
+        if (preservedCapture)
+        {
+            // Je réessaie un dépôt jamais capturé sans modifier les phases de
+            // détention ni remettre l'écran au noir. Le verrou est dérivé du propriétaire.
+            if (!JusticeIsCustodyActive || !Entity.Exists(player) || player.IsDead ||
+                !IsJusticeCustodyPlayerIdentityCompatible(player) ||
+                !JusticeCustodyHasReached(now, _justiceNextInventoryPersistenceRetryAt))
+                return JusticeInventoryPreparationResult.RetryableFailure;
+            _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(
+                now, JusticeCustodyPreservedInventoryRetryMs);
+            return PrepareJusticeInventoryConfiscation(player);
+        }
+
+        if (_justiceInventoryCustodyState == JusticeInventoryCustodyState.UnsupportedPreserved)
+        {
+            // Je ne remplace jamais un dépôt valide déjà conservé pour récupération.
             return JusticeInventoryPreparationResult.Ready;
         }
 
@@ -8818,9 +8863,9 @@ public sealed partial class DonJEnemySpawner
             return preservedInventory || ambiguousInventory;
         }
 
-        // Je bascule dès le premier échec de capture entièrement non destructif.
-        // Attendre trois essais laisserait GTA afficher l'hôpital alors qu'aucune
-        // arme n'a été touchée et que la détention peut commencer sans risque.
+        // Je n'allonge pas le masque pour une capture encore non destructive.
+        // Le verrou dérivé empêche l'utilisation des armes pendant que le tick
+        // réessaie le dépôt après l'admission physique sûre.
         return preparationResult == JusticeInventoryPreparationResult.RetryableFailure &&
                _justiceInventoryCustodyState == JusticeInventoryCustodyState.CapturePending &&
                !ValidateJusticeWeaponSnapshot(_justiceWeaponSnapshot) &&
@@ -8843,18 +8888,19 @@ public sealed partial class DonJEnemySpawner
         }
         _justiceInventoryRemoved = false;
         _justiceWeaponControlsLocked = false;
-        _justiceNextInventoryPersistenceRetryAt = 0;
+        _justiceNextInventoryPersistenceRetryAt = JusticeCustodyFutureTime(
+            now, JusticeCustodyPreservedInventoryRetryMs);
         JusticeMarkStateDirty();
         ShowStatus(
             ambiguousRestorePending
                 ? "Justice : confiscation incertaine, restitution différée et détention maintenue."
-                : "Justice : inventaire conservé, détention maintenue sans confiscation.",
+                : "Justice : armes indisponibles, confiscation en attente de vérification.",
             5500);
         LogWarning(
             "Justice.Inventaire",
             ambiguousRestorePending
                 ? "Confiscation ambiguë : snapshot conservé, transfert en détention maintenu."
-                : "Snapshot incompatible : inventaire préservé, transfert en détention maintenu.");
+                : "Snapshot indisponible : inventaire préservé mais inutilisable en détention, nouvelle capture dans cinq secondes.");
     }
 
     private bool PersistJusticeCriticalPrecommitRedundantly(
@@ -8868,6 +8914,9 @@ public sealed partial class DonJEnemySpawner
     private bool TryCaptureJusticeWeaponSnapshot(Ped player, out JusticeWeaponSnapshot snapshot)
     {
         snapshot = null;
+        _justiceInventoryCaptureStage = "identité";
+        _justiceInventoryCaptureWeaponHash = 0;
+        _justiceInventoryCaptureDlcIndex = -1;
         if (!Entity.Exists(player) || player.IsDead)
         {
             return false;
@@ -8875,14 +8924,14 @@ public sealed partial class DonJEnemySpawner
 
         try
         {
+            _justiceInventoryCaptureStage = "sélection";
             JusticeWeaponSnapshot candidate = new JusticeWeaponSnapshot
             {
-                SelectedWeaponHash = Function.Call<int>(
-                    (Hash)NativeGetSelectedPedWeapon,
-                    player.Handle)
+                SelectedWeaponHash = ReadJusticeCustodySnapshotSelectedWeapon(player)
             };
             HashSet<int> seenWeaponHashes = new HashSet<int>();
             List<int> weaponHashes = new List<int>();
+            _justiceInventoryCaptureStage = "catalogue";
             if (!TryCollectJusticeWeaponHashes(seenWeaponHashes, weaponHashes))
             {
                 return false;
@@ -8891,7 +8940,8 @@ public sealed partial class DonJEnemySpawner
             for (int index = 0; index < weaponHashes.Count; index++)
             {
                 int weaponHash = weaponHashes[index];
-
+                _justiceInventoryCaptureWeaponHash = weaponHash;
+                _justiceInventoryCaptureStage = "possession";
                 bool ownsWeapon = Function.Call<bool>(
                     Hash.HAS_PED_GOT_WEAPON,
                     player.Handle,
@@ -8904,9 +8954,11 @@ public sealed partial class DonJEnemySpawner
 
                 if (candidate.Weapons.Count >= JusticeCustodyMaxWeapons)
                 {
+                    _justiceInventoryCaptureStage = "borne-armes";
                     return false;
                 }
 
+                _justiceInventoryCaptureStage = "munitions-teinte";
                 JusticeWeaponSnapshotItem item = new JusticeWeaponSnapshotItem
                 {
                     WeaponHash = weaponHash,
@@ -8920,20 +8972,18 @@ public sealed partial class DonJEnemySpawner
                         weaponHash))
                 };
 
-                OutputArgument clipOutput = new OutputArgument();
-                bool clipRead = Function.Call<bool>(
-                    Hash.GET_AMMO_IN_CLIP,
-                    player.Handle,
-                    weaponHash,
-                    clipOutput);
-                if (!clipRead)
+                _justiceInventoryCaptureStage = "chargeur";
+                int clipAmmo;
+                bool hasClip;
+                if (!TryReadJusticeWeaponClip(player, weaponHash, out clipAmmo, out hasClip))
                 {
-                    // Un chargeur inconnu rend le snapshot entier non fidèle :
-                    // je conserve alors l'inventaire physique et verrouille l'arme.
+                    // Je refuse un chargeur réellement illisible ; les catégories
+                    // sans chargeur sont reconnues par la lecture partagée.
                     return false;
                 }
-                item.AmmoInClip = Math.Max(0, clipOutput.GetResult<int>());
+                item.AmmoInClip = clipAmmo;
 
+                _justiceInventoryCaptureStage = "composants";
                 if (!CaptureJusticeWeaponComponents(player, item))
                 {
                     return false;
@@ -8941,6 +8991,7 @@ public sealed partial class DonJEnemySpawner
                 candidate.Weapons.Add(item);
             }
 
+            _justiceInventoryCaptureStage = "réserves";
             if (!CaptureJusticeAmmoPools(player, candidate, weaponHashes)) return false;
             candidate.IsValidated = true;
             snapshot = candidate;
@@ -8992,6 +9043,7 @@ public sealed partial class DonJEnemySpawner
                 unchecked((ulong)dlcWeaponBuffer.ToInt64()));
             for (int index = 0; index < dlcCount; index++)
             {
+                _justiceInventoryCaptureDlcIndex = index;
                 ZeroJusticeUnmanagedBuffer(dlcWeaponBuffer, nativeDataSize);
                 if (!Function.Call<bool>(
                     (Hash)JusticeNativeGetDlcWeaponData,
@@ -9283,12 +9335,16 @@ public sealed partial class DonJEnemySpawner
 
     private void EnforceJusticeCustodyWeaponLock(Ped player)
     {
-        if (!Entity.Exists(player) || !ShouldEnforceJusticeCustodyWeaponLock())
+        if (!ShouldEnforceJusticeCustodyWeaponLock() || !Entity.Exists(player) ||
+            player.IsDead || !IsJusticeCustodyPlayerIdentityCompatible(player))
         {
             return;
         }
 
-        bool canUseUnarmedCombat = JusticePolicy.CanUseCustodyUnarmedCombat(
+        bool selectionPreserved = RememberJusticeCustodyWeaponSelectionBeforeLock(player);
+        if (selectionPreserved && !IsJusticePlayerUnarmedVerified(player)) SelectJusticeUnarmedSafe(player);
+        bool canUseUnarmedCombat = selectionPreserved && IsJusticePlayerUnarmedVerified(player) &&
+            JusticePolicy.CanUseCustodyUnarmedCombat(
             _justiceInventoryRemoved,
             _justiceWeaponControlsLocked);
         if (!canUseUnarmedCombat)
@@ -9307,23 +9363,16 @@ public sealed partial class DonJEnemySpawner
         Game.DisableControlThisFrame(0, GtaControl.Reload);
         Game.DisableControlThisFrame(0, GtaControl.WeaponWheelLeftRight);
         Game.DisableControlThisFrame(0, GtaControl.WeaponWheelUpDown);
-        SelectJusticeUnarmedSafe(player);
+        for (int control = 157; control <= 165; control++)
+            Game.DisableControlThisFrame(0, (GtaControl)control);
     }
 
     private bool ShouldEnforceJusticeCustodyWeaponLock()
     {
-        if (_justiceInventoryRemoved || _justiceWeaponControlsLocked)
-        {
-            return true;
-        }
-
-        // Je dérive le verrou de l'état durable lorsque RemoveAll a pu ne
-        // retirer qu'une partie des armes. Le même snapshot redevient libre dès
-        // la sortie réelle de détention, afin que sa restitution puisse aboutir.
-        return JusticeIsCustodyActive &&
-               _justiceInventoryCustodyState ==
-                   JusticeInventoryCustodyState.RestoreAmbiguous &&
-               _justiceDeferredInventoryRestore;
+        // Je dérive le verrou de la détention et du propriétaire, jamais du seul
+        // dépôt. Les anciens XML restent valides même sans snapshot d'inventaire.
+        return JusticeIsCustodyActive && _justiceCaseState != null &&
+            !string.IsNullOrWhiteSpace(_justiceCaseState.CustodyEpisodeId);
     }
 
     private void RepairJusticeOrphanedCustodyControls(Ped player)
@@ -9422,11 +9471,7 @@ public sealed partial class DonJEnemySpawner
                     player.Handle,
                     item.WeaponHash,
                     item.Tint);
-                Function.Call(
-                    Hash.SET_AMMO_IN_CLIP,
-                    player.Handle,
-                    item.WeaponHash,
-                    item.AmmoInClip);
+                fullyRestored &= RestoreJusticeWeaponClipIfSupported(player, item);
             }
             catch
             {
@@ -9578,11 +9623,7 @@ public sealed partial class DonJEnemySpawner
                     player.Handle,
                     item.WeaponHash,
                     item.Tint);
-                Function.Call(
-                    Hash.SET_AMMO_IN_CLIP,
-                    player.Handle,
-                    item.WeaponHash,
-                    item.AmmoInClip);
+                fullyRestored &= RestoreJusticeWeaponClipIfSupported(player, item);
             }
             catch
             {
@@ -9820,33 +9861,9 @@ public sealed partial class DonJEnemySpawner
                     }
                 }
 
-                OutputArgument clipOutput = new OutputArgument();
-                bool clipRead = Function.Call<bool>(
-                    Hash.GET_AMMO_IN_CLIP,
-                    player.Handle,
-                    item.WeaponHash,
-                    clipOutput);
-                int currentClip = clipRead ? Math.Max(0, clipOutput.GetResult<int>()) : 0;
-                if (!clipRead || currentClip < item.AmmoInClip)
+                if (!RestoreJusticeWeaponClipIfSupported(player, item))
                 {
-                    Function.Call(
-                        Hash.SET_AMMO_IN_CLIP,
-                        player.Handle,
-                        item.WeaponHash,
-                        item.AmmoInClip);
-                    OutputArgument verifyClipOutput = new OutputArgument();
-                    bool verified = Function.Call<bool>(
-                        Hash.GET_AMMO_IN_CLIP,
-                        player.Handle,
-                        item.WeaponHash,
-                        verifyClipOutput);
-                    if (!verified || verifyClipOutput.GetResult<int>() < item.AmmoInClip)
-                    {
-                        if (requireExactDetails)
-                        {
-                            everyWeaponRestored = false;
-                        }
-                    }
+                    everyWeaponRestored = false;
                 }
             }
             catch
@@ -11044,6 +11061,7 @@ public sealed partial class DonJEnemySpawner
 
     private void CleanupJusticeCustodySceneEntitiesAndGroups()
     {
+        ResetJusticeCustodyDestinationStreaming();
         DeleteJusticeCustodyPedList(_justiceCustodyGuards);
         DeleteJusticeCustodyPedList(_justiceCustodyInmates);
         if (_justiceCustodyPedGenerationByHandle != null)
@@ -12982,7 +13000,9 @@ public sealed partial class DonJEnemySpawner
         bool preserveDeferredRestore = true,
         bool preservePoliceDeathLegalReleaseProtection = false)
     {
+        ResetJusticeCustodyStreamingRecovery();
         _justiceNextCustodyAppearanceAt = 0;
+        ResetJusticeCustodyInventorySelection();
         _justiceNextCustodyPersonalEffectsAt = 0;
         _justiceCustodyAppearanceSuppressed = false;
         _justiceCustodyAppearanceRollbackPending = false;

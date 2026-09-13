@@ -1700,6 +1700,7 @@ public sealed partial class DonJEnemySpawner
         Ped player = Game.Player.Character;
         // Je peux ici retirer le masque si GTA a réellement basculé vers un
         // autre héros, même lorsque le contexte Justice bloque encore le reste.
+        EnforceJusticeCustodyWeaponLock(player);
         UpdateJusticeCustodyRespawnTransferMask(player);
         int nowRaw = GetJusticeRawGameTimeSafe();
         bool preJudgmentHoldingBlocksGameplay =
@@ -1875,6 +1876,7 @@ public sealed partial class DonJEnemySpawner
         }
 
         Ped player = Game.Player.Character;
+        EnforceJusticeCustodyWeaponLock(player);
         UpdateJusticeCustodyRespawnTransferMask(player);
         int now = GetJusticeRawGameTimeSafe();
         SuspendJusticeSentenceClocks(now);
