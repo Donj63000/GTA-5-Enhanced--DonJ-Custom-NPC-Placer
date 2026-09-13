@@ -2869,3 +2869,15 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Décodage des paramètres natifs simulés, changement réel du modèle du ped dans la fixture d'identité, attente du wrapper WithFallback et ajout du plancher dans la dernière fixture runtime. Les assertions de peine, de cash et d'admission sont conservées.
 - Vérification: Nouvelle suite complète requise sur ces corrections; aucun changement de native de production motivé par ces erreurs de simulation.
 - Résolution: Résultats finaux consignés séparément; aucun nouveau crash GTA observé pendant ces tests.
+
+## 2026-09-13 22:45:52 +02:00 — Qualification GitHub : commit changé pendant les tests
+
+- Statut: Cause identifiée; reconstruction et qualification relancées après commit.
+- Contexte: Publication des correctifs de détention sur main. La première suite de sécurité avec API NIB réelle a réussi 701/701 tests.
+- Symptôme: Le second passage a échoué sur 18 tests de packaging, avec 683 réussites, après création du commit pendant son exécution.
+- Sources vérifiées: Sortie dotnet test GTA5modDEV.sln -c Release; TestResults/safety-20260913-223949/logs/test-release.log; collecte publication-commit-build-mismatch.
+- Extraits utiles: package-game-ready.ps1:535 : la version informationnelle 1.0.0+f1e82a8b8db90d64f1cda82f2fbf38c981feaed0 ne contient pas le commit a044875f1c336f2bc8b4743131a3522b544b729d.
+- Analyse / hypothèse: Je confirme un décalage entre HEAD et le binaire déjà compilé, provoqué par mon commit pendant la suite; le garde-fou de traçabilité a correctement refusé le package.
+- Action menée: Je consigne cet incident avant le commit de documentation, puis je reconstruis et relance les vérifications sans modifier HEAD pendant les tests.
+- Vérification: Première suite complète 701/701 et ABI réussis; nouvelle qualification du commit final nécessaire avant publication.
+- Résolution: La reconstruction après stabilisation de HEAD corrige la cause; les résultats définitifs sont fournis dans le compte rendu de publication et la CI GitHub.
