@@ -54,6 +54,10 @@ namespace GTA
         public static Func<Ped, Entity> KillerHandler { get; set; }
         public static Func<Player, Entity> TargetedEntityHandler { get; set; }
         public static Func<Keys, bool> KeyPressedHandler { get; set; }
+        public static Func<Entity, bool, bool> FreezePositionReadHandler { get; set; }
+        public static Func<Entity, bool, bool> InvincibilityReadHandler { get; set; }
+        public static Action<Entity, bool> FreezePositionWriteHandler { get; set; }
+        public static Action<Entity, bool> InvincibilityWriteHandler { get; set; }
         public static Ped[] NearbyPeds { get; set; } = new Ped[0];
         public static Vehicle[] NearbyVehicles { get; set; } = new Vehicle[0];
         public static Vehicle[] AllVehicles { get; set; } = new Vehicle[0];
@@ -86,6 +90,10 @@ namespace GTA
             KillerHandler = null;
             TargetedEntityHandler = null;
             KeyPressedHandler = null;
+            FreezePositionReadHandler = null;
+            InvincibilityReadHandler = null;
+            FreezePositionWriteHandler = null;
+            InvincibilityWriteHandler = null;
             NearbyPeds = new Ped[0];
             NearbyVehicles = new Vehicle[0];
             AllVehicles = new Vehicle[0];
@@ -174,10 +182,36 @@ namespace GTA
         public Model Model { get; set; }
         public bool IsDead { get; set; }
         public bool IsPersistent { get; set; }
-        public bool FreezePosition { get; set; }
-        public bool IsInvincible { get; set; }
+        private bool _freezePosition;
+        private bool _isInvincible;
+        public bool FreezePosition
+        {
+            get
+            {
+                Func<Entity, bool, bool> handler = StubRuntime.FreezePositionReadHandler;
+                return handler == null ? _freezePosition : handler(this, _freezePosition);
+            }
+            set
+            {
+                _freezePosition = value;
+                // Après mutation pour simuler aussi une écriture partielle.
+                StubRuntime.FreezePositionWriteHandler?.Invoke(this, value);
+            }
+        }
+        public bool IsInvincible
+        {
+            get
+            {
+                Func<Entity, bool, bool> handler = StubRuntime.InvincibilityReadHandler;
+                return handler == null ? _isInvincible : handler(this, _isInvincible);
+            }
+            set
+            {
+                _isInvincible = value;
+                StubRuntime.InvincibilityWriteHandler?.Invoke(this, value);
+            }
+        }
         public int Alpha { get; set; } = 255;
-
         protected Entity()
         {
         }

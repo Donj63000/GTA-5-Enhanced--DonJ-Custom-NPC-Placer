@@ -954,6 +954,19 @@ private enum EnemyBehavior
             }
             catch (Exception ex)
             {
+                if (stage == RuntimeTickStage.Placement)
+                {
+                    // Une erreur de caméra/raycast ne doit pas laisser le joueur
+                    // gelé dans une session qui échoue de nouveau à chaque tick.
+                    try
+                    {
+                        StopPlacementMode(true);
+                    }
+                    catch
+                    {
+                        // Le diagnostic de l'erreur initiale reste prioritaire.
+                    }
+                }
                 ReportRuntimeTickStageFailure(stage, ex);
                 return false;
             }
@@ -7176,24 +7189,24 @@ private void DrawMenu()
             _placementProtectedPlayer = player;
             _placementProtectedPlayerHandle = playerHandle;
             _placementPlayerStateStored = true;
-
             bool originalInvincibility;
-            if (!TryAcquirePlayerInvincibility(
-                    player,
-                    PlayerInvincibilityOwner.Placement,
-                    out originalInvincibility))
+            bool hasVerifiedProtection = TryAcquirePlayerInvincibility(
+                player,
+                PlayerInvincibilityOwner.Placement,
+                out originalInvincibility);
+            _storedPlayerInvincible = originalInvincibility;
+            if (!hasVerifiedProtection && IsPlayerInvincibilityRecoveryPending())
             {
+                // Pas de mode dégradé tant qu'une mutation partielle n'a pas
+                // été restaurée par le gestionnaire partagé.
                 throw new InvalidOperationException(
-                    "La protection temporaire du joueur n'a pas pu être vérifiée.");
+                    "La restauration de la protection du joueur est en attente.");
             }
 
-            _storedPlayerInvincible = originalInvincibility;
+            // En API v2, l'écriture utilise une native mais la relecture du gel
+            // dépend de la mémoire du jeu. Un false après l'écriture ne prouve
+            // donc pas son échec sur un runtime Enhanced incompatible.
             player.FreezePosition = true;
-            if (!player.FreezePosition)
-            {
-                throw new InvalidOperationException(
-                    "Le gel temporaire du joueur n'a pas pu être vérifié.");
-            }
 
             Vector3 cameraPosition = Function.Call<Vector3>(Hash.GET_GAMEPLAY_CAM_COORD);
             Vector3 cameraRotation = Function.Call<Vector3>(Hash.GET_GAMEPLAY_CAM_ROT, 2);
@@ -7218,10 +7231,16 @@ private void DrawMenu()
             _placementConfirmRequested = false;
             _nextPlacementSpawnAllowedAt = 0;
             _nextPreviewRetryAt = 0;
-
-            ShowStatus(
-                "Placement camera actif: clic gauche/Entree place, Echap/clic droit quitte.",
-                5000);
+            if (hasVerifiedProtection)
+            {
+                ShowStatus(
+                    "Placement camera actif: clic gauche/Entree place, Echap/clic droit quitte.",
+                    5000);
+            }
+            else
+            {
+                ReportPlacementProtectionFallback();
+            }
         }
         catch (Exception ex)
         {
@@ -7427,23 +7446,60 @@ private void DrawMenu()
     {
         Ped player = Game.Player.Character;
         if (!IsPlacementProtectedPlayer(player) ||
-            !HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement))
+            player.IsDead ||
+            IsJusticeTemporaryPlayerProtectionForbidden() ||
+            IsPlayerInvincibilityRecoveryPending())
         {
             return false;
         }
-
-        MaintainPlayerInvincibilityProtection();
         try
         {
+            if (HasPlayerInvincibilityOwner(PlayerInvincibilityOwner.Placement) &&
+                !TryWritePlayerInvincibility(player, true))
+            {
+                // L'invincibilité est facultative pour la caméra, pas sa
+                // restauration : conserver la gestion des autres propriétaires.
+                if (!TryReleasePlayerInvincibility(
+                        player,
+                        PlayerInvincibilityOwner.Placement,
+                        _storedPlayerInvincible,
+                        false))
+                {
+                    return false;
+                }
+                ReportPlacementProtectionFallback();
+            }
+
             player.FreezePosition = true;
-            return player.IsInvincible && player.FreezePosition;
+            return true;
         }
         catch
         {
             return false;
         }
     }
-
+    private void ReportPlacementProtectionFallback()
+    {
+        try
+        {
+            LogWarning(
+                "Placement.Compatibilite",
+                "Invincibilite non verifiable; camera active sans protection garantie.");
+        }
+        catch
+        {
+            // Le diagnostic ne doit pas interrompre une caméra fonctionnelle.
+        }
+        try
+        {
+            ShowStatus(
+                "Camera active sans invincibilite garantie: risque de degats. Echap pour quitter.",
+                6500);
+        }
+        catch
+        {
+        }
+    }
     private bool HasPlacementSessionState()
     {
         return _placementMode ||
@@ -7493,7 +7549,9 @@ private void DrawMenu()
                 try
                 {
                     player.FreezePosition = _storedPlayerFrozen;
-                    freezeRestored = player.FreezePosition == _storedPlayerFrozen;
+                    // Même règle qu'au démarrage : ne pas bloquer les sessions
+                    // suivantes sur une relecture mémoire v2 non fiable.
+                    freezeRestored = true;
                 }
                 catch
                 {

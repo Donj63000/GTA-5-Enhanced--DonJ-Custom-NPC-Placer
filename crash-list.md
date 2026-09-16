@@ -2881,3 +2881,27 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Je consigne cet incident avant le commit de documentation, puis je reconstruis et relance les vérifications sans modifier HEAD pendant les tests.
 - Vérification: Première suite complète 701/701 et ABI réussis; nouvelle qualification du commit final nécessaire avant publication.
 - Résolution: La reconstruction après stabilisation de HEAD corrige la cause; les résultats définitifs sont fournis dans le compte rendu de publication et la CI GitHub.
+
+## 2026-09-16 03:47:09 +02:00 — Application du patch caméra : écarts de contexte et validation isolée
+
+- Statut: Corrections intégrées; qualification en cours.
+- Contexte: Application de Downloads/DonJ_fix_camera_placement.patch à la demande de l'utilisateur.
+- Symptôme: Git refuse d'abord le propriétaire du dépôt dans le sandbox; git apply --check refuse les contextes contenant des lignes vides différentes; la première restauration .NET échoue avec NU1301.
+- Sources vérifiées: Sorties Git et .NET; TestResults/safety-20260916-034539/logs/restore.log; collecte tools/collect-bug-logs.ps1 dans bug-reports/20260916-034448-camera-placement-patch-integration, incluant les logs NIBScriptHookVDotNet, ScriptHookV et Scripts/DonJCustomNpcPlacer sous GTA V Enhanced.
+- Extraits utiles: « detected dubious ownership »; « patch does not apply »; « Une tentative d'accès à un socket de manière interdite par ses autorisations d'accès » (NuGet).
+- Analyse / hypothèse: Incidents d'intégration et d'environnement, sans crash GTA reproduit. Aucun log exploitable trouvé pour attribuer ces incidents au runtime du jeu. Le code non vide des contextes du patch correspond exactement au dépôt actuel.
+- Action menée: Exception safe.directory limitée aux commandes Git; application des blocs avec correspondance unique du code en ignorant seulement les lignes vides; aucune modification du patch téléchargé. Relance de la suite avec accès autorisé à NuGet.
+- Vérification: Compilation Release avec stub réussie, zéro avertissement et zéro erreur; validation ABI réussie. Tests complets puis qualification avec API réelle en cours.
+- Résolution: Les blocages Git et NuGet sont levés; résultat final de qualification consigné à la fin de l'intervention.
+
+## 2026-09-16 03:53:41 +02:00 — Qualification du patch caméra : isolation des sauvegardes des tests
+
+- Statut: Résolu hors jeu.
+- Contexte: Suite Release avec stub après application du patch téléchargé.
+- Symptôme: Les 21 nouveaux scénarios échouent avant activation de la caméra; les 929 tests existants réussissent.
+- Sources vérifiées: TestResults/safety-20260916-034622/logs/test-release.log et safety-tests.trx; collecte automatique bug-reports/20260916-035007-safety-failure; Scripts/DonJCustomNpcPlacer.log; TryLoadJusticeState et BuildSaveDirectoryCandidates.
+- Extraits utiles: AssertCameraActive ligne 341; log DonJCustomNpcPlacer : « Etat judiciaire charge, schéma=2, activation=oui. » Le chargement cherche dans les dossiers de secours lorsque le dossier temporaire ne contient pas de XML.
+- Analyse / hypothèse: La fixture du patch créait seulement un dossier vide et héritait ainsi d'un état Justice externe. Le refus de placement provenait de cette contamination, pas de la caméra.
+- Action menée: Ajout dans la seule fixture du patch d'un XML Justice v2 vide valide avec backup, selon le modèle existant SeedCanonicalJusticeState. Aucun changement des corrections de production du patch ni des sauvegardes du joueur.
+- Vérification: 21/21 scénarios caméra réussis après isolation, compilation Release et ABI déjà validées; 929/929 autres tests réussis avant cette modification limitée à la fixture. Diff relu. La qualification finale utilise ensuite l'API NIB réelle avant déploiement.
+- Résolution: Tests indépendants des sauvegardes installées; aucun scénario supprimé ni assertion affaiblie. Vérification visuelle en jeu restant à effectuer.
