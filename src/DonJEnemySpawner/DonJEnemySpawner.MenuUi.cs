@@ -2324,7 +2324,9 @@ public sealed partial class DonJEnemySpawner
             case MainMenuAction.JusticeEnabled:
                 return "Active ou met en pause Justice pour le héros joué : " +
                        GetJusticePlayedProfileDisplay() +
-                       ". Désactiver ne supprime aucun dossier, mandat, casier, amende ou peine. " +
+                       ". État mémorisé séparément pour chaque héros (OFF sans sauvegarde). " +
+                       "OFF arrête la justice du mod, pas la police ni les étoiles normales de GTA. " +
+                       "Dossier, mandat, casier, amende et peine conservés. " +
                        "Utilise Réinitialiser ce personnage uniquement pour tout effacer.";
             case MainMenuAction.JusticeProfile:
                 return "Gauche/Droite choisit le dossier à consulter, payer ou réinitialiser. " +

@@ -5128,7 +5128,7 @@ public sealed class JusticeRuntimeContractTests
         Assert.AreEqual(25, state.ActiveScore);
         StringAssert.Contains(
             GetFieldValue<string>(menuScript, "_statusText"),
-            "Dossier, casier et mandat conservés");
+            "Justice avancée DÉSACTIVÉE pour Michael. Police GTA normale; dossier conservé.");
 
         object profileAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticeProfile");
         object policeModeAction = Enum.Parse(GetNestedType("MainMenuAction"), "JusticePoliceMode");
@@ -5188,7 +5188,8 @@ public sealed class JusticeRuntimeContractTests
         Assert.IsFalse(resetModal.Contains("CONFIRMATION D'AMNISTIE"));
         Assert.IsFalse(resetModal.Contains("justiceAmnesty"));
         string toggleHint = ExecutableMethodBody(menuSource, "GetObsidianActionHint");
-        StringAssert.Contains(toggleHint, "Désactiver ne supprime aucun dossier");
+        StringAssert.Contains(toggleHint, "Dossier, mandat, casier, amende et peine conservés.");
+        StringAssert.Contains(toggleHint, "pas la police ni les étoiles normales de GTA");
     }
 
     [TestMethod]

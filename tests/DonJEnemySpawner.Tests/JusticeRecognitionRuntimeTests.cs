@@ -47,6 +47,171 @@ public sealed class JusticeRecognitionRuntimeTests
     }
 
     [TestMethod]
+    public void Activation_UnknownAuthorityRejectsEvenABoundWantedHandler()
+    {
+        int writes = 0;
+        JusticeRecognitionBridge.BindWantedMinimum(level => { writes++; return true; });
+        WantedMinimumApplicationResult result = JusticeRecognitionBridge.ApplyWantedMinimumAtomically(4);
+        Assert.IsTrue(result.HandlerPresent);
+        Assert.IsFalse(result.Applied);
+        Assert.AreEqual(0, writes);
+    }
+
+    [DataTestMethod]
+    [DataRow(false, false, "Michael")]
+    [DataRow(false, true, "Michael")]
+    [DataRow(true, true, "Michael")]
+    [DataRow(true, false, null)]
+    [DataRow(true, false, "unknown-profile")]
+    public void Activation_OffSuspendedOrUnknownProfileRejectsWantedWrites(
+        bool enabled, bool suspended, string profileId)
+    {
+        int writes = 0;
+        JusticeRecognitionBridge.BindWantedMinimum(level => { writes++; return true; });
+        JusticeRecognitionBridge.SetRuntimeState(enabled, suspended, profileId);
+        Assert.IsFalse(JusticeRecognitionBridge.TryApplyWantedMinimum(4));
+        Assert.AreEqual(0, writes);
+    }
+
+    [TestMethod]
+    public void Activation_OffClosesBridgeBeforeRecognitionConsumesItsMailbox()
+    {
+        using (RuntimeHarness harness = new RuntimeHarness())
+        {
+            int writes = 0;
+            JusticeRecognitionBridge.BindWantedMinimum(level => { writes++; return true; });
+            long epoch = GetField<long>(harness.Script, "_activeRuntimeEpoch");
+            Assert.IsTrue(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", epoch).Applied);
+            JusticeRecognitionBridge.SetEnabled(false);
+
+            Assert.IsTrue(GetField<bool>(harness.Script, "_enabled"), "Le tick local n'a pas encore reçu OFF.");
+            Assert.IsFalse(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", epoch).Applied);
+            Assert.IsFalse(JusticeRecognitionBridge.TryApplyWantedMinimum(4));
+            Assert.AreEqual(1, writes, "Aucun nouvel appel au propriétaire du wanted après OFF.");
+            Invoke(harness.Script, "DrainQueuedCommands", 100);
+            Assert.IsFalse(GetField<bool>(harness.Script, "_enabled"));
+        }
+    }
+
+    [TestMethod]
+    public void Activation_QuickOffOnPreservesResetAndRejectsTheOldTick()
+    {
+        using (RuntimeHarness harness = new RuntimeHarness())
+        {
+            SeedRecognition(harness.Profile, 4, "PAUSEKEEP", DateTime.UtcNow);
+            SetField(harness.Script, "_currentEpisode", new PursuitEpisodeRuntime { EpisodeId = 70 });
+            SetField(harness.Script, "_pendingWantedLoss", new PendingWantedLossRuntime());
+            SetField(harness.Script, "_pendingWantedEscalation", new PendingWantedEscalationRuntime());
+            SetField(harness.Script, "_identityCache", new IdentitySnapshot());
+            SetField(harness.Script, "_hasLastPlayerPosition", true);
+            GetField<Dictionary<int, ObserverExposureRuntime>>(harness.Script, "_observerExposures")
+                .Add(17, new ObserverExposureRuntime());
+            long oldEpoch = GetField<long>(harness.Script, "_activeRuntimeEpoch");
+            int writes = 0;
+            JusticeRecognitionBridge.BindWantedMinimum(level => { writes++; return true; });
+
+            JusticeRecognitionBridge.SetEnabled(false);
+            JusticeRecognitionBridge.SetEnabled(true);
+            long newEpoch;
+            Assert.IsFalse(JusticeRecognitionBridge.TryGetRuntimeEpoch(
+                harness.Script, "Michael", out newEpoch), "Un reset non consommé interdit un nouveau tick.");
+            Assert.IsFalse(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", oldEpoch).Applied);
+
+            Invoke(harness.Script, "DrainQueuedCommands", 101);
+            Assert.IsTrue(GetField<bool>(harness.Script, "_enabled"));
+            Assert.IsNull(GetField<object>(harness.Script, "_currentEpisode"));
+            Assert.IsNull(GetField<object>(harness.Script, "_pendingWantedLoss"));
+            Assert.IsNull(GetField<object>(harness.Script, "_pendingWantedEscalation"));
+            Assert.IsNull(GetField<object>(harness.Script, "_identityCache"));
+            Assert.IsFalse(GetField<bool>(harness.Script, "_hasLastPlayerPosition"));
+            Assert.AreEqual(0, GetField<Dictionary<int, ObserverExposureRuntime>>(
+                harness.Script, "_observerExposures").Count);
+            AssertRecognitionPresent(harness.Profile, "PAUSEKEEP");
+            Assert.IsTrue(JusticeRecognitionBridge.TryGetRuntimeEpoch(harness.Script, "Michael", out newEpoch));
+            Assert.AreNotEqual(oldEpoch, newEpoch);
+            Assert.IsFalse(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", oldEpoch).Applied);
+            Assert.IsTrue(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", newEpoch).Applied);
+            Assert.AreEqual(1, writes);
+        }
+    }
+
+    [TestMethod]
+    public void Activation_ForcedSynchronizationInvalidatesWorkAlreadyInFlight()
+    {
+        using (RuntimeHarness harness = new RuntimeHarness())
+        {
+            JusticeRecognitionBridge.BindWantedMinimum(level => true);
+            long oldEpoch = GetField<long>(harness.Script, "_activeRuntimeEpoch");
+            JusticeRecognitionBridge.SetRuntimeState(true, false, "Michael");
+            Invoke(harness.Script, "DrainQueuedCommands", 103);
+            Assert.IsFalse(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", oldEpoch).Applied);
+            long freshEpoch;
+            Assert.IsTrue(JusticeRecognitionBridge.TryGetRuntimeEpoch(harness.Script, "Michael", out freshEpoch));
+            Assert.IsTrue(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", freshEpoch).Applied);
+        }
+    }
+
+    [TestMethod]
+    public void Activation_ProfileAndDetachedInstanceCannotReuseAnotherAuthority()
+    {
+        using (RuntimeHarness harness = new RuntimeHarness())
+        {
+            int writes = 0;
+            JusticeRecognitionBridge.BindWantedMinimum(level => { writes++; return true; });
+            long epoch = GetField<long>(harness.Script, "_activeRuntimeEpoch");
+            Assert.IsFalse(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Franklin", epoch).Applied);
+            JusticeRecognitionBridge.SetRuntimeState(true, false, "Franklin");
+            Assert.IsFalse(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", epoch).Applied);
+            JusticeRecognitionBridge.Detach(harness.Script);
+            long ignored;
+            Assert.IsFalse(JusticeRecognitionBridge.TryGetRuntimeEpoch(harness.Script, "Michael", out ignored));
+            Assert.IsFalse(JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                4, harness.Script, "Michael", epoch).Applied);
+            Assert.AreEqual(0, writes);
+        }
+    }
+
+    [TestMethod]
+    public void Activation_SearchZoneCacheCannotAdvertiseAnOffOrSuspendedModule()
+    {
+        using (RuntimeHarness harness = new RuntimeHarness())
+        {
+            SetField(harness.Script, "_hasActiveSearchZoneStatus", true);
+            Assert.IsTrue(JusticeRecognitionBridge.HasActiveSearchZone());
+            JusticeRecognitionBridge.SetRuntimeSuspended(true);
+            Assert.IsFalse(JusticeRecognitionBridge.HasActiveSearchZone());
+            JusticeRecognitionBridge.SetRuntimeState(false, false, "Michael");
+            Assert.IsFalse(JusticeRecognitionBridge.HasActiveSearchZone());
+            Assert.IsTrue(GetField<bool>(harness.Script, "_enabled"), "La lecture du bridge n'attend pas le tick local.");
+        }
+    }
+
+    [TestMethod]
+    public void Activation_AtomicSnapshotDeliversOffSuspensionAndProfileTogether()
+    {
+        using (RuntimeHarness harness = new RuntimeHarness())
+        {
+            JusticeRecognitionBridge.SetRuntimeState(false, true, "Franklin");
+            Assert.IsTrue(harness.Script.HasQueuedRuntimeState());
+            Invoke(harness.Script, "DrainQueuedCommands", 105);
+            Assert.IsFalse(harness.Script.HasQueuedRuntimeState());
+            Assert.IsFalse(GetField<bool>(harness.Script, "_enabled"));
+            Assert.IsTrue(GetField<bool>(harness.Script, "_runtimeSuspended"));
+            Assert.AreEqual("Franklin", GetField<string>(harness.Script, "_authoritativeProfileId"));
+            Assert.IsNull(GetField<object>(harness.Script, "_currentProfile"));
+        }
+    }
+
+    [TestMethod]
     public void SuccessfulEscapeFinalization_CreatesPlateOutfitAppearanceAndSearchZoneWithTheStabilizationContract()
     {
         using (RuntimeHarness harness = new RuntimeHarness())
@@ -2117,6 +2282,7 @@ public sealed class JusticeRecognitionRuntimeTests
         SetStaticField(bridgeType, "_desiredEnabled", null);
         SetStaticField(bridgeType, "_desiredRuntimeSuspended", null);
         SetStaticField(bridgeType, "_desiredActiveProfileId", null);
+        SetStaticField(bridgeType, "_runtimeEpoch", 0L);
         SetStaticField(bridgeType, "_wantedMinimumHandler", null);
         SetStaticField(bridgeType, "_nextCriticalCommandId", 0L);
         SetStaticField(bridgeType, "_pendingCurrentProfileCapture", null);
@@ -2191,6 +2357,18 @@ public sealed class JusticeRecognitionRuntimeTests
             SetField(Script, "_currentProfileId", "Michael");
 
             StubRuntime.NativeCallHandler = HandleNativeCall;
+            SetField(Script, "_authoritativeProfileId", "Michael");
+            JusticeRecognitionBridge.SetRuntimeState(true, false, "Michael");
+            // Les champs locaux ci-dessus représentent déjà ce snapshot. Ne pas
+            // drainer ici : certains tests préparent un WAL avant le constructeur
+            // et doivent garder la main sur son premier traitement effectif.
+            SetField(Script, "_queuedRuntimeReset", false);
+            SetField(Script, "_hasQueuedEnabledState", false);
+            SetField(Script, "_hasQueuedRuntimeSuspendedState", false);
+            SetField(Script, "_hasQueuedActiveProfile", false);
+            long epoch;
+            Assert.IsTrue(JusticeRecognitionBridge.TryGetRuntimeEpoch(Script, "Michael", out epoch));
+            SetField(Script, "_activeRuntimeEpoch", epoch);
         }
 
         public DonJJusticeRecognitionScript Script { get; private set; }

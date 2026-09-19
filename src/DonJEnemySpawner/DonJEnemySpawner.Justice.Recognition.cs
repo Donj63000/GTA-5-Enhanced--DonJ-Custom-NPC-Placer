@@ -1,3 +1,4 @@
+using System;
 using DonJ.JusticeRecognition;
 using GTA;
 
@@ -30,10 +31,52 @@ public sealed partial class DonJEnemySpawner
         JusticeRecognitionBridge.BindWantedMinimum(
             delegate(int level)
             {
-                return SetJusticeWantedMinimum(level);
+                return TryApplyJusticeRecognitionWantedMinimum(level);
             });
 
         SynchronizeJusticeRecognition(true);
+    }
+
+    private bool IsJusticeRecognitionTransitionBlocked()
+    {
+        return _justiceProfileContextBlocked || _justiceProfileSelectionPending ||
+               _justiceProfileSwitchPersistencePending || _justiceBackupRepairPending ||
+               _justicePersistenceServicesUnavailable || _justiceCriticalBarrierRevision > 0L ||
+               JusticeIsCustodyActive || _justicePolicyResetPublicationPending ||
+               _justicePolicyResetRecoveryPublicationPending || _justicePolicyResetRecoveryMask != 0 ||
+               _justiceActiveProfileResetPending || _justiceAmnestyPending ||
+               _justiceLegalReleaseFinalizationPending ||
+               _justicePoliceDeathNoCellReleaseProtectionRestorePending ||
+               _justiceCustodyTransferRollbackFinalizationPending ||
+               _justicePursuitDeathObservedDuringSuspension ||
+               _justicePendingDeathFrontWalRecord != null || _justiceCaptureRetryPending ||
+               _justiceArrestCompletionProbePending || _justiceFineDebitIntent != null ||
+               _justiceVoluntaryFinePaymentIntent != null || HasJusticeDeferredRuntimeFronts();
+    }
+
+    private bool TryApplyJusticeRecognitionWantedMinimum(int level)
+    {
+        // Deuxième barrière, côté propriétaire du wanted. Le bridge peut être
+        // appelé avant que sa suspension ait été synchronisée dans cette frame.
+        if (!_justiceInitialized || !_justiceEnabled || _justiceCaseState == null ||
+            !_justiceCaseState.Enabled ||
+            !IsJusticeCanonicalProfileSlot(_justiceActivePlayerProfileSlot) ||
+            IsJusticeRecognitionTransitionBlocked())
+            return false;
+
+        try
+        {
+            Ped player = Game.Player.Character;
+            if (!Entity.Exists(player) || IsJusticePlayerDeadSafe(player) ||
+                !IsJusticeRuntimeProfileContextCompatible() || IsJusticeRuntimeSuspended(player))
+                return false;
+
+            return SetJusticeWantedMinimum(level);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void SynchronizeJusticeRecognition(bool force = false)
@@ -63,40 +106,18 @@ public sealed partial class DonJEnemySpawner
             }
         }
 
-        bool suspended = !enabled ||
-                         gameplaySuspended ||
-                         _justiceProfileContextBlocked ||
-                         JusticeIsCustodyActive ||
-                         _justicePolicyResetPublicationPending ||
-                         _justicePolicyResetRecoveryPublicationPending ||
-                         _justicePolicyResetRecoveryMask != 0 ||
-                         _justiceActiveProfileResetPending ||
-                         _justiceAmnestyPending ||
-                         _justiceLegalReleaseFinalizationPending ||
-                         _justicePoliceDeathNoCellReleaseProtectionRestorePending ||
-                         _justiceCustodyTransferRollbackFinalizationPending;
+        bool suspended = !enabled || gameplaySuspended ||
+                         IsJusticeRecognitionTransitionBlocked();
 
-        if (force ||
-            _justiceRecognitionSynchronizedProfileSlot != profileSlot)
+        if (force || _justiceRecognitionSynchronizedProfileSlot != profileSlot ||
+            _justiceRecognitionSynchronizedEnabled != enabled ||
+            _justiceRecognitionSynchronizedSuspended != suspended)
         {
-            JusticeRecognitionBridge.SetActiveProfile(
-                GetJusticeRecognitionProfileId(profileSlot));
+            // État complet publié atomiquement, sans fenêtre profil/ON incohérente.
+            JusticeRecognitionBridge.SetRuntimeState(
+                enabled, suspended, GetJusticeRecognitionProfileId(profileSlot));
             _justiceRecognitionSynchronizedProfileSlot = profileSlot;
-        }
-
-        if (force ||
-            !_justiceRecognitionSynchronizedEnabled.HasValue ||
-            _justiceRecognitionSynchronizedEnabled.Value != enabled)
-        {
-            JusticeRecognitionBridge.SetEnabled(enabled);
             _justiceRecognitionSynchronizedEnabled = enabled;
-        }
-
-        if (force ||
-            !_justiceRecognitionSynchronizedSuspended.HasValue ||
-            _justiceRecognitionSynchronizedSuspended.Value != suspended)
-        {
-            JusticeRecognitionBridge.SetRuntimeSuspended(suspended);
             _justiceRecognitionSynchronizedSuspended = suspended;
         }
     }

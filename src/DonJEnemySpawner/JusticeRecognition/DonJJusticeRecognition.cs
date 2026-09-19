@@ -39,6 +39,9 @@ namespace DonJ.JusticeRecognition
         private static bool? _desiredEnabled;
         private static bool? _desiredRuntimeSuspended;
         private static string _desiredActiveProfileId;
+        // Change à chaque frontière ON/OFF, suspension, profil ou instance.
+        // Un tick commencé avant OFF ne retrouve pas un droit d'écriture après ON.
+        private static long _runtimeEpoch;
         private static Func<int, bool> _wantedMinimumHandler;
         private static Func<Ped, bool> _observerExclusionHandler;
 
@@ -82,6 +85,7 @@ namespace DonJ.JusticeRecognition
                 // doit jamais faire réapparaître les anciens signalements.
                 EnsureCriticalIntentsLoaded();
                 _instance = instance;
+                _runtimeEpoch = unchecked(_runtimeEpoch + 1L);
 
                 if (_desiredEnabled.HasValue)
                 {
@@ -151,6 +155,7 @@ namespace DonJ.JusticeRecognition
                 if (ReferenceEquals(_instance, instance))
                 {
                     _instance = null;
+                    _runtimeEpoch = unchecked(_runtimeEpoch + 1L);
                 }
             }
         }
@@ -161,59 +166,96 @@ namespace DonJ.JusticeRecognition
         /// </summary>
         public static void SetEnabled(bool enabled)
         {
-            DonJJusticeRecognitionScript instance;
-
             lock (SyncRoot)
             {
+                if (_desiredEnabled != enabled)
+                    _runtimeEpoch = unchecked(_runtimeEpoch + 1L);
                 _desiredEnabled = enabled;
-                instance = _instance;
-            }
-
-            if (instance != null)
-            {
-                instance.QueueSetEnabled(enabled);
+                // L'ordre de publication doit être celui de l'état désiré. Une
+                // ancienne commande ON ne peut plus dépasser un OFF plus récent.
+                if (_instance != null)
+                    _instance.QueueSetEnabled(enabled);
             }
         }
 
-        /// <summary>
-        /// Suspend les détections monde pendant une détention ou une reprise
-        /// technique, sans modifier la préférence ON/OFF ni les indices.
-        /// </summary>
+        /// <summary>Suspension technique, distincte de la préférence ON/OFF.</summary>
         public static void SetRuntimeSuspended(bool suspended)
         {
-            DonJJusticeRecognitionScript instance;
-
             lock (SyncRoot)
             {
+                if (_desiredRuntimeSuspended != suspended)
+                    _runtimeEpoch = unchecked(_runtimeEpoch + 1L);
                 _desiredRuntimeSuspended = suspended;
-                instance = _instance;
+                if (_instance != null)
+                    _instance.QueueSetRuntimeSuspended(suspended);
             }
+        }
 
-            if (instance != null)
+        /// <summary>Lie le module au propriétaire canonique du dossier.</summary>
+        public static void SetActiveProfile(string profileId)
+        {
+            string normalized = DonJJusticeRecognitionScript.NormalizeProfileId(profileId);
+            lock (SyncRoot)
             {
-                instance.QueueSetRuntimeSuspended(suspended);
+                if (!string.Equals(_desiredActiveProfileId, normalized, StringComparison.Ordinal))
+                    _runtimeEpoch = unchecked(_runtimeEpoch + 1L);
+                _desiredActiveProfileId = normalized;
+                if (_instance != null)
+                    _instance.QueueSetActiveProfile(normalized);
             }
         }
 
         /// <summary>
-        /// Lie l'identité canonique Justice au module, y compris si le héros
-        /// utilise temporairement un modèle personnalisé.
+        /// Publie une seule décision complète. Le module ne peut pas observer
+        /// le nouveau profil avec l'ancien état ON ou une ancienne suspension.
+        /// Les natives restent exclusivement exécutées sur le tick du script.
         /// </summary>
-        public static void SetActiveProfile(string profileId)
+        internal static void SetRuntimeState(bool enabled, bool suspended, string profileId)
         {
-            string normalizedProfileId =
-                DonJJusticeRecognitionScript.NormalizeProfileId(profileId);
-            DonJJusticeRecognitionScript instance;
-
+            string normalized = DonJJusticeRecognitionScript.NormalizeProfileId(profileId);
             lock (SyncRoot)
             {
-                _desiredActiveProfileId = normalizedProfileId;
-                instance = _instance;
+                // Une publication forcée invalide aussi un tick déjà en vol.
+                _runtimeEpoch = unchecked(_runtimeEpoch + 1L);
+                _desiredEnabled = enabled;
+                _desiredRuntimeSuspended = suspended;
+                _desiredActiveProfileId = normalized;
+                if (_instance != null)
+                    _instance.QueueRuntimeState(enabled, suspended, normalized);
             }
+        }
 
-            if (instance != null)
+        // Appelé sous SyncRoot : aucun état inconnu n'autorise la reconnaissance.
+        private static bool IsRuntimeAllowedUnsafe()
+        {
+            return _desiredEnabled == true && _desiredRuntimeSuspended == false &&
+                   _desiredActiveProfileId != null;
+        }
+
+        internal static bool TryGetRuntimeEpoch(
+            DonJJusticeRecognitionScript source, string profileId, out long epoch)
+        {
+            lock (SyncRoot)
             {
-                instance.QueueSetActiveProfile(normalizedProfileId);
+                epoch = _runtimeEpoch;
+                return source != null && ReferenceEquals(_instance, source) &&
+                       IsRuntimeAllowedUnsafe() && !source.HasQueuedRuntimeState() &&
+                       string.Equals(_desiredActiveProfileId, profileId, StringComparison.Ordinal);
+            }
+        }
+
+        internal static WantedMinimumApplicationResult ApplyWantedMinimumForProfileAtomically(
+            int level, DonJJusticeRecognitionScript source, string profileId, long epoch)
+        {
+            lock (SyncRoot)
+            {
+                if (source == null || !ReferenceEquals(_instance, source) ||
+                    epoch != _runtimeEpoch || !IsRuntimeAllowedUnsafe() ||
+                    source.HasQueuedRuntimeState() ||
+                    !string.Equals(_desiredActiveProfileId, profileId, StringComparison.Ordinal))
+                    return new WantedMinimumApplicationResult(_wantedMinimumHandler != null, false);
+
+                return ApplyWantedMinimumAtomically(level);
             }
         }
 
@@ -252,6 +294,12 @@ namespace DonJ.JusticeRecognition
                 if (handler == null)
                 {
                     return WantedMinimumApplicationResult.MissingHandler;
+                }
+                if (!IsRuntimeAllowedUnsafe())
+                {
+                    // La présence du delegate ne constitue pas une autorisation.
+                    // OFF ferme ce passage avant même le prochain tick du module.
+                    return new WantedMinimumApplicationResult(true, false);
                 }
 
                 try
@@ -987,10 +1035,10 @@ namespace DonJ.JusticeRecognition
             lock (SyncRoot)
             {
                 instance = _instance;
+                return IsRuntimeAllowedUnsafe() && instance != null &&
+                       !instance.HasQueuedRuntimeState() &&
+                       instance.HasActiveSearchZoneCached();
             }
-
-            return instance != null &&
-                   instance.HasActiveSearchZoneCached();
         }
     }
 
@@ -1557,7 +1605,9 @@ namespace DonJ.JusticeRecognition
         // Je réserve ce chemin aux tests de contention, sans toucher au dossier GTA.
         private string _initializationDirectoryOverride = null;
         private bool _enabled;
-        private bool _runtimeSuspended;
+        private bool _runtimeSuspended = true;
+        private long _activeRuntimeEpoch;
+        private bool _queuedRuntimeReset;
 
         private RecognitionProfileData _currentProfile;
         private string _currentProfileId;
@@ -1660,6 +1710,7 @@ namespace DonJ.JusticeRecognition
             {
                 _hasQueuedEnabledState = true;
                 _queuedEnabledState = enabled;
+                _queuedRuntimeReset |= !enabled;
             }
         }
 
@@ -1669,6 +1720,7 @@ namespace DonJ.JusticeRecognition
             {
                 _hasQueuedRuntimeSuspendedState = true;
                 _queuedRuntimeSuspendedState = suspended;
+                _queuedRuntimeReset |= suspended;
             }
         }
 
@@ -1676,6 +1728,34 @@ namespace DonJ.JusticeRecognition
         {
             lock (_commandSync)
             {
+                _hasQueuedActiveProfile = true;
+                _queuedActiveProfileId = NormalizeProfileId(profileId);
+                _queuedRuntimeReset = true;
+            }
+        }
+
+        internal bool HasQueuedRuntimeState()
+        {
+            lock (_commandSync)
+            {
+                // Un nouveau droit de tick ne peut être acquis avant d'avoir
+                // consommé le reset ON/OFF, même si l'état désiré est déjà ON.
+                return _queuedRuntimeReset || _hasQueuedEnabledState ||
+                       _hasQueuedRuntimeSuspendedState || _hasQueuedActiveProfile;
+            }
+        }
+
+        internal void QueueRuntimeState(bool enabled, bool suspended, string profileId)
+        {
+            lock (_commandSync)
+            {
+                // Ce latch est cumulatif : OFF puis ON avant un seul tick ne doit
+                // jamais effacer l'obligation d'annuler les anciens événements.
+                _queuedRuntimeReset = true;
+                _hasQueuedEnabledState = true;
+                _queuedEnabledState = enabled;
+                _hasQueuedRuntimeSuspendedState = true;
+                _queuedRuntimeSuspendedState = suspended;
                 _hasQueuedActiveProfile = true;
                 _queuedActiveProfileId = NormalizeProfileId(profileId);
             }
@@ -1853,6 +1933,17 @@ namespace DonJ.JusticeRecognition
                 if (_runtimeSuspended)
                 {
                     _lastWantedLevel = currentWanted;
+                    ResetCurrentProfileRuntimeState();
+                    RemoveSearchZoneBlip();
+                    _store.FlushIfDue(nowGameTime);
+                    return;
+                }
+
+                if (!JusticeRecognitionBridge.TryGetRuntimeEpoch(
+                        this, _currentProfileId, out _activeRuntimeEpoch))
+                {
+                    // L'état local peut encore appartenir au tick précédent.
+                    // Un OFF, une autre instance ou un switch annule ce travail.
                     ResetCurrentProfileRuntimeState();
                     RemoveSearchZoneBlip();
                     _store.FlushIfDue(nowGameTime);
@@ -2289,6 +2380,7 @@ namespace DonJ.JusticeRecognition
 
         private void DrainQueuedCommands(int nowGameTime)
         {
+            bool resetRuntime;
             bool hasEnabledState;
             bool enabledState;
 
@@ -2311,6 +2403,8 @@ namespace DonJ.JusticeRecognition
 
             lock (_commandSync)
             {
+                resetRuntime = _queuedRuntimeReset;
+                _queuedRuntimeReset = false;
                 hasEnabledState = _hasQueuedEnabledState;
                 enabledState = _queuedEnabledState;
                 _hasQueuedEnabledState = false;
@@ -2354,6 +2448,12 @@ namespace DonJ.JusticeRecognition
                     clearAllProfiles = _queuedClearAllProfiles;
                     _queuedClearAllProfiles = null;
                 }
+            }
+
+            if (resetRuntime)
+            {
+                ResetCurrentProfileRuntimeState();
+                RemoveSearchZoneBlip();
             }
 
             if (hasEnabledState)
@@ -3039,7 +3139,19 @@ namespace DonJ.JusticeRecognition
             _pendingWantedEscalation = null;
             _observerExposures.Clear();
             _insideSearchZone = false;
+            _identityCache = null;
+            _identityCachePedHandle = 0;
+            _hasLastPlayerPosition = false;
+            _observerRemovalBuffer.Clear();
+            _wantedWriteGuardUntil = 0;
+            _skipNaturalEscalationUntil = 0;
+            _nextIdentityRefresh = 0;
+            _nextRecognitionScan = 0;
+            _nextPursuitCapture = 0;
+            _nextRepaintCheck = 0;
+            _nextStatusRefresh = 0;
             ClearWantedLossSuppression();
+            SetActiveSearchZoneStatusCache(false);
         }
 
         private void ClearWantedLossSuppression()
@@ -4087,8 +4199,8 @@ namespace DonJ.JusticeRecognition
             }
 
             WantedMinimumApplicationResult application =
-                JusticeRecognitionBridge.ApplyWantedMinimumAtomically(
-                    targetWanted);
+                JusticeRecognitionBridge.ApplyWantedMinimumForProfileAtomically(
+                    targetWanted, this, _currentProfileId, _activeRuntimeEpoch);
 
             if (!application.HandlerPresent)
             {
@@ -5356,7 +5468,9 @@ namespace DonJ.JusticeRecognition
         private void EnsureSearchZoneBlip(
             DateTime nowUtc)
         {
-            if (!_enabled ||
+            long epoch;
+            if (!_enabled || _runtimeSuspended ||
+                !JusticeRecognitionBridge.TryGetRuntimeEpoch(this, _currentProfileId, out epoch) ||
                 _currentProfile == null ||
                 !IsSearchZoneUsable(
                     _currentProfile.SearchZone,
@@ -5386,7 +5500,9 @@ namespace DonJ.JusticeRecognition
         {
             RemoveSearchZoneBlip();
 
-            if (!_enabled ||
+            long epoch;
+            if (!_enabled || _runtimeSuspended ||
+                !JusticeRecognitionBridge.TryGetRuntimeEpoch(this, _currentProfileId, out epoch) ||
                 _currentProfile == null ||
                 !IsSearchZoneUsable(
                     _currentProfile.SearchZone,

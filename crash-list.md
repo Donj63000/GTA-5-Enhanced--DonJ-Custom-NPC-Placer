@@ -2905,3 +2905,27 @@ Ce fichier conserve une trace ecrite de tous les crashs, erreurs, regressions et
 - Action menée: Ajout dans la seule fixture du patch d'un XML Justice v2 vide valide avec backup, selon le modèle existant SeedCanonicalJusticeState. Aucun changement des corrections de production du patch ni des sauvegardes du joueur.
 - Vérification: 21/21 scénarios caméra réussis après isolation, compilation Release et ABI déjà validées; 929/929 autres tests réussis avant cette modification limitée à la fixture. Diff relu. La qualification finale utilise ensuite l'API NIB réelle avant déploiement.
 - Résolution: Tests indépendants des sauvegardes installées; aucun scénario supprimé ni assertion affaiblie. Vérification visuelle en jeu restant à effectuer.
+
+## 2026-09-19 03:38:56 +02:00 — Intégration du patch activation Justice
+
+- Statut: Causes identifiées, fixtures adaptées; qualification finale à terminer.
+- Contexte: Application du patch justice_activation_desactivation.patch sur main à la révision 12eb7e5.
+- Symptôme: 710/712 tests réussis avec l'API réelle; deux contrats de tests incompatibles avec le patch. La restauration initiale NuGet et Python étaient bloqués par les permissions du sandbox.
+- Sources vérifiées: TestResults/justice-activation-final/justice-activation-final.trx; TestResults/justice-activation-targeted/targeted.trx; collecte bug-reports/20260919-033811-justice-activation-tests-failed (logs NIB, ScriptHookV, Scripts/DonJCustomNpcPlacer et reconnaissance, chemins Enhanced et legacy).
+- Extraits utiles: TRX final : ancien texte « Dossier, casier et mandat conservés » absent; fixture de zone locale sans autorité ON. TRX ciblé : ancienne aide « Désactiver ne supprime aucun dossier » absente.
+- Analyse / hypothèse: Le patch change volontairement les textes OFF et impose une autorité explicite au bridge; les anciens tests ne reflétaient pas ces contrats. Aucun log exploitable trouvé pour attribuer ces échecs hors jeu à un crash GTA. Les exécutions initialement supposées bloquées étaient longues; le rapport final confirme zéro timeout.
+- Action menée: Adaptation des assertions aux textes fournis et initialisation/restauration de l'autorité statique dans la fixture du mandat. Code de production du patch conservé. Relance avec les permissions nécessaires pour NuGet/Python.
+- Vérification: 34/34 contrôles structurels; compilation Release sans erreur; ABI valide. Relance des tests et de la suite de sécurité après ces adaptations.
+- Résolution: Intégration limitée aux fixtures et au journal; qualification finale consignée dans les rapports TRX et le compte rendu de livraison.
+
+## 2026-09-19 18:19:23 +02:00 — Résolution des contrats de tests du patch Justice
+
+- Statut: Résolu hors jeu.
+- Contexte: Qualification des adaptations de fixtures après les échecs du 19 septembre à 03:38.
+- Symptôme: Anciens textes OFF/aide et fixture sans autorité du bridge, constatés dans les rapports précédents.
+- Sources vérifiées: TestResults/justice-activation-targeted/targeted-fixed.trx; TestResults/safety-20260919-034202/safety-tests.trx; TestResults/safety-20260919-181450/summary.txt et safety-tests.trx; collecte initiale bug-reports/20260919-033811-justice-activation-tests-failed.
+- Extraits utiles: « Réussi » : 3/3 scénarios ciblés, 712/712 avec l'API réelle, 973/973 avec l'API simulée; suite sécurité OK.
+- Analyse / hypothèse: Les fixtures reflètent désormais les nouvelles exigences d'autorisation et les textes du patch. Aucun changement du code de production fourni n'a été nécessaire.
+- Action menée: Adaptation ciblée des tests, restauration de leurs champs statiques à la fin du scénario, relecture du diff et vérification de présence de tous les blocs du patch.
+- Vérification: Contrôles structurels 34/34, builds Release sans erreur, ABI valide, package de contrôle validé et refus de déploiement d'une source sale vérifié.
+- Résolution: Régression de tests corrigée. La livraison du binaire après commit et la vérification manuelle en jeu restent des étapes distinctes.

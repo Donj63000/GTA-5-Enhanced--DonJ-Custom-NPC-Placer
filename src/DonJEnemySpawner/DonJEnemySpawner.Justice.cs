@@ -692,6 +692,18 @@ public sealed partial class DonJEnemySpawner
             wantedLevel = GetJusticeWantedLevelSafe();
         }
 
+        if (!_justiceEnabled)
+        {
+            // Les reprises de sauvegarde, de profil et de paiement ci-dessus
+            // restent possibles. Aucun front policier, jugement ou mandat nouveau
+            // ne doit en revanche être traité par le contrôleur gameplay sur OFF.
+            if (arrestStateValid)
+                _justiceWasBeingArrested = arrested;
+            _justiceWasDead = dead;
+            _justiceLastWantedLevel = wantedLevel;
+            return;
+        }
+
         // Un changement ON/OFF ne modifie jamais le wanted GTA.
         //
         // Les écritures wanted restantes concernent uniquement les véritables
@@ -2171,7 +2183,8 @@ public sealed partial class DonJEnemySpawner
             PauseJusticeRuntimeWithoutErasingCase();
 
             ShowStatus(
-                "Justice avancée DÉSACTIVÉE. Dossier, casier et mandat conservés.",
+                "Justice avancée DÉSACTIVÉE pour " + GetJusticePlayedProfileDisplay() +
+                ". Police GTA normale; dossier conservé.",
                 4600);
 
             LogInfo(
@@ -2289,6 +2302,20 @@ public sealed partial class DonJEnemySpawner
         _justiceRecentVictims.Clear();
         _justiceRecentVehicles.Clear();
         _justiceAllyTokens.Clear();
+
+        // Aucun CLEAR_DAMAGE différé ni jeton d'auto-défense ne franchit OFF.
+        // Je garde les buffers préalloués ; seul leur contenu actif est invalidé.
+        _justiceDamageFrontCount = 0;
+        _justiceSelfDefenseUntilByVictim.Clear();
+        if (_justiceSelfDefenseThreatByVictim != null)
+            _justiceSelfDefenseThreatByVictim.Clear();
+        _justiceWrittenWantedLevel = 0;
+        _justiceWrittenWantedExpiresAtMs = 0L;
+        _justiceNextFrontScanAtMs = 0L;
+        _justiceNextCrimeScanAtMs = 0L;
+        _justiceNextIncidentProcessingAtMs = 0L;
+        _justiceNextWarrantScanAtMs = 0L;
+        _justiceNextAllyAttributionScanAtMs = 0L;
 
         ResetJusticeWitnessSnapshots();
         ClearLatchedJusticeWantedRise();

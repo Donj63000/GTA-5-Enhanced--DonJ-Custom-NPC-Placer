@@ -24,15 +24,24 @@ public sealed class JusticeLegacyWarrantRecognitionContractTests
             BindingFlags.Static | BindingFlags.NonPublic);
         Assert.IsNotNull(bridgeInstance);
         object previousInstance = bridgeInstance.GetValue(null);
+        string[] authorityNames =
+            { "_desiredEnabled", "_desiredRuntimeSuspended", "_desiredActiveProfileId" };
+        FieldInfo[] authorityFields = Array.ConvertAll(authorityNames, name =>
+            typeof(JusticeRecognitionBridge).GetField(name, BindingFlags.Static | BindingFlags.NonPublic));
+        object[] previousAuthority = Array.ConvertAll(authorityFields, field => field.GetValue(null));
 
-        // Je fournis au pont uniquement son cache thread-safe : ce test ne lit
-        // aucune native et prouve qu'un module ON sans zone ne coupe pas le repli.
+        // Je simule une autorité synchronisée avec une boîte consommée, sans
+        // native, pour vérifier qu'un module ON sans zone laisse vivre le repli.
         SetField(recognition, "_statusSync", new object());
+        SetField(recognition, "_commandSync", new object());
         SetField(recognition, "_hasActiveSearchZoneStatus", true);
         bridgeInstance.SetValue(null, recognition);
 
         try
         {
+            authorityFields[0].SetValue(null, (bool?)true);
+            authorityFields[1].SetValue(null, (bool?)false);
+            authorityFields[2].SetValue(null, "Franklin");
             SetField(script, "_justiceActivePlayerProfileSlot", 1);
             SetField(script, "_justiceRecognitionSynchronizedEnabled", (bool?)true);
             SetField(script, "_justiceRecognitionSynchronizedSuspended", (bool?)false);
@@ -74,6 +83,8 @@ public sealed class JusticeLegacyWarrantRecognitionContractTests
         finally
         {
             bridgeInstance.SetValue(null, previousInstance);
+            for (int index = 0; index < authorityFields.Length; index++)
+                authorityFields[index].SetValue(null, previousAuthority[index]);
         }
     }
 

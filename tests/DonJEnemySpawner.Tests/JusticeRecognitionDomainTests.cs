@@ -14,6 +14,7 @@ public sealed class JusticeRecognitionDomainTests
     {
         // Je rends le pont statique neutre afin qu'un test ne contamine jamais le suivant.
         JusticeRecognitionBridge.UnbindWantedMinimum();
+        JusticeRecognitionBridge.SetRuntimeState(false, true, null);
     }
 
     [TestMethod]
@@ -215,6 +216,7 @@ public sealed class JusticeRecognitionDomainTests
             });
 
         Assert.IsTrue(JusticeRecognitionBridge.HasWantedMinimumHandler());
+        JusticeRecognitionBridge.SetRuntimeState(true, false, "Michael");
         WantedMinimumApplicationResult accepted =
             JusticeRecognitionBridge.ApplyWantedMinimumAtomically(4);
         Assert.IsTrue(accepted.HandlerPresent);

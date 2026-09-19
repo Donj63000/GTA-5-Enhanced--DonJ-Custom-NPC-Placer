@@ -684,6 +684,10 @@ public sealed class JusticeVoluntaryPaymentTests
             SetField(script, "_justiceEnabled", true);
             SetField(script, "_justiceWantedLossPending", true);
             SetField(script, "_justiceDamagePairBaselineCount", 9);
+            SetField(script, "_justiceDamageFrontCount", 3);
+            SetField(script, "_justiceWrittenWantedLevel", 4);
+            SetField(script, "_justiceWrittenWantedExpiresAtMs", 1000L);
+            GetField<IDictionary>(script, "_justiceSelfDefenseUntilByVictim").Add("victim-before-off", 1000L);
             SetField(script, "_justiceDamageFrontPrimingPending", true);
             SetField(script, "_justiceAimTargetHandle", 42);
             SetField(script, "_justicePursuitActive", true);
@@ -701,6 +705,10 @@ public sealed class JusticeVoluntaryPaymentTests
             Assert.IsFalse(GetField<bool>(script, "_justiceDamageFrontPrimingPending"));
             Assert.AreEqual(0, GetField<int>(script, "_justiceAimTargetHandle"));
             Assert.IsFalse(GetField<bool>(script, "_justicePursuitActive"));
+            Assert.AreEqual(0, GetField<int>(script, "_justiceDamageFrontCount"));
+            Assert.AreEqual(0, GetField<int>(script, "_justiceWrittenWantedLevel"));
+            Assert.AreEqual(0L, GetField<long>(script, "_justiceWrittenWantedExpiresAtMs"));
+            Assert.AreEqual(0, GetField<IDictionary>(script, "_justiceSelfDefenseUntilByVictim").Count);
             Assert.IsTrue(
                 GetField<bool>(script, "_justiceStateDirty"),
                 "La pause doit rester effective et être retentée par le writer.");
@@ -709,6 +717,59 @@ public sealed class JusticeVoluntaryPaymentTests
             Assert.AreEqual(episodeBeforePause, state.WantedEpisodeId);
             StringAssert.Contains(GetField<string>(script, "_statusText"), "DÉSACTIVÉE");
         });
+    }
+
+    [TestMethod]
+    public void JusticeToggle_RecognitionOwnerRejectsOffEvenWithAStaleBoundBridge()
+    {
+        object script = CreatePaymentScript(0L);
+        int writes = 0;
+        SetField(script, "_justiceWantedWriteOverride", new Func<int, bool>(level => { writes++; return true; }));
+        SetField(script, "_justiceEnabled", false);
+        Assert.IsFalse((bool)Invoke(script, "TryApplyJusticeRecognitionWantedMinimum", 4));
+        SetField(script, "_justiceEnabled", true);
+        GetCase(script).Enabled = false;
+        Assert.IsFalse((bool)Invoke(script, "TryApplyJusticeRecognitionWantedMinimum", 4));
+        Assert.AreEqual(0, writes);
+    }
+
+    [DataTestMethod]
+    [DataRow("_justiceProfileContextBlocked")]
+    [DataRow("_justiceProfileSelectionPending")]
+    [DataRow("_justiceProfileSwitchPersistencePending")]
+    [DataRow("_justiceBackupRepairPending")]
+    [DataRow("_justicePersistenceServicesUnavailable")]
+    [DataRow("_justiceCustodyRuntimeActive")]
+    [DataRow("_justiceCaptureRetryPending")]
+    [DataRow("_justiceArrestCompletionProbePending")]
+    [DataRow("_justiceLegalReleaseFinalizationPending")]
+    public void JusticeToggle_RecognitionOwnerRejectsUnsafeTransitions(string blockedField)
+    {
+        object script = CreatePaymentScript(0L);
+        Assert.IsFalse((bool)Invoke(script, "IsJusticeRecognitionTransitionBlocked"));
+        SetField(script, blockedField, true);
+        Assert.IsTrue((bool)Invoke(script, "IsJusticeRecognitionTransitionBlocked"));
+        Assert.IsFalse((bool)Invoke(script, "TryApplyJusticeRecognitionWantedMinimum", 4));
+    }
+
+    [TestMethod]
+    public void JusticeToggle_RestoreOnlyWorkDoesNotEnterTheCustodyController()
+    {
+        object script = CreatePaymentScript(0L);
+        GetCase(script).Enabled = false;
+        GetCase(script).Phase = JusticePhase.AtLarge;
+        GetCase(script).CustodyEpisodeId = string.Empty;
+        SetField(script, "_justiceEnabled", false);
+        SetField(script, "_justicePoliceSuppressionRestorePending", true);
+        Assert.IsTrue((bool)Invoke(script, "HasJusticeCustodyRecoveryState"));
+        Assert.IsFalse((bool)Invoke(script, "HasJusticeCustodyControllerWork"));
+        // Le contrôleur doit sortir AVANT toute native, même avec un ped absent.
+        Invoke(script, "JusticeUpdateCustody", new object[] { null, 1000 });
+        Assert.IsTrue(GetField<bool>(script, "_justicePoliceSuppressionRestorePending"),
+            "Le retry dédié reste propriétaire de la restitution police.");
+        SetField(script, "_justiceCustodyRuntimeActive", true);
+        Assert.IsTrue((bool)Invoke(script, "HasJusticeCustodyControllerWork"),
+            "Une vraie détention conserve sa voie de reprise, même sous OFF.");
     }
 
     [TestMethod]

@@ -837,9 +837,20 @@ public sealed partial class DonJEnemySpawner
         }
     }
 
+    private bool HasJusticeCustodyControllerWork()
+    {
+        // Un reliquat police/inventaire n'est pas une détention. Ses méthodes
+        // Retry dédiées restent actives sur OFF, sans arrêter Placement/Terminator
+        // ni engager un transfert, une peine ou une surveillance de cellule.
+        return JusticeIsCustodyActive || _justiceFineDebitIntent != null ||
+               _justiceCustodyTransferRollbackFinalizationPending ||
+               HasJusticeCustodyOperation(JusticeOperationKind.TransferRollback) ||
+               HasJusticeCustodyOperation(JusticeOperationKind.DiscardInventory);
+    }
+
     private void JusticeUpdateCustody(Ped player, int now)
     {
-        if (_justiceCaseState == null)
+        if (_justiceCaseState == null || !HasJusticeCustodyControllerWork())
         {
             return;
         }
@@ -849,7 +860,8 @@ public sealed partial class DonJEnemySpawner
         {
             return;
         }
-        if (!StopJusticeConcurrentPlayerProtectionModes())
+        if (IsJusticeTemporaryPlayerProtectionForbidden() &&
+            !StopJusticeConcurrentPlayerProtectionModes())
         {
             // Je ne fais progresser ni transfert ni peine tant qu'un autre mode
             // possède encore une protection ou un gel du joueur.
